@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +26,31 @@ import (
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/proxy/executor"
 )
+
+// ClassifyUpstreamNetworkError classifies network errors during probe/models fetch.
+// Parity with decolua/9router#4843.
+func ClassifyUpstreamNetworkError(err error) (int, string, string) {
+	if err == nil {
+		return http.StatusOK, "", ""
+	}
+	var netErr net.Error
+	if (errors.As(err, &netErr) && netErr.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout, "UPSTREAM_TIMEOUT", "Request timeout - provider node not responding"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return http.StatusBadGateway, "UPSTREAM_UNREACHABLE", "DNS lookup failed - invalid domain or network issue"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+		return http.StatusBadGateway, "UPSTREAM_UNREACHABLE", "Connection refused - provider node offline or unreachable"
+	}
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return http.StatusBadGateway, "UPSTREAM_UNREACHABLE", "SSL certificate verification failed"
+	}
+	// Fallback for general network or system error
+	return http.StatusBadGateway, "UPSTREAM_UNREACHABLE", err.Error()
+}
 
 // validateProbeTimeout mirrors upstream's AbortSignal.timeout(8000) on probes.
 const validateProbeTimeout = 8 * time.Second
