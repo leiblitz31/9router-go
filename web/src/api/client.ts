@@ -289,10 +289,19 @@ export interface HermesAuxRole {
   base_url: string
 }
 
+export interface HermesSttBlock {
+  enabled: string | null
+  provider: string | null
+  model: string | null
+  base_url: string | null
+  api_key: string | null
+}
+
 export interface HermesSettings {
   model: HermesModelBlock | null
   delegation: HermesDelegationBlock | null
   auxiliary: Record<string, HermesAuxRole>
+  stt: HermesSttBlock | null
 }
 
 export interface HermesSettingsResponse {
@@ -300,6 +309,7 @@ export interface HermesSettingsResponse {
   profile?: { name: string; dir: string; isDefault: boolean }
   settings: HermesSettings | null
   has9Router?: boolean
+  has9RouterStt?: boolean
   configPath?: string
   message?: string
 }
@@ -317,6 +327,8 @@ export interface HermesApplyPayload {
   model?: string
   selections?: HermesSelection[]
   applyToAll?: boolean
+  /** STT wiring; always sent so Apply can also turn it off. */
+  audio?: { enabled: boolean; model: string }
 }
 
 export interface HermesApplyResult {

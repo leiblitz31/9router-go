@@ -49,13 +49,24 @@ type hermesSettingsRequest struct {
 	Model      string            `json:"model"`
 	ApplyToAll any               `json:"applyToAll"`
 	Selections []hermesSelection `json:"selections"`
+	// Audio wires Hermes speech-to-text through 9router's
+	// /v1/audio/transcriptions (upstream d6431f8b #4763). Absent = leave the
+	// stt section untouched (legacy CLI callers).
+	Audio *hermesAudioRequest `json:"audio"`
+}
+
+// hermesAudioRequest carries the STT wiring toggle.
+type hermesAudioRequest struct {
+	Enabled bool   `json:"enabled"`
+	Model   string `json:"model"`
 }
 
 // hermesSettings is the parsed config of one profile home.
 type hermesSettings struct {
-	Model      *hermesModelBlock        `json:"model"`
-	Delegation *hermesDelegationBlock   `json:"delegation"`
+	Model      *hermesModelBlock      `json:"model"`
+	Delegation *hermesDelegationBlock `json:"delegation"`
 	Auxiliary  map[string]hermesAuxRole `json:"auxiliary"`
+	Stt        *hermesSttBlock       `json:"stt"`
 }
 
 // hermesApplyResult is one line of the applyToAll report.
@@ -99,11 +110,12 @@ func (h *HermesHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := parseHermesSettings(yaml)
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-		"installed":  true,
-		"profile":    home,
-		"settings":   settings,
-		"has9Router": settings.has9RouterConfig(),
-		"configPath": home.ConfigPath,
+		"installed":    true,
+		"profile":      home,
+		"settings":     settings,
+		"has9Router":   settings.has9RouterConfig(),
+		"has9RouterStt": is9RouterStt(settings.Stt),
+		"configPath":   home.ConfigPath,
 	})
 }
 
@@ -117,7 +129,7 @@ func (h *HermesHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 	}
 	selections := req.selections()
 	baseURL := strings.TrimSuffix(strings.TrimSpace(req.BaseURL), "/")
-	if baseURL == "" || len(selections) == 0 {
+	if baseURL == "" || (len(selections) == 0 && req.Audio == nil) {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "baseUrl and model are required")
 		return
 	}
@@ -142,6 +154,21 @@ func (h *HermesHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 	for _, sel := range selections {
 		yaml = upsertHermesSelection(yaml, sel.Role, sel.Model, baseURL)
 	}
+	// enabled:true needs a provider-qualified STT model (9router routes on
+	// it); enabled:false removes exactly the wiring this endpoint writes —
+	// never a user's own STT provider choice.
+	if req.Audio != nil {
+		if req.Audio.Enabled {
+			audioModel := strings.TrimSpace(req.Audio.Model)
+			if audioModel == "" {
+				handlerutil.WriteJSONError(w, http.StatusBadRequest, "audio.model is required when enabling audio transcription")
+				return
+			}
+			yaml = upsertStt9Router(yaml, audioModel, baseURL)
+		} else if is9RouterStt(parseHermesSttBlock(yaml)) {
+			yaml = removeStt9Router(yaml)
+		}
+	}
 	if err := writeHermesConfig(home, yaml); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "Failed to update hermes settings")
 		return
@@ -159,6 +186,7 @@ func (h *HermesHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		"success":    true,
 		"message":    message,
 		"profile":    home,
+		"stt9Router": is9RouterStt(parseHermesSttBlock(yaml)),
 		"configPath": home.ConfigPath,
 	})
 }
@@ -313,7 +341,7 @@ func refreshCustomBlocks(yaml, baseURL string) string {
 // A block owned by another provider is this profile's own configuration and
 // must survive a reset, so it is kept and reported instead of deleted.
 func resetHermesConfig(yaml string) (remaining string, removed map[string]any, kept []string) {
-	removed = map[string]any{"model": false, "delegation": false, "auxiliary": []string{}}
+	removed = map[string]any{"model": false, "delegation": false, "auxiliary": []string{}, "stt": false}
 	kept = []string{}
 	removedAux := []string{}
 
@@ -343,6 +371,20 @@ func resetHermesConfig(yaml string) (remaining string, removed map[string]any, k
 		}
 	}
 	removed["auxiliary"] = removedAux
+
+	if sttCfg := parseHermesSttBlock(yaml); sttCfg != nil {
+		if is9RouterStt(sttCfg) {
+			yaml = removeStt9Router(yaml)
+			removed["stt"] = true
+			// User settings inside the block (language, local, ...) survive —
+			// report the remainder as kept, like any other preserved section.
+			if parseHermesSttBlock(yaml) != nil {
+				kept = append(kept, "stt")
+			}
+		} else {
+			kept = append(kept, "stt")
+		}
+	}
 	return strings.TrimLeft(yaml, "\n"), removed, kept
 }
 
@@ -352,6 +394,7 @@ func parseHermesSettings(yaml string) hermesSettings {
 		Model:      parseHermesModelBlock(yaml),
 		Delegation: parseHermesDelegationBlock(yaml),
 		Auxiliary:  parseHermesAuxRoles(yaml),
+		Stt:        parseHermesSttBlock(yaml),
 	}
 }
 

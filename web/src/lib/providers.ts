@@ -354,6 +354,25 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "nous",
+    "name": "Nous Research",
+    "category": "oauth",
+    "alias": "nous",
+    "color": "#7C3AED",
+    "icon": "psychology",
+    "website": "https://nousresearch.com",
+    "notice": {"text": "Connect with OAuth Device Code (free account, no payment required) or a Nous Portal API key.", "apiKeyUrl": "https://portal.nousresearch.com/api-keys", "signupUrl": "https://portal.nousresearch.com"},
+    "noAuth": false,
+    "authModes": ["oauth", "apikey"],
+    "authType": "oauth",
+    "priority": 65,
+    "passthroughModels": true,
+    "serviceKinds": [
+      "llm",
+      "imageToText"
+    ]
+  },
+  {
     "id": "muse",
     "name": "Muse (Meta Model API)",
     "category": "oauth",

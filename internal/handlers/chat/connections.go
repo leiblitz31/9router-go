@@ -572,6 +572,12 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		return nil, fmt.Errorf("provider %q has no baseUrl in connection data and is not in KnownProviders", provider)
 	}
 
+	// Stamp the node id on every config: a few rules key off the node SHAPE
+	// rather than the upstream host (the Nous attribution rule only applies to
+	// a custom `openai-compatible-*` node). Clones below inherit it, but a relay
+	// rewrite must not lose it, so it is re-applied on the final config.
+	baseCfg.ProviderID = provider
+
 	// Check if this connection uses an Edge Relay Proxy Pool (Vercel, Cloudflare, Deno)
 	if connData != nil {
 		var relayURL string

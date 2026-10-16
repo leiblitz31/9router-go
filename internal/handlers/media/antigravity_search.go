@@ -266,7 +266,7 @@ func (h *MediaHandler) tryAntigravitySearchConn(w http.ResponseWriter, r *http.R
 	}
 	upstreamStart := time.Now()
 	resp, err := client.Do(httpReq)
-	if err != nil {
+	if err != nil && mayRetryDirect(client) {
 		// Transport-level failure (proxy block, DNS, reset): retry once direct
 		// before giving up on this account. Never retry on a real upstream
 		// status — the direct client hits the same mock/sandbox and would

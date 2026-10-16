@@ -13,15 +13,15 @@ import (
 	"time"
 
 	"9router/proxy/internal/handlerutil"
-	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy"
 )
 
 // deviceProviders lists providers supporting the device-code family.
 // kimi-coding aliases to kimi (dual-auth merge, like upstream).
 var deviceProviders = []string{
 	"qoder", "qoder-cn", "kilocode", "grok-cli", "github", "kiro", "kimi", "kimi-coding",
-	"codebuddy-cn", "codebuddy-intl", "muse", "minimax-code", "minimax-code-global",
+	"codebuddy-cn", "codebuddy-intl", "muse", "minimax-code", "minimax-code-global", "nous",
 }
 
 func deviceSupported(p string) bool {
@@ -200,6 +200,8 @@ func deviceStart(provider, region, startURL, authMethod string) (map[string]any,
 		return codebuddyStart(provider)
 	case "muse":
 		return museStart()
+	case "nous":
+		return nousStart()
 	case "minimax-code", "minimax-code-global":
 		return minimaxCodeStart(provider)
 	default:
@@ -470,6 +472,8 @@ func devicePoll(provider, code string, session map[string]any) (deviceTokens, st
 		t, err = codebuddyPoll(provider, code)
 	case "muse":
 		t, err = musePoll(code)
+	case "nous":
+		t, err = nousPoll(code)
 	case "minimax-code", "minimax-code-global":
 		t, err = minimaxCodePoll(provider, code, session)
 	default:
@@ -502,6 +506,7 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 		"qoder": "Qoder", "qoder-cn": "Qoder CN", "kilocode": "KiloCode", "grok-cli": "Grok CLI",
 		"github": "GitHub", "kiro": "Kiro", "kimi": "Kimi", "muse": "Muse",
 		"codebuddy-cn": "CodeBuddy", "codebuddy-intl": "CodeBuddy",
+		"nous": "Nous Research",
 	}[provider])
 	id := provider + "-" + shortHash(t.access)
 	dataMap := map[string]any{"apiKey": t.access, "accessToken": t.access}

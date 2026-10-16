@@ -33,6 +33,7 @@
   import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
   import { loadDeprecations, refreshDeprecations, subscribeDeprecations } from '../../lib/modelDeprecations.svelte'
   import DeprecatedBadge from '../../lib/ui/DeprecatedBadge.svelte'
+  import Tooltip from '../../lib/ui/Tooltip.svelte'
   import Menu from '../../lib/ui/Menu.svelte'
   import MenuItem from '../../lib/ui/MenuItem.svelte'
   import {
@@ -46,6 +47,8 @@
     type SuggestedModel
   } from './types'
   import { proxyBadgeInfo } from './proxyBadge'
+  import AutoPingScheduleModal, { type AutoPingSave } from '../quota/AutoPingScheduleModal.svelte'
+  import type { NormalizedPingSchedule } from '../quota/pingSchedule'
   import {
     formatCheckAllSummary,
     getBlockedModelIds,
@@ -68,6 +71,7 @@
   import EditCompatibleNodeModal from './EditCompatibleNodeModal.svelte'
   import FreebuffSessionBanner from './FreebuffSessionBanner.svelte'
   import ProviderIcon from './ProviderIcon.svelte'
+  import { portal } from '../../lib/ui/portal'
 
   interface Props {
     providerId: string
@@ -155,6 +159,20 @@
   let savedFreeProxy = $state(false)
   // Quota & Cooldown tracking state
   let connectionQuotas = $state<Record<string, ConnectionUsageResponse>>({})
+  // Auto-ping per connection (upstream be51142b/28d40159). Same settings
+  // keys as QuotaTrackerView, which stays the single other writer.
+  let autoPingMaps = $state<{ claude: Record<string, boolean>; codex: Record<string, boolean> }>({
+    claude: {},
+    codex: {},
+  })
+  let autoPingSchedules = $state<{
+    claude: Record<string, NormalizedPingSchedule>
+    codex: Record<string, NormalizedPingSchedule>
+  }>({
+    claude: {},
+    codex: {},
+  })
+  let scheduleConn = $state<ProviderConnection | null>(null)
   let currentTime = $state(Date.now())
 
   onMount(() => {
@@ -313,7 +331,58 @@
 
   // Row UI state
   let activeProxyDropdownId = $state<string | null>(null)
-  let dropdownPos = $state<{ top: number; right: number }>({ top: 0, right: 0 })
+  let dropdownPos = $state<{ top: number | null; bottom: number | null; right: number; maxHeight: number }>({
+    top: null,
+    bottom: null,
+    right: 0,
+    maxHeight: 240,
+  })
+
+  // Portal the proxy dropdown to <body> with fixed positioning so ancestor
+  // overflow (scrollable connections list) can no longer clip it. Flip above
+  // the trigger when the space below is too short (upstream d95bb8ea).
+  function toggleProxyDropdown(connId: string, trigger: HTMLElement | null): void {
+    if (activeProxyDropdownId === connId) {
+      activeProxyDropdownId = null
+      return
+    }
+    const rect = trigger?.getBoundingClientRect()
+    if (!rect) {
+      activeProxyDropdownId = connId
+      dropdownPos = { top: 0, bottom: null, right: 8, maxHeight: 240 }
+      return
+    }
+    const estimatedHeight = (proxyPools.length + 1) * 34 + 8
+    const spaceBelow = window.innerHeight - rect.bottom
+    const flipUp = spaceBelow < estimatedHeight && rect.top > spaceBelow
+    activeProxyDropdownId = connId
+    dropdownPos = flipUp
+      ? {
+          top: null,
+          bottom: window.innerHeight - rect.top + 4,
+          right: Math.max(8, window.innerWidth - rect.right),
+          maxHeight: Math.max(rect.top - 8, 120),
+        }
+      : {
+          top: rect.bottom + 4,
+          bottom: null,
+          right: Math.max(8, window.innerWidth - rect.right),
+          maxHeight: Math.max(spaceBelow - 8, 120),
+        }
+  }
+
+  // The panel is fixed + portalled, so it no longer moves with the page:
+  // close it on scroll/resize rather than chase the trigger.
+  $effect(() => {
+    if (!activeProxyDropdownId) return
+    const close = () => (activeProxyDropdownId = null)
+    window.addEventListener('resize', close)
+    document.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('resize', close)
+      document.removeEventListener('scroll', close, true)
+    }
+  })
   let updatingProxyConnId = $state<string | null>(null)
   let copiedModelId = $state<string | null>(null)
   let modelTestStatuses = $state<Record<string, ModelTestStatus>>({})
@@ -712,6 +781,20 @@
       settings = settingsData
       proxyPools = poolsData
       modelCaps = capsData?.caps || {}
+
+      // Auto-ping maps share their keys with QuotaTrackerView (single other
+      // writer); a stale dashboard entry just hydrates to empty.
+      {
+        const raw = (settingsData || {}) as unknown as Record<string, unknown>
+        autoPingMaps = {
+          claude: (raw?.claudeAutoPing as Record<string, boolean>) || {},
+          codex: (raw?.codexAutoPing as Record<string, boolean>) || {},
+        }
+        autoPingSchedules = {
+          claude: (raw?.claudeAutoPingSchedules as Record<string, NormalizedPingSchedule>) || {},
+          codex: (raw?.codexAutoPingSchedules as Record<string, NormalizedPingSchedule>) || {},
+        }
+      }
 
       // Suggested free models from the provider's public catalog (if configured in upstream registry).
       const fetcher = selectedCatalogItem?.modelsFetcher
@@ -1239,6 +1322,42 @@
   // EditConnectionModal; this only decides when it opens and who refreshes.
   function openEditConnection(conn: ProviderConnection) {
     editingConnection = conn
+  }
+
+  // Upstream parity (28d40159): one save writes both the reactive flag and
+  // the anchored schedule, so the 3-way modal is the single writer.
+  async function saveAutoPing(connId: string, provider: string, save: AutoPingSave) {
+    const keys: Record<string, string> = {
+      claude: 'claudeAutoPing',
+      codex: 'codexAutoPing',
+    }
+    const schedKeys: Record<string, string> = {
+      claude: 'claudeAutoPingSchedules',
+      codex: 'codexAutoPingSchedules',
+    }
+    const key = keys[provider]
+    const schedKey = schedKeys[provider]
+    if (!key || !schedKey) return
+    const nextMap = {
+      ...(autoPingMaps[provider as 'claude' | 'codex'] || {}),
+      [connId]: save.reactive,
+    }
+    autoPingMaps = { ...autoPingMaps, [provider]: nextMap }
+    const nextSched = { ...(autoPingSchedules[provider as 'claude' | 'codex'] || {}) }
+    if (save.schedule.enabled === true) {
+      nextSched[connId] = save.schedule
+    } else {
+      delete nextSched[connId]
+    }
+    autoPingSchedules = { ...autoPingSchedules, [provider]: nextSched }
+    try {
+      await api.patchSettings({
+        [key]: nextMap,
+        [schedKey]: nextSched,
+      })
+    } catch (err) {
+      console.error('Failed to update autoPing:', err)
+    }
   }
 
   async function saveEditingConnection(payload: ConnectionUpdate) {
@@ -3319,21 +3438,12 @@
                        no width (issue #224). -->
                   <div class="grid flex-1 grid-flow-col auto-cols-fr gap-1 sm:flex sm:flex-none">
                     <!-- Proxy dropdown -->
-                    <div class="relative">
+                    <div>
                       <button
                         type="button"
                         onclick={(e) => {
                           e.stopPropagation()
-                          if (activeProxyDropdownId === conn.id) {
-                            activeProxyDropdownId = null
-                          } else {
-                            activeProxyDropdownId = conn.id
-                            const rect = e.currentTarget.getBoundingClientRect()
-                            dropdownPos = {
-                              top: rect.bottom + 4,
-                              right: Math.max(8, window.innerWidth - rect.right)
-                            }
-                          }
+                          toggleProxyDropdown(conn.id, e.currentTarget)
                         }}
                         disabled={updatingProxyConnId === conn.id}
                         class="flex w-full flex-col items-center rounded px-2 py-1 transition-colors hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-60 {proxyBadge.hasAnyProxy ? 'text-primary' : 'text-text-muted hover:text-primary'} cursor-pointer"
@@ -3352,8 +3462,9 @@
                           role="presentation"
                         ></div>
                         <div
-                          class="fixed z-[85] max-w-[78vw] min-w-[180px] rounded-lg border border-border bg-bg py-1 shadow-lg"
-                          style="top: {dropdownPos.top}px; right: {dropdownPos.right}px;"
+                          use:portal
+                          class="fixed z-[85] max-w-[78vw] min-w-[180px] overflow-y-auto rounded-lg border border-border bg-bg py-1 shadow-lg"
+                          style="right: {dropdownPos.right}px; max-height: {dropdownPos.maxHeight}px; {dropdownPos.top !== null ? `top: ${dropdownPos.top}px;` : `bottom: ${dropdownPos.bottom}px;`}"
                         >
                           {#if proxyPools.length === 0}
                             <div class="px-3 py-2 text-xs text-text-muted">
@@ -3411,6 +3522,13 @@
                         disabled={isTestingOneByOne || status?.state === 'testing'}
                         onSelect={() => refreshOneConnection(conn)}
                       />
+                      {#if (conn.provider === 'claude' || conn.provider === 'codex') && conn.authType === 'oauth'}
+                        <MenuItem
+                          label="Auto-ping"
+                          icon="bolt"
+                          onSelect={() => (scheduleConn = conn)}
+                        />
+                      {/if}
                       <MenuItem label="Edit" icon="edit" onSelect={() => openEditConnection(conn)} />
 
                       <div class="my-1 border-t border-border-subtle" role="separator"></div>
@@ -3554,7 +3672,7 @@
                 <p class="text-sm font-medium truncate">{row.id}</p>
                 <div class="flex items-center gap-1 mt-1">
                   <code class="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{displayAlias()}/{row.id}</code>
-                  <div class="relative group/btn">
+                  <Tooltip text={copiedModelId === row.id ? 'Copied!' : 'Copy'}>
                     <button
                       type="button"
                       onclick={() => copyCompatibleModel(row.id)}
@@ -3562,12 +3680,9 @@
                     >
                       <span class="material-symbols-outlined text-sm">{copiedModelId === row.id ? 'check' : 'content_copy'}</span>
                     </button>
-                    <span class="pointer-events-none absolute top-5 left-1/2 -translate-x-1/2 text-[10px] text-text-muted whitespace-nowrap opacity-0 group-hover/btn:opacity-100 transition-opacity">
-                      {copiedModelId === row.id ? 'Copied!' : 'Copy'}
-                    </span>
-                  </div>
+                  </Tooltip>
                   {#if providerConnections.length > 0}
-                    <div class="relative group/btn">
+                    <Tooltip text={isTestingRow ? 'Testing...' : 'Test'}>
                       <button
                         type="button"
                         onclick={() => handleTestCompatibleModel(row.id)}
@@ -3578,10 +3693,7 @@
                           {isTestingRow ? 'progress_activity' : 'science'}
                         </span>
                       </button>
-                      <span class="pointer-events-none absolute top-5 left-1/2 -translate-x-1/2 text-[10px] text-text-muted whitespace-nowrap opacity-0 group-hover/btn:opacity-100 transition-opacity">
-                        {isTestingRow ? 'Testing...' : 'Test'}
-                      </span>
-                    </div>
+                    </Tooltip>
                   {/if}
                 </div>
                 {#if tError}
@@ -3734,20 +3846,14 @@
                 <span class="truncate text-[9px] italic text-text-muted/70">{model.name}</span>
                 <span class="inline-flex items-center gap-0.5">
                   {#if rowCaps?.vision}
-                    <div class="relative inline-flex group/tt">
+                    <Tooltip text="Vision — Supports image input">
                       <span class="material-symbols-outlined leading-none cursor-help text-text-muted/70" style="font-size: 12px;">visibility</span>
-                      <div class="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-50 w-max max-w-56 rounded px-2 py-1 text-[11px] leading-snug bg-gray-900 text-white opacity-0 group-hover/tt:opacity-100 transition-opacity duration-150 whitespace-normal shadow-lg">
-                        Vision — Supports image input
-                      </div>
-                    </div>
+                    </Tooltip>
                   {/if}
                   {#if rowCaps?.reasoning}
-                    <div class="relative inline-flex group/tt">
+                    <Tooltip text="Reasoning — Supports reasoning / thinking">
                       <span class="material-symbols-outlined leading-none cursor-help text-text-muted/70" style="font-size: 12px;">neurology</span>
-                      <div class="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-50 w-max max-w-56 rounded px-2 py-1 text-[11px] leading-snug bg-gray-900 text-white opacity-0 group-hover/tt:opacity-100 transition-opacity duration-150 whitespace-normal shadow-lg">
-                        Reasoning — Supports reasoning / thinking
-                      </div>
-                    </div>
+                    </Tooltip>
                   {/if}
                 </span>
               </span>
@@ -3759,7 +3865,17 @@
               {/if}
 
             <!-- Test button -->
-            <div class="relative shrink-0 group/btn">
+            <Tooltip
+              text={isTestingThis
+                ? 'Testing...'
+                : testStatus === 'ok'
+                  ? 'Passed'
+                  : testStatus === 'blocked'
+                    ? modelTestErrors[model.id] || 'Blocked — account in cooldown'
+                    : testStatus === 'error'
+                      ? modelTestErrors[model.id] || 'Failed'
+                      : 'Test'}
+            >
               <button
                 type="button"
                 onclick={() => testModel(model.id)}
@@ -3779,22 +3895,9 @@
                   <span class="material-symbols-outlined text-sm">science</span>
                 {/if}
               </button>
-              <span class="pointer-events-none absolute mt-1 top-5 left-1/2 -translate-x-1/2 text-[10px] text-text-muted whitespace-nowrap opacity-0 group-hover/btn:opacity-100 transition-opacity z-20 bg-surface-2 px-1 rounded shadow border border-border">
-                {#if isTestingThis}
-                  Testing...
-                {:else if testStatus === 'ok'}
-                  Passed
-                {:else if testStatus === 'blocked'}
-                  {modelTestErrors[model.id] || 'Blocked — account in cooldown'}
-                {:else if testStatus === 'error'}
-                  {modelTestErrors[model.id] || 'Failed'}
-                {:else}
-                  Test
-                {/if}
-              </span>
-            </div>
+            </Tooltip>
             <!-- Copy button -->
-            <div class="relative shrink-0 group/btn">
+            <Tooltip text="Copy">
               <button
                 type="button"
                 onclick={() => copyModelId(model.id)}
@@ -3806,10 +3909,7 @@
                   <span class="material-symbols-outlined text-sm">content_copy</span>
                 {/if}
               </button>
-              <span class="pointer-events-none absolute mt-1 top-5 left-1/2 -translate-x-1/2 text-[10px] text-text-muted whitespace-nowrap opacity-0 group-hover/btn:opacity-100 transition-opacity">
-                Copy
-              </span>
-            </div>
+            </Tooltip>
 
             <!-- Disable button -->
             <button
@@ -4461,6 +4561,18 @@
     onClose={() => (editingConnection = null)}
     onSave={saveEditingConnection}
     onSaveError={(message) => alert(message)}
+  />
+{/if}
+
+<!-- 4a. Auto-ping schedule (quota modal wiring shared with QuotaTrackerView) -->
+{#if scheduleConn}
+  <AutoPingScheduleModal
+    isOpen={true}
+    connectionName={scheduleConn.name?.trim() || scheduleConn.email?.trim() || scheduleConn.id}
+    reactive={autoPingMaps[scheduleConn.provider as 'claude' | 'codex']?.[scheduleConn.id] === true}
+    schedule={autoPingSchedules[scheduleConn.provider as 'claude' | 'codex']?.[scheduleConn.id] ?? null}
+    onClose={() => (scheduleConn = null)}
+    onSave={(save) => saveAutoPing(scheduleConn!.id, scheduleConn!.provider, save)}
   />
 {/if}
 

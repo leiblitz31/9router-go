@@ -126,6 +126,11 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 
 	req.Header.Set(constants.HeaderContentType, constants.ContentTypeJSON)
 	handlerutil.SetAuthHeader(req, apiKey, providerCfg.AuthHeader, providerCfg.AuthScheme)
+	for k, v := range providerCfg.StaticHeaders {
+		if req.Header.Get(k) == "" {
+			req.Header.Set(k, v)
+		}
+	}
 
 	start := time.Now()
 	resp, err := h.Client.Do(req)
@@ -285,7 +290,7 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 	resp, err := client.Do(req)
-	if err != nil {
+	if err != nil && mayRetryDirect(client) {
 		// Transport-level failure only (proxy block, DNS, reset): retry once
 		// direct before failing. A real upstream status (e.g. 403 account
 		// verification) must surface — retrying direct against the same

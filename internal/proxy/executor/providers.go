@@ -757,15 +757,20 @@ func isOpencodeFreeModel(cleanModel string) bool {
 	return false
 }
 
+// opencodeGoMessagesModels routes to /zen/go/v1/messages (the Claude Messages
+// transport) instead of /chat/completions, which answers
+// "ModelProtocolUnsupported" for them. claude-haiku-5-5 was added upstream
+// (#4727) with targetFormat "claude" so OpenAI-wire clients translate to it.
 var opencodeGoMessagesModels = map[string]bool{
-	"minimax-m3":    true,
-	"minimax-m2.7":  true,
-	"minimax-m2.5":  true,
-	"qwen3.8-max":   true,
-	"qwen3.8-flash": true,
-	"qwen3.7-max":   true,
-	"qwen3.7-plus":  true,
-	"qwen3.6-plus":  true,
+	"minimax-m3":       true,
+	"minimax-m2.7":     true,
+	"minimax-m2.5":     true,
+	"qwen3.8-max":      true,
+	"qwen3.8-flash":    true,
+	"qwen3.7-max":      true,
+	"qwen3.7-plus":     true,
+	"qwen3.6-plus":     true,
+	"claude-haiku-5-5": true,
 }
 
 // EnsureClaudeMessages exposes the OpenAI→Claude Messages request conversion
@@ -879,6 +884,15 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 	// (upstream thinkingUnified captureThinking)
 	applyClaudeThinkingDisplay(reqMap)
 	applyClaudeThinkingType(reqMap, provider, model)
+	// Claude Code puts a `context_management` block (context-editing strategy)
+	// in every request; only Anthropic accepts it — gateways fronting other
+	// engines answer 400 "context_management: Extra inputs are not
+	// permitted". A same-format claude→claude request skips body rebuilding
+	// in the translator, so the field rides through to every non-Anthropic
+	// provider on the Claude transport (upstream #4727).
+	if !isAnthropicServingProvider(provider) {
+		delete(reqMap, "context_management")
+	}
 	delete(reqMap, "stream_options")
 	delete(reqMap, "store")
 	delete(reqMap, "reasoning_effort")
@@ -888,6 +902,14 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 		return body
 	}
 	return updated
+}
+
+// isAnthropicServingProvider reports whether `provider` is Anthropic itself.
+// Only those endpoints accept `context_management`; every other Claude-wire
+// provider answers 400 "Extra inputs are not permitted" for it (upstream
+// #4727, mirroring decolua/9router's anthropic-compatible- prefix rule).
+func isAnthropicServingProvider(provider string) bool {
+	return provider == "claude" || strings.HasPrefix(provider, "anthropic") || strings.HasPrefix(provider, "anthropic-compatible-")
 }
 
 func convertOpenAIToolsToClaude(tools []any) []any {
@@ -1311,6 +1333,21 @@ func opencodeGoInferenceBase(base string) string {
 	}
 }
 
+// stripOpencodeGoResponseFormat ports upstream 468aa7d9: OpenCode Go's relay
+// rejects response_format (both json_schema and json_object — drop, not
+// downgrade) for its deepseek family with HTTP 400 while serving it for
+// every other model on the same relay. Match is a ^deepseek prefix,
+// case-insensitive, on the cleaned model id.
+func stripOpencodeGoResponseFormat(reqMap map[string]any, cleanModel string) {
+	if reqMap == nil {
+		return
+	}
+	if !strings.HasPrefix(strings.ToLower(cleanModel), "deepseek") {
+		return
+	}
+	delete(reqMap, "response_format")
+}
+
 // forwardOpencodeGoFree serves free-tier ids on the paid go lane (today only
 // space-bunny-free). Keyed requests for them 403, so they travel exactly like
 // free-executor requests: the inference chat lane (no free go model takes the
@@ -1327,6 +1364,7 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 		if cleanModel != "" {
 			reqMap["model"] = cleanModel
 		}
+		stripOpencodeGoResponseFormat(reqMap, cleanModel)
 		if b, err := marshalStable(reqMap); err == nil {
 			body = b
 		}
@@ -1508,6 +1546,7 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		if cleanModel != "" {
 			reqGoMap["model"] = cleanModel
 		}
+		stripOpencodeGoResponseFormat(reqGoMap, cleanModel)
 		// Deterministic marshaling keeps the serialized request prefix
 		// stable across turns, which DeepSeek's prefix prompt cache
 		// requires; json/v2 randomizes map member order by default.

@@ -70,5 +70,20 @@ func BuildConnectionUpdate(result *TokenResult) map[string]any {
 	if result.RefreshToken != "" {
 		m["refreshToken"] = result.RefreshToken
 	}
+	// A provider that authenticates with a minted key (Nous) reports it here;
+	// writing it keeps the connection's apiKey in step with the refresh.
+	if result.APIKey != "" {
+		m["apiKey"] = result.APIKey
+	}
+	if len(result.Extra) > 0 {
+		psd, _ := m["providerSpecificData"].(map[string]any)
+		if psd == nil {
+			psd = map[string]any{}
+		}
+		for k, v := range result.Extra {
+			psd[k] = v
+		}
+		m["providerSpecificData"] = psd
+	}
 	return m
 }

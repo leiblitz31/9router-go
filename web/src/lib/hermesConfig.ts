@@ -109,7 +109,12 @@ export function activeRoleModels(roles: Record<string, string>): Array<{ role: s
  * The `config.yaml` the card shows in the manual-config modal: exactly what
  * the Go handler writes, so the two paths are interchangeable.
  */
-export function hermesConfigYaml(selections: HermesSelectionMap, baseUrl: string, runHint: string): string {
+export function hermesConfigYaml(
+  selections: HermesSelectionMap,
+  baseUrl: string,
+  runHint: string,
+  stt?: { enabled: boolean; model: string },
+): string {
   let yaml = `# Run this profile: ${runHint}\n`
   yaml += `model:\n  default: "${selections.default.trim()}"\n  provider: "custom"\n  base_url: "${baseUrl}"\n  api_key: \${OPENAI_API_KEY}\n`
 
@@ -125,6 +130,10 @@ export function hermesConfigYaml(selections: HermesSelectionMap, baseUrl: string
     for (const { role, model } of auxiliary) {
       yaml += `  ${role}:\n    provider: "custom"\n    model: "${model}"\n    base_url: "${baseUrl}"\n    api_key: \${OPENAI_API_KEY}\n`
     }
+  }
+
+  if (stt?.enabled && stt.model.trim()) {
+    yaml += `stt:\n  enabled: true\n  provider: "openai"\n  openai:\n    model: "${stt.model.trim()}"\n    base_url: "${baseUrl}"\n    api_key: \${OPENAI_API_KEY}\n`
   }
   return yaml
 }

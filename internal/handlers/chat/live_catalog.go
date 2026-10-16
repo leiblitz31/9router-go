@@ -115,6 +115,12 @@ func (h *ChatHandler) resolveLiveCatalog(ctx context.Context, conn *models.Provi
 		fetch = func(ctx context.Context, token string) []LiveModel {
 			return h.fetchGrokCLILiveCatalog(ctx, conn, connData, token)
 		}
+	case providerID == "nous":
+		// Nous /models is public, so the Portal catalogue is read even for a
+		// connection that carries only a refresh token.
+		fetch = func(ctx context.Context, token string) []LiveModel {
+			return h.fetchNousLiveCatalog(ctx, token)
+		}
 	case isCompatibleProviderID(providerID):
 		// Upstream fetchCompatibleModelIds: custom nodes publish whatever their
 		// own /models endpoint reports.

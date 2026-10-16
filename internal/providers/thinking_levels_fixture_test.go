@@ -51,6 +51,28 @@ var pendingUpstreamDivergences = map[string]map[string][]string{
 		"agnes-3.0-pro":   {"none", "minimal", "low", "medium", "high", "xhigh"},
 		"agnes-3.0-flash": {"none", "minimal", "low", "medium", "high", "xhigh"},
 	},
+	// Upstream 4c58e7f3 (v0.5.104) adds reasoning entries for the OpenCode Free
+	// ids that ship after the tables were last touched (space-bunny & co); the
+	// captured v0.5.99 fixture still reports "no reasoning" for them, so Go
+	// answers the openai format default instead. Same shape as the agnes rows:
+	// declaring reasoning stops the client from silently losing its
+	// reasoning_effort (#2690), which is worse than publishing levels the
+	// captured tag did not. Delete these when the fixture is re-captured at
+	// v0.5.104 or later.
+	"opencode-go": {
+		"space-bunny-free": {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"longcat-2.0":      {"none", "minimal", "low", "medium", "high", "xhigh"},
+	},
+	"ocg": {
+		"space-bunny-free": {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"longcat-2.0":      {"none", "minimal", "low", "medium", "high", "xhigh"},
+	},
+	"opencode-zen": {
+		"big-pickle": {"none", "minimal", "low", "medium", "high", "xhigh"},
+	},
+	"ocz": {
+		"big-pickle": {"none", "minimal", "low", "medium", "high", "xhigh"},
+	},
 }
 
 // divergentFromPending reports whether a mismatch is one of the documented

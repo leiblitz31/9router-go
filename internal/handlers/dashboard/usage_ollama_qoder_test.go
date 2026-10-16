@@ -227,6 +227,70 @@ func TestFetchQoderUsage_NonAuthStatusKeepsStatusMessage(t *testing.T) {
 	}
 }
 
+func TestFetchQoderUsage_AddOnGrantSurfacesAsRow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"expiresAt":253402214400000,` +
+			`"userQuota":{"total":0,"used":0,"remaining":0,"unit":"credits"},` +
+			`"orgResourcePackage":{"total":0,"used":0,"remaining":0,"unit":"credits"},` +
+			`"addOnQuota":{"total":2200,"used":400,"remaining":1800,"unit":"credits",` +
+			`"detailUrl":"https://qoder.com/usage"}}`))
+	}))
+	defer srv.Close()
+
+	res := fetchQoderUsageAt(t.Context(), "tok", srv.URL)
+	// Upstream ships user + organization buckets always (even 0/0); the
+	// tracker skips zero-total rows at render. The grant lives in addOn.
+	if len(res.quotas) != 3 {
+		t.Fatalf("quotas = %v, want user+organization+addOn", res.quotas)
+	}
+	row, _ := res.quotas["addOn"].(map[string]any)
+	if row["total"] != 2200.0 || row["used"] != 400.0 || row["remaining"] != 1800.0 {
+		t.Errorf("addOn row = %v, want 400/2200/1800", row)
+	}
+	if row["neverExpires"] != false {
+		t.Errorf("addOn neverExpires = %v, want false (grants expire; the sentinel is plan-level)", row["neverExpires"])
+	}
+	if row["detailUrl"] != "https://qoder.com/usage" {
+		t.Errorf("addOn detailUrl = %v, want the usage page link", row["detailUrl"])
+	}
+}
+
+// The sentinel 9999-12-31 expiry is Qoder's "never expires", not a real reset.
+func TestFetchQoderUsage_NeverExpiresSentinelHasNoReset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"expiresAt":253402214400000,` +
+			`"userQuota":{"total":100,"used":10,"remaining":90,"unit":"credits"}}`))
+	}))
+	defer srv.Close()
+
+	res := fetchQoderUsageAt(t.Context(), "tok", srv.URL)
+	row, _ := res.quotas["user"].(map[string]any)
+	if row["resetAt"] != "" {
+		t.Errorf("user resetAt = %v, want empty (sentinel is not a date)", row["resetAt"])
+	}
+	if row["neverExpires"] != true {
+		t.Errorf("user neverExpires = %v, want true", row["neverExpires"])
+	}
+}
+
+// No grant redeemed: the response shape must be byte-identical to before.
+func TestFetchQoderUsage_NoGrantOmitsAddOn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"expiresAt":1780000000000,` +
+			`"userQuota":{"total":100,"used":10,"remaining":90,"unit":"credits"}}`))
+	}))
+	defer srv.Close()
+
+	res := fetchQoderUsageAt(t.Context(), "tok", srv.URL)
+	if _, ok := res.quotas["addOn"]; ok {
+		t.Errorf("quotas has addOn without a grant: %v", res.quotas)
+	}
+	row, _ := res.quotas["user"].(map[string]any)
+	if row["resetAt"] == "" || row["neverExpires"] != false {
+		t.Errorf("user row = %v, want a real resetAt and neverExpires=false", row)
+	}
+}
+
 func withOllamaEndpoints(t *testing.T, usageBody, meBody string) {
 	t.Helper()
 	mux := http.NewServeMux()

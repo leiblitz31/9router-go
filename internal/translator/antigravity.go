@@ -410,6 +410,7 @@ func NormalizeAntigravityModel(model string) string {
 var antigravityUpstreamModelIDs = map[string]string{
 	// The 3.8 family serves one backend id per tier. The bare catalog id is
 	// the medium tier.
+	"gemini-4-argon-high":   "gemini-4-argon-high",
 	"gemini-3.8-flash":        "gemini-3.8-flash-medium",
 	"gemini-3.8-flash-high":   "gemini-3.8-flash-high",
 	"gemini-3.8-flash-medium": "gemini-3.8-flash-medium",

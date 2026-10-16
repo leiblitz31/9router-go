@@ -156,7 +156,7 @@ func (h *MediaHandler) tryXquikSearchConn(w http.ResponseWriter, r *http.Request
 
 	upstreamStart := time.Now()
 	resp, err := client.Do(req)
-	if err != nil {
+	if err != nil && mayRetryDirect(client) {
 		directReq, err2 := http.NewRequestWithContext(r.Context(), http.MethodGet, baseURL+"?"+qp.Encode(), nil)
 		if err2 == nil {
 			directReq.Header = req.Header.Clone()

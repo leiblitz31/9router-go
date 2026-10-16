@@ -4,8 +4,6 @@
     formatResetTime,
     formatResetTimeDisplay,
     getRemainingPercentage,
-    getStatusColor,
-    getStatusEmoji,
     type NormalizedQuota,
   } from './types'
 
@@ -133,8 +131,18 @@
               emoji: '💰',
             }
           : colorClassesFor(quota.remaining)}
-        {@const countdown = formatResetTime(quota.resetAt)}
-        {@const resetDisplay = formatResetTimeDisplay(quota.resetAt)}
+        {@const countdown = quota.neverExpires ? '-' : formatResetTime(quota.resetAt)}
+        {@const seeDetails =
+          !quota.neverExpires &&
+          !quota.resetAt &&
+          typeof quota.detailUrl === 'string' &&
+          quota.detailUrl !== ''}
+        {@const resetDisplay = quota.neverExpires
+          ? 'Never expires'
+          : seeDetails
+            ? 'See details'
+            : formatResetTimeDisplay(quota.resetAt)}
+        {@const resetSecondaryText = seeDetails ? (quota.detailUrl as string) : resetDisplay}
         {@const recurring = quota.recurring !== false}
         {@const countdownLabel = recurring ? `in ${countdown}` : `expires in ${countdown}`}
 
@@ -176,13 +184,13 @@
                   ? `${fmtNum(quota.used)} used · Unlimited`
                   : isCreditBalance
                     ? `Credit balance: ${(quota.total || 0).toFixed(2)} ${quota.currency || ''}`
-                    : `${fmtNum(quota.used)} / ${(quota.total || 0) > 0 ? fmtNum(quota.total) : '∞'}`}
+                    : `${fmtNum(quota.used)} / ${(quota.total || 0) > 0 ? fmtNum(quota.total) : '∞'}${quota.unit ? ` ${quota.unit}` : ''}`}
               >
                 {isUnlimited
                   ? `${fmtNum(quota.used)} used · Unlimited`
                   : isCreditBalance
                     ? `Credit: ${(quota.total || 0).toFixed(2)} ${quota.currency || ''}`
-                    : `${fmtNum(quota.used)} / ${(quota.total || 0) > 0 ? fmtNum(quota.total) : '∞'}`}
+                    : `${fmtNum(quota.used)} / ${(quota.total || 0) > 0 ? fmtNum(quota.total) : '∞'}${quota.unit ? ` ${quota.unit}` : ''}`}
               </span>
               <span
                 class="font-medium shrink-0 {isUnlimited
@@ -198,13 +206,29 @@
 
           <!-- Reset time -->
           <div class="min-w-0 shrink">
-            {#if countdown !== '-' || resetDisplay}
+            {#if countdown !== '-' || resetDisplay || seeDetails}
               {#if compact}
                 <div
                   class="{resetPrimary} text-text-main font-medium truncate"
-                  title={resetDisplay || ''}
+                  title={resetSecondaryText || ''}
                 >
-                  {countdown !== '-' ? countdownLabel : resetDisplay}
+                  {#if countdown !== '-'}
+                    {countdownLabel}
+                  {:else if seeDetails}
+                    <a
+                      href={quota.detailUrl as string}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="{resetPrimary} inline-flex items-center gap-0.5 hover:text-text-primary hover:underline"
+                      title={`Open usage details: ${resetSecondaryText}`}
+                      aria-label={`Open usage details for ${quota.name}`}
+                    >
+                      {resetDisplay}
+                      <span class="material-symbols-outlined text-[12px]">open_in_new</span>
+                    </a>
+                  {:else}
+                    {resetDisplay}
+                  {/if}
                 </div>
               {:else}
                 <div class="min-w-0 space-y-0.5">
@@ -215,7 +239,21 @@
                   {/if}
                   {#if resetDisplay}
                     <div class="{resetSecondary} text-text-muted truncate">
-                      {resetDisplay}
+                      {#if seeDetails}
+                        <a
+                          href={quota.detailUrl as string}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="{resetSecondary} inline-flex items-center gap-0.5 hover:text-text-primary hover:underline"
+                          title={`Open usage details: ${resetSecondaryText}`}
+                          aria-label={`Open usage details for ${quota.name}`}
+                        >
+                          {resetDisplay}
+                          <span class="material-symbols-outlined text-[12px]">open_in_new</span>
+                        </a>
+                      {:else}
+                        {resetDisplay}
+                      {/if}
                     </div>
                   {/if}
                 </div>

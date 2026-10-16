@@ -227,7 +227,10 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 		// mask collapsed a whole team key set into a single row and attributed
 		// one key's usage to another (upstream v0.5.91, same class of fix).
 		addAPIKeyUsage := func(apiKey, rawModel, provider, providerDisplay, timestamp string, requests int, promptTok, complTok, cachedTok int64, cost float64) {
-			if apiKey == "" || apiKey == "***" {
+			// Upstream 813a0121 trims before the apiKeyMap lookup so padded
+			// variants resolve; the bucket key stays on the stored value.
+			trimmed := strings.TrimSpace(apiKey)
+			if trimmed == "" || trimmed == "***" {
 				apiKey = "local-no-key"
 			}
 			bucketKey := apiKey + "|" + rawModel + "|" + provider
@@ -237,12 +240,14 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 			cur.ApiKeyMasked = apiKey
 			cur.ApiKeyKey = apiKey
 			switch {
-			case keyNames[apiKey] != "":
-				cur.KeyName = keyNames[apiKey]
+			case keyNames[trimmed] != "":
+				cur.KeyName = keyNames[trimmed]
 			case apiKey == "local-no-key":
 				cur.KeyName = "Local (No Key)"
 			default:
-				cur.KeyName = apiKey[:min(8, len(apiKey))] + "..."
+				// Fall back to the masked key rather than a bare prefix
+				// (upstream 813a0121).
+				cur.KeyName = handlerutil.MaskAPIKey(trimmed)
 			}
 			cur.Requests += requests
 			cur.PromptTokens += promptTok
@@ -449,14 +454,18 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 		var dedupedRecent []usagetracker.RecentRequest
 		seen := make(map[string]bool)
 		for _, rh := range recentHistory {
-			if rh.PromptTokens == 0 && rh.CompletionTokens == 0 {
+			// Same fallback as the aggregate fold: rows recorded with
+			// input_tokens/output_tokens blobs (upstream 813a0121) carry
+			// zero columns and must not be dropped as token-less.
+			promptTok, complTok := rowPromptCompletion(rh)
+			if promptTok == 0 && complTok == 0 {
 				continue
 			}
 			min := ""
 			if len(rh.Timestamp) >= 16 {
 				min = rh.Timestamp[:16]
 			}
-			k := rh.Model + "|" + rh.Provider + "|" + strconv.Itoa(rh.PromptTokens) + "|" + strconv.Itoa(rh.CompletionTokens) + "|" + min
+			k := rh.Model + "|" + rh.Provider + "|" + strconv.FormatInt(promptTok, 10) + "|" + strconv.FormatInt(complTok, 10) + "|" + min
 			if seen[k] {
 				continue
 			}
@@ -472,8 +481,8 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 				Timestamp:        rh.Timestamp,
 				Model:            rh.Model,
 				Provider:         rh.Provider,
-				PromptTokens:     rh.PromptTokens,
-				CompletionTokens: rh.CompletionTokens,
+				PromptTokens:     int(promptTok),
+				CompletionTokens: int(complTok),
 				CachedTokens:     cachedTok,
 				Status:           status,
 			})

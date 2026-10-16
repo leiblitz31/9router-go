@@ -55,9 +55,9 @@ func NewChatHandler(repo *db.Repo, ts ...*shared.TokenSaverConfig) *ChatHandler 
 			Transport: transport,
 			Timeout:   0, // no timeout for streaming support
 		},
-		TokenSaver:  cfg,
+		TokenSaver:    cfg,
 		SemanticCache: sc,
-		stickyState: make(map[string]*comboStickyState),
+		stickyState:   make(map[string]*comboStickyState),
 	}
 }
 
@@ -129,6 +129,9 @@ func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string
 	parts := strings.SplitN(entry, "/", 2)
 	prefix := parts[0]
 	model := parts[1]
+	// Cursor's "Auto (Server Picks)" picker alias is not an AgentService
+	// model id; forwarding it literally gets an empty turn (#4692).
+	model = providers.ResolveCursorAutoModel(resolveProviderAlias(prefix), model)
 
 	if info := h.resolvePrefixProvider(prefix, model); info != nil {
 		return info
@@ -151,7 +154,6 @@ func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string
 
 	return &ModelInfo{Provider: provider, Model: model}
 }
-
 
 // flattenComboModels recursively expands combo-name entries into concrete
 // "provider/model" leaves, keeping order and deduping consecutive identical
@@ -232,6 +234,9 @@ func (h *ChatHandler) resolveModel(modelStr string) (*ModelInfo, error) {
 		parts := strings.SplitN(modelStr, "/", 2)
 		prefix := parts[0]
 		model := parts[1]
+		// Cursor's "Auto (Server Picks)" picker alias is not an AgentService
+		// model id; forwarding it literally gets an empty turn (#4692).
+		model = providers.ResolveCursorAutoModel(resolveProviderAlias(prefix), model)
 
 		// Check custom prefix provider node first (before built-in alias resolution shadows it, e.g. "oa" or "cc")
 		if info := h.resolvePrefixProvider(prefix, model); info != nil {
@@ -265,6 +270,9 @@ func (h *ChatHandler) resolveModel(modelStr string) (*ModelInfo, error) {
 				parts := strings.SplitN(aliasTarget, "/", 2)
 				prefix := parts[0]
 				model := parts[1]
+				// Cursor's "Auto (Server Picks)" picker alias is not an AgentService
+				// model id; forwarding it literally gets an empty turn (#4692).
+				model = providers.ResolveCursorAutoModel(resolveProviderAlias(prefix), model)
 
 				if info := h.resolvePrefixProvider(prefix, model); info != nil {
 					return info, nil

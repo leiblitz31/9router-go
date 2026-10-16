@@ -136,10 +136,10 @@ var DefaultCapabilities = Capabilities{
 }
 
 var modelCapabilities = map[string]Capabilities{
-	"claude-opus-5":                    {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-5-thinking":           {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-5-agentic":            {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-5-thinking-agentic":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-agentic":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-thinking-agentic": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	// Opus 5.5 — experimental preview on Kiro (1M context, 2x credits).
 	"claude-opus-5.5":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	"claude-opus-5.5-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
@@ -163,16 +163,16 @@ var modelCapabilities = map[string]Capabilities{
 	"claude-opus-5-5-high":     {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
 	"claude-opus-5-5-medium":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
 	"claude-opus-5-5-low":      {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
-	"claude-opus-4.6":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4.7":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4-7":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4.8":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4-6":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4-8":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4.8-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4-8-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-sonnet-4.6":                {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-sonnet-4-6":                {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.6":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.7":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-7":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.8":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-6":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-8":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.8-thinking": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-8-thinking": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-4.6":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-4-6":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	// Sonnet 5.5 on Antigravity (upstream v0.5.99, a07ed95b): the bare id
 	// already had a row, but only the base spelling — the four effort
 	// variants fell through to the *claude*sonnet* pattern and lost the 1M
@@ -209,8 +209,8 @@ var modelCapabilities = map[string]Capabilities{
 	// it, so those ids keep the default instead of inheriting 3.0's numbers,
 	// and no `agnes*` glob is added — a pattern would also capture any future
 	// id this provider ships (see the pattern-ownership rule).
-	"agnes-3.0-pro":                    {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 512000, MaxOutput: 65536},
-	"agnes-3.0-flash":                  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 512000, MaxOutput: 65536},
+	"agnes-3.0-pro":   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 512000, MaxOutput: 65536},
+	"agnes-3.0-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 512000, MaxOutput: 65536},
 	// GLM-5.3-FLASH is the multimodal z.ai line and it carries the full 1M
 	// window. Upstream decolua/9router#4656: z.ai's docs state that "GLM-5.3
 	// and GLM-5.3-FLASH no longer support disabling thinking (an error will
@@ -219,25 +219,59 @@ var modelCapabilities = map[string]Capabilities{
 	// enable_thinking:false on any turn that asked for no reasoning — z.ai
 	// answers 400 code 1210 "Invalid API parameter". It looked intermittent
 	// because only some turns ask.
-	"glm-5.3-flash":                {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
+	"glm-5.3-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
 	// claude-fable-5 (no -1 suffix) is adaptive-only like fable-5-1; upstream
 	// capabilities.js only matches it through *claude*fable* -> claude-budget,
 	// which produced thinking{type:"enabled"} and a 400 on the real API.
-	"claude-fable-5":                   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-fable-5-1":                 {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
-	"glm-5.2":                          {Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
-	"glm-4.6v":                         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
-	"glm-4.5v":                         {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
-	"deepseek-v4-flash-vision-exp":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
-	"deepseek-v4-vision":               {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true},
-	"deepseek-v4.1-flash":              {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"claude-fable-5":               {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-fable-5-1":             {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
+	"glm-5.2":                      {Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
+	"glm-4.6v":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
+	"glm-4.5v":                     {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
+	"deepseek-v4-flash-vision-exp": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"deepseek-v4-vision":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true},
+	"deepseek-v4.1-flash":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
 	// Some gateways publish this model under the hyphenated id (dash instead
 	// of dot); without the row it fell through to the text-only `*deepseek-v4*`
 	// pattern and lost its vision and 1M window.
-	"deepseek-v4-1-flash":              {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
-	"deepseek-flash":                   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
-	"muse-spark-1.2-contributor-free":  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
-	"muse-spark-1.3-contributor-free":  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	"deepseek-v4-1-flash":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"deepseek-flash":                  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"muse-spark-1.2-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	"muse-spark-1.3-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+
+	// OpenCode Free ids that models.dev reports reasoning-capable and that no
+	// table or pattern covers. Without an entry they fall through to
+	// DefaultCapabilities (reasoning: false), applyThinking() takes the early
+	// return and strips the client's reasoning_effort before the request
+	// reaches upstream — upstream #2690, reported for space-bunny & co.
+	// Per-id, not a shared glob: the ids disagree on modalities (text-only vs
+	// vision vs video) and on limits, so a glob overstates several. Modalities
+	// and limits are verbatim from models.dev (upstream 4c58e7f3).
+	"space-bunny-free":         {Vision: true, VideoInput: true, Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1048576, MaxOutput: 524288},
+	"space-bunny":              {Vision: true, VideoInput: true, Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1048576, MaxOutput: 524288},
+	"big-pickle":               {Reasoning: true, ThinkingFormat: "openai", ContextWindow: 200000, MaxOutput: 32000},
+	"exo-free":                 {Vision: true, Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1048576, MaxOutput: 131072},
+	"fledge-alpha-free":        {Vision: true, Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1048576, MaxOutput: 131072},
+	"longcat-2.0":              {Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 131072},
+	"longcat-2.0-free":         {Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 131072},
+	"longcat-2.5-preview-free": {Vision: true, Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 131072},
+	"north-mini-code-free":     {Reasoning: true, ThinkingFormat: "openai", ContextWindow: 256000, MaxOutput: 64000},
+	"ring-2.6-1t-free":         {Reasoning: true, ThinkingFormat: "openai", ContextWindow: 262000, MaxOutput: 66000},
+	"x-preview-f-free":         {Vision: true, VideoInput: true, Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 131072},
+
+	// Nous Research Portal static catalog (open-sse/providers/registry/nous.js,
+	// decolua/9router 165f9b90). Limits are the per-model contextLength /
+	// maxOutputTokens the registry declares — they disagree per id, so a glob
+	// would misstate several. Every entry is text-capable; vision is taken from
+	// models.dev where the free catalogue reports an input modality.
+	"meituan/longcat-2.0:free":         {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048756, MaxOutput: 262144},
+	"meituan/longcat-2.5-preview:free": {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576, MaxOutput: 131072},
+	"stepfun/step-5-preview:free":      {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 64000},
+	"upstage/solar-mini4:free":         {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 524288, MaxOutput: 131072},
+	"stepfun/step-3.7-flash:free":      {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144, MaxOutput: 256000},
+	"poolside/laguna-s-2.1:free":       {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144, MaxOutput: 131072},
+	"poolside/laguna-xs-2.1:free":      {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144, MaxOutput: 32768},
+	"stealth/missingno":                {Tools: true, ThinkingFormat: "openai", ContextWindow: 262144, MaxOutput: 131072},
 	"vision-model":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"},
 	"coder-model":                      {Reasoning: true, Tools: true, ThinkingFormat: "qwen"},
 	"kimi-k3":                          {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
@@ -264,6 +298,7 @@ func codexGpt56Caps(contextWindow int) Capabilities {
 		ThinkingFormat: "openai", ContextWindow: contextWindow, MaxOutput: 128000,
 	}
 }
+
 // devinCLIGPTCaps is Devin CLI's own GPT declaration (upstream
 // DEVIN_CLI_GPT_CAPS): a 200k window even though the models are GPT-5.4/5.5.
 var devinCLIGPTCaps = Capabilities{
@@ -314,12 +349,12 @@ var providerCapabilities = map[string]map[string]Capabilities{
 	// models.dev catalog while both are zero, so setting one alone would
 	// silently disable the catalog lookup for these ids.
 	"codebuddy-cn": {
-		"glm-5.2":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
-		"glm-5.1":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 200000, MaxOutput: 48000},
-		"glm-5.0-turbo":       {Reasoning: true, Tools: true},
-		"minimax-m3":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 512000, MaxOutput: 524288},
-		"minimax-m2.7":        {Reasoning: true, Tools: true},
-		"kimi-k2.5":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 164000, MaxOutput: 32000},
+		"glm-5.2":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
+		"glm-5.1":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 200000, MaxOutput: 48000},
+		"glm-5.0-turbo": {Reasoning: true, Tools: true},
+		"minimax-m3":    {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 512000, MaxOutput: 524288},
+		"minimax-m2.7":  {Reasoning: true, Tools: true},
+		"kimi-k2.5":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 164000, MaxOutput: 32000},
 		// Upstream #4614 drops glm-5v-turbo / kimi-k2.7 / kimi-k2.6 from the
 		// published server list, and v0.5.99 keeps them dropped. They stay here
 		// on purpose: a saved combo or connection naming one of them is still
@@ -327,17 +362,17 @@ var providerCapabilities = map[string]map[string]Capabilities{
 		// unroutable for no user-visible gain. The level divergence this
 		// causes is recorded in thinking_levels_fixture_test.go. The limits
 		// are the server's own figures.
-		"glm-5v-turbo":        {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 200000, MaxOutput: 64000},
-		"kimi-k2.7":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 256000, MaxOutput: 32000},
-		"kimi-k2.6":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 256000, MaxOutput: 32000},
-		"hy3-preview":         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 192000, MaxOutput: 64000},
-		"hy3":                 {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 192000, MaxOutput: 64000},
-		"hy3-x":               {Vision: true, Reasoning: true, Tools: true},
-		"hy4-preview":         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 64000},
-		"hy4-preview-x":       {Vision: true, Reasoning: true, Tools: true},
-		"glm-5.3":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
-		"glm-5.3-flash":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
-		"kimi-k3-1":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 1048576},
+		"glm-5v-turbo":  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 200000, MaxOutput: 64000},
+		"kimi-k2.7":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 256000, MaxOutput: 32000},
+		"kimi-k2.6":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 256000, MaxOutput: 32000},
+		"hy3-preview":   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 192000, MaxOutput: 64000},
+		"hy3":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 192000, MaxOutput: 64000},
+		"hy3-x":         {Vision: true, Reasoning: true, Tools: true},
+		"hy4-preview":   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 64000},
+		"hy4-preview-x": {Vision: true, Reasoning: true, Tools: true},
+		"glm-5.3":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
+		"glm-5.3-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
+		"kimi-k3-1":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 1048576},
 		// contextWindow is the server's contextWindow.defaultLength (300000),
 		// NOT maxInputTokens: k2.8 publishes supportedLengths [300000, 1000000]
 		// and the gateway only serves 1M to callers who opt in, which this
@@ -357,13 +392,13 @@ var providerCapabilities = map[string]map[string]Capabilities{
 	// gpt-5.4/5.5 rows now publish the 1.05M API window, so the gateway's own
 	// number has to be recorded here (upstream decolua/9router 89ffac5a).
 	"devin-cli": {
-		"gpt-5.4-high":    devinCLIGPTCaps,
-		"gpt-5.4-medium":  devinCLIGPTCaps,
-		"gpt-5.4-low":     devinCLIGPTCaps,
-		"gpt-5.5-xhigh":   devinCLIGPTCaps,
-		"gpt-5.5-high":    devinCLIGPTCaps,
-		"gpt-5.5-medium":  devinCLIGPTCaps,
-		"gpt-5.5-low":     devinCLIGPTCaps,
+		"gpt-5.4-high":   devinCLIGPTCaps,
+		"gpt-5.4-medium": devinCLIGPTCaps,
+		"gpt-5.4-low":    devinCLIGPTCaps,
+		"gpt-5.5-xhigh":  devinCLIGPTCaps,
+		"gpt-5.5-high":   devinCLIGPTCaps,
+		"gpt-5.5-medium": devinCLIGPTCaps,
+		"gpt-5.5-low":    devinCLIGPTCaps,
 	},
 	// MiniMax Code (mcode) credits lane — Anthropic messages on the mavis
 	// gateway, thinking as adaptive effort via output_config.effort
@@ -406,6 +441,20 @@ func init() {
 		"glm-5.3-flash": {
 			Vision: true, VideoInput: true, PDF: true, Reasoning: true, Tools: true,
 			ThinkingFormat: "openai", ThinkingCanDisable: new(false),
+		},
+		// OpenCode Go's claude-haiku-5-5 rejects `thinking.type.enabled` — the
+		// shape the global *claude-haiku* pattern sends — with 400:
+		// `"thinking.type.enabled" is not supported for this model`. Use
+		// `thinking.type.adaptive` + `output_config.effort`, which is exactly
+		// what the claude-adaptive branch emits, so override the global haiku
+		// pattern for this provider only. The limits follow the model, not the
+		// pattern: the upstream catalog reports context_length 1000000 and
+		// maxOutput 128000, and a provider override short-circuits before the
+		// catalog overlay, so both are stated here (upstream #4727).
+		"claude-haiku-5-5": {
+			Vision: true, Reasoning: true, Search: true,
+			ThinkingFormat: "claude-adaptive",
+			ContextWindow:  1000000, MaxOutput: 128000,
 		},
 	}
 
@@ -464,6 +513,10 @@ var patternCapabilities = []patternCapability{
 	{pattern: "*claude*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 
 	{pattern: "*gemini*image*", caps: Capabilities{Vision: true, ImageOutput: true, Tools: true}},
+	// Gemini 4 (Argon): no "minimal" tier (400) and no thinkingBudget —
+	// LOW/MEDIUM/HIGH only, cannot disable. First-match-wins keeps it ahead
+	// of the gemini-3 rows. Parity with open-sse/providers/capabilities.js.
+	{pattern: "*gemini-4*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false), ContextWindow: 1048576, MaxOutput: 65536}},
 	{pattern: "*gemini-3.8*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-3.7*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-3*pro*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
@@ -866,22 +919,22 @@ func mergeCapabilities(base, overlay Capabilities) Capabilities {
 // audioInput, videoInput, imageOutput, audioOutput, search, tools, reasoning,
 // thinkingFormat, thinkingCanDisable, thinkingRange, contextWindow, maxOutput).
 type CapabilitiesDetail struct {
-	Vision                  bool    `json:"vision"`
-	PDF                     bool    `json:"pdf"`
-	AudioInput              bool    `json:"audioInput"`
-	VideoInput              bool    `json:"videoInput"`
-	ImageOutput             bool    `json:"imageOutput"`
-	AudioOutput             bool    `json:"audioOutput"`
-	Search                  bool    `json:"search"`
-	Tools                   bool    `json:"tools"`
-	Reasoning               bool    `json:"reasoning"`
-	ThinkingFormat          *string `json:"thinkingFormat"`
-	ThinkingCanDisable      bool    `json:"thinkingCanDisable"`
-	ThinkingRange           any     `json:"thinkingRange"`
-	ThinkingEffortSupported bool    `json:"thinkingEffortSupported"`
+	Vision                  bool     `json:"vision"`
+	PDF                     bool     `json:"pdf"`
+	AudioInput              bool     `json:"audioInput"`
+	VideoInput              bool     `json:"videoInput"`
+	ImageOutput             bool     `json:"imageOutput"`
+	AudioOutput             bool     `json:"audioOutput"`
+	Search                  bool     `json:"search"`
+	Tools                   bool     `json:"tools"`
+	Reasoning               bool     `json:"reasoning"`
+	ThinkingFormat          *string  `json:"thinkingFormat"`
+	ThinkingCanDisable      bool     `json:"thinkingCanDisable"`
+	ThinkingRange           any      `json:"thinkingRange"`
+	ThinkingEffortSupported bool     `json:"thinkingEffortSupported"`
 	ThinkingLevels          []string `json:"thinkingLevels,omitempty"`
-	ContextWindow           int     `json:"contextWindow,omitempty"`
-	MaxOutput               int     `json:"maxOutput,omitempty"`
+	ContextWindow           int      `json:"contextWindow,omitempty"`
+	MaxOutput               int      `json:"maxOutput,omitempty"`
 }
 
 // ComboCapabilities is the aggregated block upstream publishes for a combo

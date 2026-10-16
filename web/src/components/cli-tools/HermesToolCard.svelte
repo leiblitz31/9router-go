@@ -57,6 +57,11 @@
   let selectedApiKey = $state('')
   let selectedModel = $state('')
   let roleModels = $state<Record<string, string>>({})
+  // Audio transcription via 9router: stt.provider "openai" + base_url
+  // override points Hermes speech-to-text at /v1/audio/transcriptions
+  // (per-profile, saved with Apply).
+  let audioEnabled = $state(false)
+  let sttModel = $state('')
   let showRoles = $state(false)
   let showManualConfig = $state(false)
   let copiedCommand = $state('')
@@ -100,9 +105,19 @@
     for (const [role, cfg] of Object.entries(data.settings?.auxiliary ?? {})) {
       if (cfg?.model) roleModels[role] = cfg.model
     }
+    setAudioEnabled(!!data.has9RouterStt)
+    setSttModel(data.has9RouterStt ? (data.settings?.stt?.model ?? '') : '')
     endpoint = data.settings?.model?.base_url
       ? normalizeHermesEndpoint(data.settings.model.base_url, localOrigin)
       : localOrigin
+  }
+
+  function setAudioEnabled(v: boolean) {
+    audioEnabled = v
+  }
+
+  function setSttModel(v: string) {
+    sttModel = v
   }
 
   async function loadSettings(profile = activeProfile) {
@@ -154,6 +169,8 @@
     message = null
     roleModels = {}
     selectedModel = ''
+    setAudioEnabled(false)
+    setSttModel('')
     await loadSettings(name)
   }
 
@@ -176,8 +193,10 @@
       const res = await api.applyHermesSettings({
         profile: activeProfile,
         baseUrl: effectiveEndpoint,
-        apiKey: keyToUse || null,
+        apiKey: *** || null,
         selections: selections(),
+        // Always sent: Apply is also how the stt wiring gets turned off.
+        audio: { enabled: audioEnabled, model: sttModel.trim() },
       })
       message = { type: 'success', text: res.message || `Settings applied to ${activeProfile === 'default' ? 'the default profile' : `profile "${activeProfile}"`}.` }
       await afterChange()
@@ -232,6 +251,8 @@
     try {
       const res = await api.resetHermesSettings(activeProfile)
       message = { type: 'success', text: res.message || `Settings reset for ${activeProfile}.` }
+      setAudioEnabled(false)
+      setSttModel('')
       await afterChange()
     } catch (err) {
       message = { type: 'error', text: err instanceof Error ? err.message : 'Failed to reset settings' }
@@ -241,7 +262,7 @@
   }
 
   let manualConfigs = $derived([
-    { filename: `${hermesHomeDir(activeProfile)}/config.yaml`, content: hermesConfigYaml({ default: selectedModel, roles: roleModels }, effectiveEndpoint, runCommand) },
+    { filename: `${hermesHomeDir(activeProfile)}/config.yaml`, content: hermesConfigYaml({ default: selectedModel, roles: roleModels }, effectiveEndpoint, runCommand, audioEnabled ? { enabled: true, model: sttModel } : undefined) },
     { filename: `${hermesHomeDir(activeProfile)}/.env`, content: hermesEnvContent(keyToUse) },
   ])
 
@@ -391,6 +412,42 @@
                 </div>
               {/each}
               <p class="text-xs text-text-muted">Empty roles inherit the default model.</p>
+            </div>
+          {/if}
+        </div>
+
+        <div class="flex flex-col gap-1.5">
+          <label
+            class="flex items-center gap-2 text-xs text-text-muted cursor-pointer"
+            title="Route Hermes voice & audio transcription through 9router's /v1/audio/transcriptions — usage is tracked on this instance"
+          >
+            <input
+              type="checkbox"
+              checked={audioEnabled}
+              onchange={(e) => setAudioEnabled(e.currentTarget.checked)}
+              class="w-3.5 h-3.5 accent-brand-500 cursor-pointer shrink-0"
+            />
+            <span>Transcribe voice & audio via 9router (per-profile)</span>
+          </label>
+          {#if audioEnabled}
+            <div class="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2">
+              <span class="text-xs font-semibold text-text-main sm:w-32 sm:text-right sm:text-sm">STT Model</span>
+              <div class="relative flex-1 min-w-0">
+                <input
+                  type="text"
+                  bind:value={sttModel}
+                  placeholder="provider/whisper-model-id"
+                  class="w-full min-w-0 px-2 py-1.5 rounded bg-surface border border-border text-xs text-text-main focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+                />
+                {#if sttModel}
+                  <button
+                    type="button"
+                    onclick={() => setSttModel('')}
+                    title="Clear"
+                    class="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-text-muted hover:text-red-500 rounded transition-colors cursor-pointer"
+                  >✕</button>
+                {/if}
+              </div>
             </div>
           {/if}
         </div>

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	internalproxy "9router/proxy/internal/proxy"
 )
 
 var (
@@ -43,7 +45,7 @@ func doDirectOrClient(ctx context.Context, client *http.Client, req *http.Reques
 		client = directHTTPClient
 	}
 	resp, err := client.Do(req)
-	if err != nil {
+	if err != nil && !internalproxy.ForbidsDirectReplay(client) {
 		// Transport-level failure only: retry once direct. A real upstream
 		// 403 (e.g. key rejected) must surface, not be retried against the
 		// same target where a sandbox mock could mask it as success.

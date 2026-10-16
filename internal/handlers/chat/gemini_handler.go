@@ -206,7 +206,7 @@ func (h *ChatHandler) refreshOAuthTokenIfExpired(connectionID, currentToken stri
 		if oauthData != nil {
 			projectID = oauthData.ProjectID
 		}
-// The token is usable, so there is nothing to refresh. Hand back exactly
+		// The token is usable, so there is nothing to refresh. Hand back exactly
 		// the credential the caller passed in, untouched: the stored accessToken
 		// is not interchangeable with it, and the request path picks the right
 		// one deliberately.
@@ -239,7 +239,7 @@ func (h *ChatHandler) refreshOAuthTokenIfExpired(connectionID, currentToken stri
 			})
 			if err != nil {
 				h.parkRejectedOAuthAccount(connectionID, err)
-return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: true},
+				return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: true},
 					fmt.Errorf("OAuth refresh for %s: %w", provider, err)
 			}
 			if result == nil {
@@ -259,8 +259,23 @@ return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: 
 			}
 			prevAccess, _ := existing["accessToken"].(string)
 			oauth.SyncMirroredAPIKey(existing, provider, prevAccess, result.AccessToken)
+			// providerSpecificData is a nested object, so a top-level assign
+			// from the update map would drop the fields already stored on the
+			// connection (agentKeyId, fingerprintId, ...) — merge it instead.
+			updatePSD, _ := update["providerSpecificData"].(map[string]any)
+			delete(update, "providerSpecificData")
 			for k, v := range update {
 				existing[k] = v
+			}
+			if len(updatePSD) > 0 {
+				existingPSD, _ := existing["providerSpecificData"].(map[string]any)
+				if existingPSD == nil {
+					existingPSD = map[string]any{}
+				}
+				for k, v := range updatePSD {
+					existingPSD[k] = v
+				}
+				existing["providerSpecificData"] = existingPSD
 			}
 			if result.ProjectID != "" {
 				existing["projectId"] = result.ProjectID
@@ -319,7 +334,7 @@ return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: 
 		return oauthTokenResult{token: tokenResp.AccessToken, projectID: projectID}, nil
 	})
 
-// A shared flight must not hand one caller's token to another: when the
+	// A shared flight must not hand one caller's token to another: when the
 	// leader found the connection healthy, it returned its own token as a
 	// pass-through, and that value belongs to the leader alone.
 	if err != nil {

@@ -544,8 +544,12 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 			// Strip empty text blocks (Anthropic 400s on empty text). The same
 			// emptiness rule decides whether the whole message survives below,
 			// so both read it from one place — a whitespace-only block must not
-			// slip through one pass and be dropped by the other.
-			if bType == "text" && !isContentfulBlock(block) {
+			// slip through one pass and be dropped by the other. A thinking
+			// block with no visible text dies the same way: the Messages API
+			// rejects it outright (400 "each thinking block must contain
+			// non-whitespace thinking") and a valid signature does not save it
+			// (upstream #4727).
+			if (bType == claudeBlockText || bType == claudeBlockThinking) && !isContentfulBlock(block) {
 				changed = true
 				continue
 			}

@@ -78,6 +78,11 @@ func RegisterAll() {
 	// executor serves vertex and vertex-partner.
 	Register("bedrock", func() Executor { return ForwardBedrock })
 	Register("bedrock-xai", func() Executor { return ForwardBedrock })
+	// One Vertex executor serves both entries: "vertex" speaks the Gemini native
+	// wire and "vertex-partner" the global OpenAI-compatible endpoint; the entry's
+	// Format decides which (parity with open-sse/executors/vertex.js).
+	Register("vertex", func() Executor { return ForwardVertex })
+	Register("vertex-partner", func() Executor { return ForwardVertexPartner })
 	Register("azure", func() Executor { return ForwardAzure })
 	Register("commandcode", func() Executor { return ForwardCommandcode })
 	Register("qoder", func() Executor { return ForwardQoder })

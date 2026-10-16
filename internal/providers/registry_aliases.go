@@ -59,6 +59,7 @@ var RegistryAliases = map[string]string{
 	"minimax-code-global": "mmg",
 	"muse":              "muse",
 	"nanobanana":        "nb",
+	"nous":              "nous",
 	"opencode":          "oc",
 	"opencode-go":       "ocg",
 	"opencode-zen":      "ocz",

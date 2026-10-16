@@ -2,13 +2,14 @@ import assert from 'node:assert'
 import { describe, it } from 'node:test'
 import type { Combo, ProviderConnection, ProviderNode } from '../../api/client'
 import {
+  getDeactivatedProviderIds,
   resolveFilteredCombos,
   resolveFilteredGroups,
   resolveModelPickerGroups,
 } from './pickerData'
 
 describe('pickerData', () => {
-  it('includes connected providers and no-auth providers regardless of isActive', () => {
+  it('includes active providers and no-auth providers, hides fully-deactivated ones', () => {
     const connections: ProviderConnection[] = [
       {
         id: 'conn-1',
@@ -44,7 +45,9 @@ describe('pickerData', () => {
     assert.strictEqual(agGroup.models[0].value.startsWith('ag/'), true)
 
     const ccGroup = groups.find((g) => g.id === 'claude')
-    assert.ok(ccGroup)
+    // Upstream parity (da1756a8): a provider whose every connection is
+    // deactivated is hidden from the picker.
+    assert.strictEqual(ccGroup, undefined)
 
     const ocGroup = groups.find((g) => g.id === 'opencode')
     assert.ok(ocGroup)
@@ -316,5 +319,43 @@ describe('pickerData', () => {
       dsGroup.models.filter((m) => m.id !== 'deepseek-chat').every((m) => !m.deprecated),
       true
     )
+  })
+
+  it('getDeactivatedProviderIds: all-off provider hidden, mixed stays, zero-conn untouched', () => {
+    const deactivated = getDeactivatedProviderIds([
+      { provider: 'node-a', isActive: 0 },
+      { provider: 'node-a', isActive: 0 },
+      { provider: 'node-b', isActive: 0 },
+      { provider: 'node-b', isActive: 1 },
+      { provider: 'node-c', isActive: false },
+    ])
+    assert.strictEqual(deactivated.has('node-a'), true)
+    assert.strictEqual(deactivated.has('node-b'), false)
+    assert.strictEqual(deactivated.has('node-c'), true)
+    assert.strictEqual(deactivated.has('local-ollama'), false)
+    assert.strictEqual(getDeactivatedProviderIds([]).size, 0)
+    assert.strictEqual(getDeactivatedProviderIds(null).size, 0)
+  })
+
+  it('narrows a provider to enabledModels when an active connection lists them', () => {
+    const conn = (over: Record<string, unknown>): ProviderConnection => ({
+      id: 'c',
+      provider: 'deepseek',
+      authType: 'apikey',
+      name: null,
+      email: null,
+      priority: null,
+      isActive: 1,
+      data: '{}',
+      createdAt: '',
+      updatedAt: '',
+      providerSpecificData: { enabledModels: ['deepseek-chat'] },
+      ...over,
+    })
+    const groups = resolveModelPickerGroups([conn({})], [])
+    const ds = groups.find((g) => g.id === 'deepseek')
+    assert.ok(ds)
+    assert.ok(ds.models.length > 0)
+    assert.ok(ds.models.every((m) => m.id === 'deepseek-chat'))
   })
 })

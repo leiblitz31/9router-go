@@ -438,3 +438,77 @@ func TestUsageWindowCache_ConcurrentReadsDoNotDoubleCount(t *testing.T) {
 		t.Errorf("settled read: requests = %d, want %d", settled.TotalRequests, base+10)
 	}
 }
+
+// Rows recorded with input_tokens/output_tokens blobs (embeddings, Gemini)
+// carry zero promptTokens columns; the fold must read the blob (upstream
+// 813a0121) instead of counting them as zero.
+func TestUsageWindowCache_InputTokensBlobCountsAsPrompt(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	resetUsageWindowCache()
+	t.Cleanup(resetUsageWindowCache)
+
+	now := time.Now().UTC()
+	_, err := repo.RawDB().Exec(
+		`INSERT INTO usageHistory (timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens)
+		 VALUES (?, 'openai', 'text-embedding-3-small', 'conn-1', 'sk-aaaa1111', '/v1/embeddings', 0, 0, 0.01, 'success', ?)`,
+		now.Add(-time.Hour).UTC().Format(time.RFC3339),
+		`{"input_tokens":200,"output_tokens":60}`)
+	if err != nil {
+		t.Fatalf("seed input_tokens row: %v", err)
+	}
+
+	got := usageStatsBody(t, repo, "24h")
+	if got.TotalPromptTokens != 200 || got.TotalCompletionTokens != 60 {
+		t.Errorf("prompt/completion = %d/%d, want 200/60: input_tokens blob was not folded",
+			got.TotalPromptTokens, got.TotalCompletionTokens)
+	}
+}
+
+// A blob that names no count falls back to the persisted columns.
+func TestUsageWindowCache_BlobWithoutCountsUsesColumns(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	resetUsageWindowCache()
+	t.Cleanup(resetUsageWindowCache)
+
+	now := time.Now().UTC()
+	_, err := repo.RawDB().Exec(
+		`INSERT INTO usageHistory (timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens)
+		 VALUES (?, 'openai', 'gpt-5.5', 'conn-1', 'sk-aaaa1111', '/v1/chat/completions', 100, 50, 0.01, 'success', '{}')`,
+		now.Add(-time.Hour).UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed column row: %v", err)
+	}
+
+	got := usageStatsBody(t, repo, "24h")
+	if got.TotalPromptTokens != 100 || got.TotalCompletionTokens != 50 {
+		t.Errorf("prompt/completion = %d/%d, want 100/50: column fallback broke",
+			got.TotalPromptTokens, got.TotalCompletionTokens)
+	}
+}
+
+// A padded key variant must land in the same bucket as the stored key
+// (upstream 813a0121 trims before lookup; without it one key splits into
+// two rows).
+func TestUsageWindowCache_PaddedKeyBucketsWithStoredKey(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	resetUsageWindowCache()
+	t.Cleanup(resetUsageWindowCache)
+
+	now := time.Now().UTC()
+	seedHistoryAt(t, repo, now.Add(-2*time.Hour), "openai", "gpt-5.5", "conn-1", "sk-aaaa1111", 100, 50, 0.01, 0)
+	seedHistoryAt(t, repo, now.Add(-time.Hour), "openai", "gpt-5.5", "conn-1", "  sk-aaaa1111\n", 100, 50, 0.01, 0)
+
+	got := usageStatsBody(t, repo, "24h")
+	if got.TotalRequests != 2 {
+		t.Fatalf("requests = %d, want 2", got.TotalRequests)
+	}
+	if len(got.ByApiKey) != 1 {
+		t.Errorf("byApiKey buckets = %d, want 1: padded key split the bucket", len(got.ByApiKey))
+	}
+}

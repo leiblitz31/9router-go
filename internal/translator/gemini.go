@@ -377,7 +377,7 @@ func TranslateOpenAIToGemini(openaiBody []byte) ([]byte, error) {
 
 	// Normalize Gemini contents: merge adjacent same-role messages, strip empty parts,
 	// and ensure first turn is "user" (parity with decolua/9router v0.5.75 #e7b5f09).
-	req.Contents = NormalizeGeminiContents(req.Contents)
+	req.Contents = NormalizeGeminiContents(req.Contents, oreq.Model)
 
 	// Tools
 	if len(oreq.Tools) > 0 {
@@ -405,16 +405,18 @@ func TranslateOpenAIToGemini(openaiBody []byte) ([]byte, error) {
 		}
 	}
 
-	// Generation config
+	// Generation config — Gemini 4 removed the sampling params, forwarding
+	// them fails the request (#4802).
+	allowSampling := !IsGemini4Model(oreq.Model)
 	genConfig := make(map[string]any)
-	if oreq.Temperature != nil {
+	if allowSampling && oreq.Temperature != nil {
 		genConfig["temperature"] = *oreq.Temperature
 	}
 
-	if oreq.TopP != nil {
+	if allowSampling && oreq.TopP != nil {
 		genConfig["topP"] = *oreq.TopP
 	}
-	if oreq.TopK != nil {
+	if allowSampling && oreq.TopK != nil {
 		genConfig["topK"] = *oreq.TopK
 	}
 	maxTokens := oreq.MaxTokens
@@ -1007,7 +1009,15 @@ func geminiToolMediaParts(content any) []GeminiPart {
 // does not start on a user turn, and equally one that ends on a model turn: a
 // prefill, a truncated stream, or tool calls the client never answered all
 // arrive that way and would 400 without the guards.
-func NormalizeGeminiContents(contents []GeminiContent) []GeminiContent {
+//
+// model selects the Gemini 4 merge rule: a merged user turn must end on a
+// functionResponse, so non-response parts sort first (#4802).
+func NormalizeGeminiContents(contents []GeminiContent, model ...string) []GeminiContent {
+	var mdl string
+	if len(model) > 0 {
+		mdl = model[0]
+	}
+	frLast := IsGemini4Model(mdl)
 	out := make([]GeminiContent, 0, len(contents)+2)
 	for _, c := range contents {
 		if c.Role == "" || len(c.Parts) == 0 {
@@ -1025,6 +1035,9 @@ func NormalizeGeminiContents(contents []GeminiContent) []GeminiContent {
 		}
 		if len(out) > 0 && out[len(out)-1].Role == c.Role {
 			out[len(out)-1].Parts = append(out[len(out)-1].Parts, validParts...)
+			if frLast {
+				out[len(out)-1].Parts = moveGeminiFunctionResponsesLast(out[len(out)-1].Parts)
+			}
 		} else {
 			out = append(out, GeminiContent{
 				Role:  c.Role,
@@ -1115,6 +1128,49 @@ func nextToolNameForID(queued map[string][]string, fallback map[string]string, c
 		return name
 	}
 	return fallback[cleanID]
+}
+
+// IsGemini4Model reports whether a model id is a Gemini 4 (Argon) model.
+// Gemini 4 drops the sampling params and requires functionResponse-last
+// merged user turns. Parity with isGemini4Model in
+// open-sse/providers/capabilities.js (#4802).
+func IsGemini4Model(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(m, "/"); i != -1 {
+		m = m[i+1:]
+	}
+	if !strings.HasPrefix(m, "gemini-4") {
+		return false
+	}
+	rest := m[len("gemini-4"):]
+	return rest == "" || rest[0] == '-' || rest[0] == '.'
+}
+
+// moveGeminiFunctionResponsesLast moves functionResponse parts to the end of
+// a merged user turn. Gemini 4 rejects a merged turn whose last part is not
+// a functionResponse (#4802).
+func moveGeminiFunctionResponsesLast(parts []GeminiPart) []GeminiPart {
+	n := 0
+	for _, p := range parts {
+		if p.FunctionResponse != nil {
+			n++
+		}
+	}
+	if n == 0 {
+		return parts
+	}
+	out := make([]GeminiPart, 0, len(parts))
+	for _, p := range parts {
+		if p.FunctionResponse == nil {
+			out = append(out, p)
+		}
+	}
+	for _, p := range parts {
+		if p.FunctionResponse != nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func isGeminiPartEmpty(p GeminiPart) bool {

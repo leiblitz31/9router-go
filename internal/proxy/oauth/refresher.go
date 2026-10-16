@@ -16,6 +16,14 @@ type TokenResult struct {
 	ExpiresIn    int // seconds
 	Scope        string
 	ProjectID    string // provider-specific extra field
+	// APIKey is set only by a provider whose requests authenticate with a key
+	// distinct from the access token (Nous mints a short-lived agent key).
+	// Empty means "the access token is the credential".
+	APIKey string
+	// Extra holds provider-specific values the refresher learned during the
+	// refresh (Nous: agentKeyId / agentKeyExpiresAt). BuildConnectionUpdate
+	// merges them into providerSpecificData.
+	Extra map[string]string
 }
 
 // Params holds all inputs for a refresh call.

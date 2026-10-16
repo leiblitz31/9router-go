@@ -307,6 +307,16 @@ func TestHandleAudioVoices_elevenlabs(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	// The endpoint comes from the registry, not from the injected client, so
+	// the fake upstream has to own the URL. Setting only handler.Client left
+	// the request aimed at the real api.elevenlabs.io, which fails behind the
+	// egress proxy ("tls: first record does not look like a TLS handshake").
+	orig := providers.KnownProviders["elevenlabs"]
+	cfg := orig
+	cfg.VoicesURL = upstream.URL + "/v1/voices"
+	providers.KnownProviders["elevenlabs"] = cfg
+	defer func() { providers.KnownProviders["elevenlabs"] = orig }()
+
 	handler := chat.NewChatHandler(nil)
 	req := httptest.NewRequest("GET", "/v1/audio/voices?provider=elevenlabs", nil)
 	rec := httptest.NewRecorder()

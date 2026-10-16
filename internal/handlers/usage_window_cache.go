@@ -3,10 +3,12 @@ package handlers
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/translator"
 )
 
@@ -186,6 +188,7 @@ func accountKey(model, provider, connectionID string) string {
 // apiKeyBucketKey composes the byApiKey bucket key. The empty and "***" stored
 // values are the same bucket: every request served without a key.
 func apiKeyBucketKey(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" || apiKey == "***" {
 		return "local-no-key"
 	}
@@ -198,9 +201,24 @@ func apiKeyBucketKey(apiKey string) string {
 // associative, so summing in a different order than the uncached handler did
 // would drift the cost total in its last digits — a parity break users would
 // read as a billing error.
+
+// rowPromptCompletion resolves one history row's prompt/completion counts.
+// The tokens blob wins when it names a count; the persisted columns are the
+// fallback for rows recorded with input_tokens/output_tokens shapes
+// (upstream 813a0121: embedding/Gemini rows otherwise read as zero).
+func rowPromptCompletion(row db.UsageHistoryRow) (promptTok, complTok int64) {
+	p, c := translator.PromptCompletionFromJSON([]byte(row.Tokens))
+	if p == 0 {
+		p = row.PromptTokens
+	}
+	if c == 0 {
+		c = row.CompletionTokens
+	}
+	return int64(p), int64(c)
+}
+
 func (a *rawAggregate) foldRow(row db.UsageHistoryRow) {
-	promptTok := int64(row.PromptTokens)
-	complTok := int64(row.CompletionTokens)
+	promptTok, complTok := rowPromptCompletion(row)
 	cachedTok := int64(translator.CachedTokensFromJSON([]byte(row.Tokens)))
 
 	if row.Provider != "" {
@@ -252,8 +270,7 @@ func (a *rawAggregate) foldRow(row db.UsageHistoryRow) {
 // the order they were added, which keeps the float sum from drifting further
 // than the fold did.
 func (a *rawAggregate) unfoldRow(row db.UsageHistoryRow) {
-	promptTok := int64(row.PromptTokens)
-	complTok := int64(row.CompletionTokens)
+	promptTok, complTok := rowPromptCompletion(row)
 	cachedTok := int64(translator.CachedTokensFromJSON([]byte(row.Tokens)))
 
 	if row.Provider != "" {
@@ -559,13 +576,16 @@ func friendlyAccountName(connectionID string, connMap map[string]string) string 
 // indexes both the stored key and its mask, because the shared database holds
 // rows written by both this build and the Next.js dashboard.
 func apiKeyDisplayName(storedKey string, keyNames map[string]string) string {
+	// Look up the trimmed key so padded variants resolve (upstream 813a0121);
+	// fall back to the masked key rather than a bare prefix.
+	trimmed := strings.TrimSpace(storedKey)
 	switch {
-	case keyNames[storedKey] != "":
-		return keyNames[storedKey]
-	case storedKey == "local-no-key":
+	case keyNames[trimmed] != "":
+		return keyNames[trimmed]
+	case trimmed == "local-no-key" || trimmed == "":
 		return "Local (No Key)"
 	default:
-		return storedKey[:min(8, len(storedKey))] + "..."
+		return handlerutil.MaskAPIKey(trimmed)
 	}
 }
 

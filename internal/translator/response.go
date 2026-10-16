@@ -40,6 +40,37 @@ func formatSSE(event map[string]any) string {
 	return fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, string(payload))
 }
 
+// PromptCompletionFromJSON reads prompt/completion counts from a persisted
+// tokens blob. OpenAI shapes use prompt_tokens/completion_tokens; Claude and
+// Responses shapes use input_tokens/output_tokens (upstream 813a0121 falls
+// back to input_tokens/output_tokens so embedding/Gemini rows stop reading
+// as zero). Explicit JSON null is not a value; missing keys yield 0.
+func PromptCompletionFromJSON(raw []byte) (prompt, completion int) {
+	if len(raw) == 0 {
+		return 0, 0
+	}
+	var usage struct {
+		PromptTokens     *float64 `json:"prompt_tokens"`
+		CompletionTokens *float64 `json:"completion_tokens"`
+		InputTokens      *float64 `json:"input_tokens"`
+		OutputTokens     *float64 `json:"output_tokens"`
+	}
+	if json.Unmarshal(raw, &usage) != nil {
+		return 0, 0
+	}
+	if usage.PromptTokens != nil && *usage.PromptTokens >= 0 {
+		prompt = int(*usage.PromptTokens)
+	} else if usage.InputTokens != nil && *usage.InputTokens >= 0 {
+		prompt = int(*usage.InputTokens)
+	}
+	if usage.CompletionTokens != nil && *usage.CompletionTokens >= 0 {
+		completion = int(*usage.CompletionTokens)
+	} else if usage.OutputTokens != nil && *usage.OutputTokens >= 0 {
+		completion = int(*usage.OutputTokens)
+	}
+	return prompt, completion
+}
+
 // CachedTokensFromJSON reads cached prompt tokens from every persisted and
 // provider-facing compatibility shape. It returns the first explicit numeric
 // value in precedence order and never treats JSON null as a value.

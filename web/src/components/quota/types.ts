@@ -631,14 +631,35 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
       case 'qoder-cn':
         if (d.quotas) {
           Object.entries(d.quotas).forEach(([quotaType, quota]) => {
-            if (quotaType === 'organization' && (!quota || (Number(quota.total) || 0) === 0)) {
+            // Skip any zero-total bucket: `personal_standard` accounts report
+            // `user` as 0/0 (their grant lives in `addOn`) and most accounts
+            // never have an organization bucket. Buckets holding an actual
+            // grant always have total > 0 and are kept.
+            // Qoder's `remaining` is an absolute credit count, but the table
+            // interprets it as a 0-100 percentage — don't forward it; the
+            // percentage is computed from used/total instead.
+            if (!quota || (Number(quota.total) || 0) === 0) {
               return
             }
             normalizedQuotas.push({
-              name: quotaType === 'user' ? 'Personal' : quotaType === 'organization' ? 'Organization' : quotaType,
+              name:
+                quotaType === 'user'
+                  ? 'Personal'
+                  : quotaType === 'organization'
+                    ? 'Organization'
+                    : quotaType === 'addOn'
+                      ? 'Add-on'
+                      : quotaType,
               used: Number(quota.used) || 0,
               total: Number(quota.total) || 0,
+              unit: (quota.unit as string) || undefined,
               resetAt: (quota.resetAt as string) || null,
+              // Qoder reports open-ended plans as a 9999 sentinel; the
+              // service turns that into neverExpires so the row reads
+              // "Never expires" instead of a year-9999 date.
+              neverExpires: quota.neverExpires === true,
+              // Present on add-on credits: links to Qoder's own usage page.
+              detailUrl: (quota.detailUrl as string) || null,
             })
           })
         }

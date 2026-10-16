@@ -31,6 +31,12 @@ type ProviderConfig struct {
 	// response to be translated rather than passed through.
 	UpstreamIsAnthropic bool
 
+	// ProviderID is the registry id this config was minted from, kept on the
+	// struct because a few rules are scoped to the node shape rather than to
+	// the upstream host (the Nous attribution rule only applies to a custom
+	// `openai-compatible-*` node). Empty for entries built inline.
+	ProviderID string
+
 	// LocalByDesign marks a provider whose upstream endpoint is intended to run on the
 	// local host or loopback network (e.g. ollama-local on localhost:11434).
 	LocalByDesign bool
@@ -132,6 +138,7 @@ func WithoutStaticHeader(cfg *ProviderConfig, name string) *ProviderConfig {
 // (src/app/api/providers/[id]/models/route.js, v0.5.91).
 var modelsListURL = map[string]string{
 	"tokenharbor": "https://tokenharbor.ai/v1/models",
+	"nous":        "https://inference-api.nousresearch.com/v1/models",
 	"dahl":        "https://inference.dahl.global/v1/models",
 	"atria":       "https://api.atria-asi.ai/v1/models",
 	"agnes":       "https://apihub.agnes-ai.com/v1/models",
@@ -279,6 +286,14 @@ var KnownProviders = map[string]ProviderConfig{
 		StaticHeaders: map[string]string{
 			"x-api-version": "1.0.0",
 		},
+	},
+	// Nous Research Portal — OpenAI-compatible chat completions, dual auth:
+	// OAuth device-code (hermes-cli, free account) or a Portal API key.
+	// Port of open-sse/providers/registry/nous.js (decolua/9router 165f9b90).
+	"nous": {
+		BaseURL:    "https://inference-api.nousresearch.com/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
 	},
 	// v1m System One — a calibrated decision engine, not a chat model. Its
 	// two registry models carry kind "systemone", so the only endpoint it

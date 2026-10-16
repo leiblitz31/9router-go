@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	json "encoding/json/v2"
 	"fmt"
+	"strings"
 	"time"
 
 	"9router/proxy/internal/models"
@@ -187,10 +188,24 @@ func (r *Repo) UpdateProviderNode(id, name, data string) (*models.ProviderNode, 
 }
 
 // DeleteProviderNode deletes a provider node and its associated connections.
+//
+// The customModels kv rows go with it: their key carries the node id in its
+// first segment (`<nodeID>|<modelId>|<kind>`), so without the delete a removed
+// node keeps surfacing its models in /v1/models and the picker (upstream #3115,
+// a8f63f4d).
 func (r *Repo) DeleteProviderNode(id string) error {
 	if _, err := r.db.Exec("DELETE FROM providerNodes WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete provider node %s: %w", id, err)
 	}
 	_, _ = r.db.Exec("DELETE FROM providerConnections WHERE provider = ?", id)
+	// `|` cannot occur in a node id (see provider_node_id.go), so the prefix
+	// match cannot reach another node's rows.
+	_, _ = r.db.Exec("DELETE FROM kv WHERE scope = 'customModels' AND key LIKE ?", escapeLikePrefix(id)+"|%")
 	return nil
+}
+
+// escapeLikePrefix makes a literal prefix safe in a LIKE pattern.
+func escapeLikePrefix(s string) string {
+	r := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_")
+	return r.Replace(s)
 }

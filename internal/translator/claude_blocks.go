@@ -35,6 +35,14 @@ func isContentfulBlock(block map[string]any) bool {
 		text, _ := block["text"].(string)
 		return strings.TrimSpace(text) != ""
 	}
+	if bType == claudeBlockThinking {
+		// The Messages API rejects a thinking block with no visible text (400
+		// "each thinking block must contain non-whitespace thinking"), and a
+		// valid signature does not save it — so a whitespace-only block must
+		// not keep its message alive either (upstream #4727).
+		thinking, _ := block["thinking"].(string)
+		return strings.TrimSpace(thinking) != ""
+	}
 	_, ok := contentfulBlocks[bType]
 	return ok
 }

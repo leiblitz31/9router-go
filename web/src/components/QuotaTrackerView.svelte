@@ -29,6 +29,12 @@
   import { getIconPath } from './connections/types'
   import EditConnectionModal, { type ConnectionUpdate } from './connections/EditConnectionModal.svelte'
   import QuotaTable from './quota/QuotaTable.svelte'
+  import AutoPingScheduleModal, { type AutoPingSave } from './quota/AutoPingScheduleModal.svelte'
+  import {
+    getScheduleSlotLabels,
+    normalizePingSchedule,
+    type NormalizedPingSchedule,
+  } from './quota/pingSchedule'
   import {
     ACCOUNT_FILTER_OPTIONS,
     ACCOUNT_PAGE_SIZE_MAX,
@@ -143,6 +149,17 @@
     claude: {},
     codex: {},
   })
+  // Anchored schedules per connection (upstream be51142b/28d40159). Stored
+  // under separate settings keys so the existing flat reactive maps keep
+  // their shape for already-saved dashboards.
+  let autoPingSchedules = $state<{
+    claude: Record<string, NormalizedPingSchedule>
+    codex: Record<string, NormalizedPingSchedule>
+  }>({
+    claude: {},
+    codex: {},
+  })
+  let scheduleConn = $state<ProviderConnection | null>(null)
 
   // Edit modal state. The modal itself owns its fields and payload (issue #158).
   let editingConnection = $state<ProviderConnection | null>(null)
@@ -229,9 +246,26 @@
     codex: 'codexAutoPing',
   }
 
+  const AUTO_PING_SCHEDULE_KEYS: Record<string, string> = {
+    claude: 'claudeAutoPingSchedules',
+    codex: 'codexAutoPingSchedules',
+  }
+
   const AUTO_PING_TOOLTIPS: Record<string, string> = {
-    claude: 'When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.',
-    codex: 'Auto-starts the next 5h Codex window after reset by sending a tiny gpt-5.5 request. Consumes a small amount of quota.',
+    claude: 'Auto-starts a new window on quota reset or fixed schedule. Click to configure.',
+    codex: 'Auto-starts the next 5h Codex window after reset or on schedule. Click to configure.',
+  }
+
+  function autoPingTooltip(conn: ProviderConnectionLike): string {
+    const provider = conn.provider
+    const modes: string[] = []
+    if (autoPingMaps[provider as 'claude' | 'codex']?.[conn.id] === true) modes.push('On reset')
+    const sched = normalizePingSchedule(
+      autoPingSchedules[provider as 'claude' | 'codex']?.[conn.id],
+    )
+    if (sched) modes.push(`Scheduled (${getScheduleSlotLabels(sched).join(' / ') || 'active'})`)
+    if (modes.length > 0) return `Auto-ping active: ${modes.join(' + ')}. Click to configure.`
+    return AUTO_PING_TOOLTIPS[provider] ?? 'Configure auto-ping.'
   }
 
   function kiroMethodLabel(conn: ProviderConnectionLike): string {
@@ -376,18 +410,28 @@
     }
   }
 
-  async function toggleAutoPing(connId: string, provider: string, enabled: boolean) {
+  // Upstream parity (28d40159): one save writes both the reactive flag and
+  // the anchored schedule, so the 3-way modal is the single writer.
+  async function saveAutoPing(connId: string, provider: string, save: AutoPingSave) {
     const key = AUTO_PING_SETTINGS_KEYS[provider]
-    if (!key) return
-    const currentMap = autoPingMaps[provider as 'claude' | 'codex'] || {}
-    const nextMap = { ...currentMap, [connId]: enabled }
-    autoPingMaps = {
-      ...autoPingMaps,
-      [provider]: nextMap,
+    const schedKey = AUTO_PING_SCHEDULE_KEYS[provider]
+    if (!key || !schedKey) return
+    const nextMap = {
+      ...(autoPingMaps[provider as 'claude' | 'codex'] || {}),
+      [connId]: save.reactive,
     }
+    autoPingMaps = { ...autoPingMaps, [provider]: nextMap }
+    const nextSched = { ...(autoPingSchedules[provider as 'claude' | 'codex'] || {}) }
+    if (save.schedule.enabled === true) {
+      nextSched[connId] = save.schedule
+    } else {
+      delete nextSched[connId]
+    }
+    autoPingSchedules = { ...autoPingSchedules, [provider]: nextSched }
     try {
-      await api.updateSettingsRaw({
+      await api.patchSettings({
         [key]: nextMap,
+        [schedKey]: nextSched,
       })
     } catch (err) {
       console.error('Failed to update autoPing:', err)
@@ -786,6 +830,10 @@
           claude: (raw?.claudeAutoPing as Record<string, boolean>) || {},
           codex: (raw?.codexAutoPing as Record<string, boolean>) || {},
         }
+        autoPingSchedules = {
+          claude: (raw?.claudeAutoPingSchedules as Record<string, NormalizedPingSchedule>) || {},
+          codex: (raw?.codexAutoPingSchedules as Record<string, NormalizedPingSchedule>) || {},
+        }
       })
       .catch(() => {})
 
@@ -1173,12 +1221,14 @@
                 {/if}
 
                 {#if (conn.provider === 'claude' || conn.provider === 'codex') && conn.authType === 'oauth'}
-                  {@const isAutoPingActive = autoPingMaps[conn.provider]?.[conn.id] === true}
+                  {@const isAutoPingActive =
+                    autoPingMaps[conn.provider]?.[conn.id] === true ||
+                    normalizePingSchedule(autoPingSchedules[conn.provider]?.[conn.id]) !== null}
                   <button
                     type="button"
-                    onclick={() => toggleAutoPing(conn.id, conn.provider, !isAutoPingActive)}
-                    title={AUTO_PING_TOOLTIPS[conn.provider]}
-                    aria-label="Toggle auto-ping"
+                    onclick={() => (scheduleConn = conn)}
+                    title={autoPingTooltip(conn)}
+                    aria-label="Configure auto-ping"
                     class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-surface-3 cursor-pointer {isAutoPingActive ? 'text-primary' : 'text-text-muted'}"
                   >
                     <span class="material-symbols-outlined text-[18px]">bolt</span>
@@ -1380,6 +1430,17 @@
     </div>
   {/if}
 </div>
+
+{#if scheduleConn}
+  <AutoPingScheduleModal
+    isOpen={true}
+    connectionName={scheduleConn.name?.trim() || scheduleConn.email?.trim() || scheduleConn.id}
+    reactive={autoPingMaps[scheduleConn.provider as 'claude' | 'codex']?.[scheduleConn.id] === true}
+    schedule={autoPingSchedules[scheduleConn.provider as 'claude' | 'codex']?.[scheduleConn.id] ?? null}
+    onClose={() => (scheduleConn = null)}
+    onSave={(save) => saveAutoPing(scheduleConn!.id, scheduleConn!.provider, save)}
+  />
+{/if}
 
 {#if editingConnection}
   <EditConnectionModal

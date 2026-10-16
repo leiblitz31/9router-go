@@ -777,12 +777,17 @@ func TestApplyCapacityAdapter_DoesNotFoldAdapterIntoComboRotation(t *testing.T) 
 		t.Fatalf("seed settings: %v", err)
 	}
 	h := NewChatHandler(db.NewRepo(database))
-	comboModels := []string{"oc/space-bunny-free"}
+	// A text-only model, so the vision pool is what makes the request
+	// servable. oc/space-bunny-free used to stand here, but upstream
+	// 4c58e7f3 gives it vision:true (models.dev), and once the combo's own
+	// model satisfies the requirement the adapter correctly stays out of it —
+	// that is the other subtest's case, not this one.
+	comboModels := []string{"opencode/big-pickle"}
 
 	t.Run("vision turn is governed by the adapter strategy, not the combo's", func(t *testing.T) {
 		augmented, strategy, injected := h.applyCapacityAdapter(comboModels, map[string]bool{"vision": true}, "round-robin", "combo-wombo", "")
 
-		if !slices.Equal(augmented, []string{"ag/gemini-3.8-flash-high", "oc/space-bunny-free"}) {
+		if !slices.Equal(augmented, []string{"ag/gemini-3.8-flash-high", "opencode/big-pickle"}) {
 			t.Fatalf("expected the vision adapter model prepended, got %v", augmented)
 		}
 		if !slices.Equal(injected, []string{"ag/gemini-3.8-flash-high"}) {
@@ -799,7 +804,7 @@ func TestApplyCapacityAdapter_DoesNotFoldAdapterIntoComboRotation(t *testing.T) 
 			if rotated[0] != "ag/gemini-3.8-flash-high" {
 				t.Fatalf("turn %d served by %s, want ag/gemini-3.8-flash-high", turn, rotated[0])
 			}
-			if rotated[len(rotated)-1] != "oc/space-bunny-free" {
+			if rotated[len(rotated)-1] != "opencode/big-pickle" {
 				t.Fatalf("turn %d lost the combo fallback, got %v", turn, rotated)
 			}
 		}
@@ -808,7 +813,7 @@ func TestApplyCapacityAdapter_DoesNotFoldAdapterIntoComboRotation(t *testing.T) 
 	t.Run("text-only turn keeps the combo's own strategy and list", func(t *testing.T) {
 		augmented, strategy, injected := h.applyCapacityAdapter(comboModels, map[string]bool{"tools": true}, "round-robin", "combo-wombo", "")
 
-		if len(augmented) != 1 || augmented[0] != "oc/space-bunny-free" {
+		if len(augmented) != 1 || augmented[0] != "opencode/big-pickle" {
 			t.Fatalf("expected an untouched list, got %v", augmented)
 		}
 		if injected != nil {

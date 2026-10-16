@@ -76,6 +76,8 @@ func fetchProviderUsage(ctx context.Context, provider string, data map[string]an
 		return fetchGroqUsage(ctx, apiKey), true
 	case "commandcode":
 		return fetchCommandCodeUsage(ctx, apiKey), true
+	case "cursor":
+		return fetchCursorUsage(ctx, firstNonEmptyStr(accessToken, apiKey), psd), true
 	case "ollama":
 		return fetchOllamaUsage(ctx, apiKey), true
 	case "qoder":
@@ -836,12 +838,22 @@ func fetchQoderUsageAt(ctx context.Context, accessToken, usageURL string) usageR
 	if e := usageNum(body["expiresAt"], 0); e > 0 {
 		expiresMs = e
 	}
+	// 253402214400000 (9999-12-31T00:00:00Z) is Qoder's "never expires"
+	// sentinel for open-ended plans (upstream b2aaf83b: both regions return
+	// it — rendering a year-9999 reset date is noise, so flag it instead).
+	const qoderNeverExpiresMs = 253402214400000
+	neverExpires := expiresMs == qoderNeverExpiresMs
 	resetAt := ""
-	if expiresMs > 0 {
+	if expiresMs > 0 && !neverExpires {
 		resetAt = time.UnixMilli(int64(expiresMs)).UTC().Format(time.RFC3339)
 	}
 	userQuota, _ := body["userQuota"].(map[string]any)
 	orgQuota, _ := body["orgResourcePackage"].(map[string]any)
+	// Add-on credits (free grants / promos). Qoder emits this block only when
+	// the account holds a grant — accounts without one omit the key entirely.
+	// Gating on total > 0 keeps the no-grant shape byte-identical to before.
+	addOnQuota, _ := body["addOnQuota"].(map[string]any)
+	addOnTotal := usageNum(addOnQuota["total"], 0)
 	strOr := func(m map[string]any, k, fallback string) string {
 		if s, _ := m[k].(string); s != "" {
 			return s
@@ -852,13 +864,28 @@ func fetchQoderUsageAt(ctx context.Context, accessToken, usageURL string) usageR
 		"user": map[string]any{
 			"total": usageNum(userQuota["total"], 0), "used": usageNum(userQuota["used"], 0),
 			"remaining": usageNum(userQuota["remaining"], 0), "unit": strOr(userQuota, "unit", "credits"),
-			"resetAt": resetAt,
+			"resetAt": resetAt, "neverExpires": neverExpires,
 		},
 		"organization": map[string]any{
 			"total": usageNum(orgQuota["total"], 0), "used": usageNum(orgQuota["used"], 0),
 			"remaining": usageNum(orgQuota["remaining"], 0), "unit": strOr(orgQuota, "unit", "credits"),
-			"resetAt": resetAt,
+			"resetAt": resetAt, "neverExpires": neverExpires,
 		},
+	}
+	if addOnTotal > 0 {
+		// The add-on block carries no expiry of its own: account expiresAt
+		// describes the plan, not the grants (check-in bonuses expire,
+		// typically ~30 days). Leave resetAt unset and link Qoder's own
+		// usage page where the per-package dates live.
+		addOn := map[string]any{
+			"total": usageNum(addOnQuota["total"], 0), "used": usageNum(addOnQuota["used"], 0),
+			"remaining": usageNum(addOnQuota["remaining"], 0), "unit": strOr(addOnQuota, "unit", "credits"),
+			"resetAt": nil, "neverExpires": false,
+		}
+		if u, _ := addOnQuota["detailUrl"].(string); u != "" {
+			addOn["detailUrl"] = u
+		}
+		quotas["addOn"] = addOn
 	}
 	extra := map[string]any{
 		"totalUsagePercentage": usageNum(body["totalUsagePercentage"], 0),

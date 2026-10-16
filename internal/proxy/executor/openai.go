@@ -19,7 +19,8 @@ import (
 
 // ForwardOpenAI sends an OpenAI-format request and writes the response.
 func ForwardOpenAI(w http.ResponseWriter, req *Request) error {
-	resp, err := proxy.ForwardOpenAI(req.Ctx, req.Client, req.Config, req.APIKey, req.Body, req.IsStream)
+	body := proxy.ApplyNousAttribution(req.Config.ProviderID, req.APIKey, req.Config.BaseURL, req.Body)
+	resp, err := proxy.ForwardOpenAI(req.Ctx, req.Client, req.Config, req.APIKey, body, req.IsStream)
 	if err != nil {
 		return fmt.Errorf("ForwardOpenAI upstream: %w", err)
 	}

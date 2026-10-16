@@ -1,6 +1,7 @@
 import type { Combo, ProviderConnection, ProviderNode } from '../../api/client'
 import { getModelCaps, getModelKind, getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
 import { PROVIDER_CATALOG, isChatProvider } from '../../lib/providers'
+import { matchesSearch, parseSearchQuery, type ParsedSearchQuery } from './modelSearchFilter'
 
 const MEDIA_KINDS: Record<string, true> = {
   image: true,
@@ -43,21 +44,52 @@ export interface PickerExtras {
   deprecations?: Record<string, unknown>
 }
 
+/**
+ * Provider ids whose connections exist but are ALL deactivated
+ * (`isActive === false`). Port of upstream `getDeactivatedProviderIds`
+ * (da1756a8): a provider with zero connections is NOT deactivated
+ * (keyless local nodes stay visible).
+ */
+export function getDeactivatedProviderIds(
+  connections: Array<{ provider?: string; isActive?: number | boolean } | null | undefined> | null | undefined,
+): Set<string> {
+  const stats = new Map<string, { total: number; active: number }>()
+  for (const c of connections ?? []) {
+    if (!c?.provider) continue
+    const s = stats.get(c.provider) ?? { total: 0, active: 0 }
+    s.total += 1
+    if (c.isActive !== false && c.isActive !== 0) s.active += 1
+    stats.set(c.provider, s)
+  }
+  const out = new Set<string>()
+  for (const [provider, s] of stats) {
+    if (s.total > 0 && s.active === 0) out.add(provider)
+  }
+  return out
+}
+
+/** True when the connection counts as active (Go uses 1/0, Next uses booleans). */
+function isActiveConnection(c: { isActive?: number | boolean } | null | undefined): boolean {
+  return c != null && c.isActive !== false && c.isActive !== 0
+}
+
 export function resolveModelPickerGroups(
   connections: ProviderConnection[] = [],
   providerNodes: ProviderNode[] = [],
   extras: PickerExtras = {}
 ): PickerGroup[] {
-  // Upstream parity (page.js fetchData + ModelSelectModal.js groupedModels):
-  // `activeProviders` holds ALL connections (no isActive filter) — every
-  // connected provider shows, plus no-auth providers. Inactive connections
-  // are still selectable upstream, so the picker mirrors that.
+  // Upstream parity (da1756a8: combo pages pass active connections only +
+  // ModelSelectModal filteredActiveProviders): only ACTIVE connections gate
+  // provider visibility; providers whose every connection is deactivated are
+  // hidden via getDeactivatedProviderIds.
+  const activeConnections = connections.filter(isActiveConnection)
   const connectedProviderIds = new Set<string>()
-  for (const c of connections) {
+  for (const c of activeConnections) {
     if (c.provider) {
       connectedProviderIds.add(c.provider)
     }
   }
+  const deactivatedIds = getDeactivatedProviderIds(connections)
 
   const groups: PickerGroup[] = []
   const seenGroupIds = new Set<string>()
@@ -67,6 +99,7 @@ export function resolveModelPickerGroups(
     if (!isChatProvider(catItem)) {
       continue
     }
+    if (deactivatedIds.has(catItem.id)) continue
     const isConnected =
       connectedProviderIds.has(catItem.id) || (catItem.alias && connectedProviderIds.has(catItem.alias))
     // Only the explicit noAuth flag (upstream registry semantics): category
@@ -160,7 +193,26 @@ export function resolveModelPickerGroups(
       ...((extras.disabledModels || {})[alias] || []),
       ...((extras.disabledModels || {})[catItem.id] || []),
     ])
-    const visible = disabled.size > 0 ? models.filter((m) => !disabled.has(m.id)) : models
+    let visible = disabled.size > 0 ? models.filter((m) => !disabled.has(m.id)) : models
+
+    // Upstream parity (da1756a8): an explicit enabledModels list on any ACTIVE
+    // connection narrows the provider to exactly those models.
+    const explicitEnabled: string[] = []
+    for (const conn of activeConnections) {
+      if (conn.provider !== catItem.id && conn.provider !== alias) continue
+      const list = (conn.providerSpecificData as Record<string, unknown> | undefined)?.enabledModels
+      if (Array.isArray(list) && list.length > 0) explicitEnabled.push(...(list as string[]))
+    }
+    if (explicitEnabled.length > 0) {
+      const enabledSet = new Set(explicitEnabled)
+      visible = visible.filter(
+        (m) =>
+          enabledSet.has(m.id) ||
+          enabledSet.has(m.value) ||
+          enabledSet.has(`${alias}/${m.id}`) ||
+          (m.value.startsWith(`${alias}/`) && enabledSet.has(m.value.replace(`${alias}/`, ''))),
+      )
+    }
 
     if (visible.length > 0) {
       seenGroupIds.add(catItem.id)
@@ -252,13 +304,14 @@ export function resolveFilteredCombos(
   combos: Combo[] = [],
   currentComboName: string | undefined,
   searchQuery: string,
-  target: string
+  target: string,
+  parsed?: ParsedSearchQuery,
 ): Combo[] {
   if (target === 'vision' || target === 'audio') {
     return []
   }
 
-  const query = searchQuery.trim().toLowerCase()
+  const q = parsed ?? parseSearchQuery(searchQuery)
   return combos.filter((c) => {
     // Upstream parity (page.js fetchData): webSearch/webFetch combos live
     // under media-providers/web. search-combo is excluded even when its kind
@@ -266,8 +319,8 @@ export function resolveFilteredCombos(
     if (c.kind && c.kind !== 'llm') return false
     if (c.name === 'search-combo' || c.name.startsWith('search-combo-')) return false
     if (currentComboName && c.name === currentComboName) return false
-    if (query) {
-      return c.name.toLowerCase().includes(query)
+    if (!q.isEmpty) {
+      return matchesSearch(c.name, q)
     }
     return true
   })
@@ -281,9 +334,10 @@ export function resolveFilteredCombos(
 export function resolveFilteredGroups(
   groups: PickerGroup[] = [],
   searchQuery: string,
-  target: string
+  target: string,
+  parsed?: ParsedSearchQuery,
 ): PickerGroup[] {
-  const query = searchQuery.trim().toLowerCase()
+  const q = parsed ?? parseSearchQuery(searchQuery)
 
   return groups
     .map((group) => {
@@ -298,13 +352,10 @@ export function resolveFilteredGroups(
 
       if (models.length === 0) return null
 
-      if (query) {
-        const groupMatches = group.name.toLowerCase().includes(query)
-        const matchedModels = models.filter(
-          (m) =>
-            m.name.toLowerCase().includes(query) ||
-            m.id.toLowerCase().includes(query) ||
-            m.value.toLowerCase().includes(query)
+      if (!q.isEmpty) {
+        const groupMatches = matchesSearch(group.name, q)
+        const matchedModels = models.filter((m) =>
+          matchesSearch([m.name, m.id, m.value], q),
         )
         models = matchedModels.length > 0 ? matchedModels : groupMatches ? models : []
       }

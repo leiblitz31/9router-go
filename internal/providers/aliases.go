@@ -86,6 +86,9 @@ var ProviderAliasMap = map[string]string{
 	// The canonical `v1m/` prefix still reaches every v1m model.
 	"ne":             "nebius",
 	"nv":             "nvidia",
+	"nous-portal":    "nous",
+	"nous-research":  "nous",
+	"ns":             "nous",
 	"oa":             "openai",
 	"oc":             "opencode",
 	"ocz":            "opencode-zen",
