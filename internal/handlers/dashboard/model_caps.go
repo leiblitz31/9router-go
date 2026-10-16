@@ -61,14 +61,32 @@ func (h *DashboardHandler) HandleGetModelCaps(w http.ResponseWriter, r *http.Req
 
 	resolved := providers.ResolveAlias(provider)
 	models := providers.GetProviderModels(resolved)
-	if len(models) == 0 {
-		if custom := h.customModelCaps(provider, resolved); len(custom) > 0 {
-			handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-				"provider": provider,
-				"caps":     custom,
-			})
-			return
+
+	caps := make(map[string]modelCaps, len(models))
+	for _, model := range models {
+		detail := providers.GetCapabilitiesDetailForModel(resolved, model)
+		entry := modelCaps{
+			Vision:        detail.Vision,
+			Search:        detail.Search,
+			Reasoning:     detail.Reasoning,
+			ContextWindow: detail.ContextWindow,
+			MaxOutput:     detail.MaxOutput,
+			Free:          isModelFree(resolved, model),
 		}
+		if levels := providers.GetThinkingLevels(resolved, model); levels != nil {
+			entry.ThinkingLevels = levels
+		}
+		caps[model] = entry
+	}
+	// Custom models are merged on top of the static catalog: a provider with
+	// static models can still carry custom rows (e.g. oc/deepseek-v4.1-flash-free
+	// registered via kv.customModels), and without the merge those rows never
+	// reach the dashboard's thinking-level picker.
+	for id, entry := range h.customModelCaps(provider, resolved) {
+		caps[id] = entry
+	}
+
+	if len(caps) == 0 {
 		if strings.HasPrefix(provider, "openai-compatible") || strings.HasPrefix(provider, "anthropic-compatible") {
 			handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 				"provider": provider,
@@ -87,23 +105,6 @@ func (h *DashboardHandler) HandleGetModelCaps(w http.ResponseWriter, r *http.Req
 		}
 		handlerutil.WriteJSONError(w, http.StatusNotFound, "unknown provider or no static models")
 		return
-	}
-
-	caps := make(map[string]modelCaps, len(models))
-	for _, model := range models {
-		detail := providers.GetCapabilitiesDetailForModel(resolved, model)
-		entry := modelCaps{
-			Vision:        detail.Vision,
-			Search:        detail.Search,
-			Reasoning:     detail.Reasoning,
-			ContextWindow: detail.ContextWindow,
-			MaxOutput:     detail.MaxOutput,
-			Free:          isModelFree(resolved, model),
-		}
-		if levels := providers.GetThinkingLevels(resolved, model); levels != nil {
-			entry.ThinkingLevels = levels
-		}
-		caps[model] = entry
 	}
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
@@ -126,6 +127,12 @@ func (h *DashboardHandler) customModelCaps(provider, resolved string) map[string
 		return nil
 	}
 	aliases := []string{provider, resolved}
+	// Custom rows are stored under the provider alias the dashboard publishes
+	// (e.g. "oc" for opencode), so the short alias must match too — otherwise
+	// a query for the canonical id never sees them.
+	if alias := providers.GetProviderAlias(resolved); alias != "" {
+		aliases = append(aliases, alias)
+	}
 	if node, _, err := h.Repo.GetProviderNodeByPrefix(provider); err == nil && node != nil {
 		aliases = append(aliases, node.ID)
 	}

@@ -879,6 +879,7 @@ type CapabilitiesDetail struct {
 	ThinkingCanDisable      bool    `json:"thinkingCanDisable"`
 	ThinkingRange           any     `json:"thinkingRange"`
 	ThinkingEffortSupported bool    `json:"thinkingEffortSupported"`
+	ThinkingLevels          []string `json:"thinkingLevels,omitempty"`
 	ContextWindow           int     `json:"contextWindow,omitempty"`
 	MaxOutput               int     `json:"maxOutput,omitempty"`
 }
@@ -988,6 +989,7 @@ func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 		ThinkingCanDisable:      canDisableThinking(caps),
 		ThinkingRange:           thinkingRange,
 		ThinkingEffortSupported: caps.ThinkingEffortSupported,
+		ThinkingLevels:          GetThinkingLevels(provider, model),
 		ContextWindow:           cw,
 		MaxOutput:               maxOut,
 	}
