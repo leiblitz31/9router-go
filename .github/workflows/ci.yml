@@ -503,6 +503,42 @@ jobs:
           go-version: "1.27"
           cache: true
 
+      # `make cross` starts five go builds, and Go fills the module cache as it
+      # goes — so a single transient read error from the module proxy aborts
+      # whichever target hit it and reddens the job. That is not hypothetical:
+      # the first run of this job on main failed with
+      #   modernc.org/sqlite@v1.54.0: read
+      #   "https://proxy.golang.org/.../v1.54.0.zip":
+      #   stream error: stream ID 1; INTERNAL_ERROR; received from peer
+      # and the identical job passed on a re-run with no code change.
+      #
+      # A network hiccup must not read as "a release target is broken", which
+      # is exactly what this job exists to report. `go mod download` pulls the
+      # whole graph into the cache in one step first, so the five builds that
+      # follow do not touch the network; it is retried three times because it
+      # is the only step that does.
+      #
+      # The cache is `go env GOMODCACHE`, the same within this job — the
+      # dependency-cache restores of actions/setup-go are per-module and do not
+      # give a full off-line graph, and a `go build` hit is not something this
+      # job can stage.
+      - name: Warm the module cache (retried)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if go mod download all; then
+              echo "module graph cached on attempt ${attempt}"
+              exit 0
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::go mod download failed 3 times; the proxy is unreachable."
+              echo "This is infrastructure, not a defect in the diff — re-run the job."
+              exit 1
+            fi
+            echo "attempt ${attempt} failed (transient proxy error); retrying in 5s"
+            sleep 5
+          done
+
       # Identical to the release command. Building the SPA through the Makefile
       # rather than by hand also exercises web/scripts/web-build.ts, which the
       # release path depends on.
