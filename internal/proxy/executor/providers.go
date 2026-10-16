@@ -10,6 +10,7 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"runtime"
@@ -590,7 +591,10 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 			return fmt.Errorf("transform body for muse-spark: %w", err)
 		}
 
-		transformedBody, err = normalizeMuseSparkResponsesBody(transformedBody, cleanModel)
+		// reqObj.Model, not cleanModel: the "(level)" override and the
+		// reasoning effort it encodes live in the untouched id (see
+		// normalizeMuseSparkResponsesBody).
+		transformedBody, err = normalizeMuseSparkResponsesBody(transformedBody, reqObj.Model)
 		if err != nil {
 			return fmt.Errorf("normalize muse-spark body: %w", err)
 		}
@@ -1297,7 +1301,102 @@ func deriveOpencodeSession(rawSession, clientTool, connID string) string {
 	return proxy.TranslateOpenCodeSessionID(raw, clientTool)
 }
 
-func normalizeMuseSparkResponsesBody(body []byte, cleanModel string) ([]byte, error) {
+// museSparkMinOutputTokens is the output-budget floor for Muse Spark. These
+// models spend 570-1320 hidden reasoning tokens before emitting any completion
+// text, so a caller-set budget below the floor is consumed entirely by
+// reasoning: the upstream answers 200 with an empty message, or stalls the
+// stream until the gateway's watchdog reports a 502, and the caller sees a
+// failure that names neither the model nor the budget.
+//
+// 512 is upstream's measured boundary (max_tokens 64/100 → empty content,
+// 256/512/1024 → content present), not a round number picked here. Port of
+// OmniRoute MUSE_SPARK_MIN_OUTPUT_TOKENS
+// (open-sse/executors/opencodeMuseSpark.ts).
+const museSparkMinOutputTokens = 512
+
+// museSparkOutputBudgetFields are the three spellings an OpenAI-shaped request
+// may use for its output cap: Chat Completions' max_tokens, Responses'
+// max_output_tokens, and the OpenAI-compatible max_completion_tokens. A Muse
+// Spark request may arrive on either lane, so all three are clamped.
+var museSparkOutputBudgetFields = []string{"max_tokens", "max_output_tokens", "max_completion_tokens"}
+
+// clampMuseSparkOutputBudget raises a caller-set output budget to the floor and
+// returns the fields it changed. It only ever raises: an explicit larger budget
+// and a request that set no budget at all stay byte-identical, because
+// synthesizing a cap the caller never asked for would silently shorten real
+// answers.
+func clampMuseSparkOutputBudget(m map[string]any, cleanModel string) []string {
+	if m == nil || !isOpencodeResponsesModel(cleanModel) {
+		return nil
+	}
+	var raised []string
+	for _, field := range museSparkOutputBudgetFields {
+		budget, ok := outputBudgetOf(m[field])
+		if !ok || budget >= museSparkMinOutputTokens {
+			continue
+		}
+		m[field] = museSparkMinOutputTokens
+		raised = append(raised, field)
+	}
+	return raised
+}
+
+// outputBudgetOf reads the numeric shape an output cap decodes to. A JSON
+// integer may arrive as int64, int or float64 depending on how the body was
+// decoded, so all three are accepted; a string ("1024") is not a budget and a
+// non-finite float is not one either.
+func outputBudgetOf(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return 0, false
+		}
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
+// museSparkEffortSuffix returns the reasoning effort a caller encoded in the
+// model id, e.g. "muse-spark-1.3(high)". The parenthesised level is 9router
+// request notation and never part of the wire id — which is why the callers
+// strip it before dispatch — but the intent it carried is still the caller's.
+func museSparkEffortSuffix(rawModel string) string {
+	open := strings.LastIndex(rawModel, "(")
+	if open == -1 || !strings.HasSuffix(rawModel, ")") {
+		return ""
+	}
+	level := strings.ToLower(strings.TrimSpace(rawModel[open+1 : len(rawModel)-1]))
+	switch level {
+	case "high", "medium", "low":
+		return level
+	default:
+		return ""
+	}
+}
+
+// museSparkCleanModel reduces the model as the client asked for it to the
+// catalog id: no client prefix and no parenthesised request override.
+func museSparkCleanModel(model string) string {
+	id := strings.TrimPrefix(model, "oc/")
+	id = strings.TrimPrefix(id, "opencode-go/")
+	id = strings.TrimPrefix(id, "opencode/")
+	if open := strings.IndexByte(id, '('); open != -1 {
+		id = id[:open]
+	}
+	return id
+}
+
+// normalizeMuseSparkResponsesBody reshapes an OpenAI Responses body for the
+// Muse Spark lane. model is the id exactly as the client sent it (prefix and
+// "(level)" override included) so the request modifier survives the cleaning.
+func normalizeMuseSparkResponsesBody(body []byte, model string) ([]byte, error) {
+	cleanModel := museSparkCleanModel(model)
+
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return body, nil
@@ -1316,7 +1415,15 @@ func normalizeMuseSparkResponsesBody(body []byte, cleanModel string) ([]byte, er
 			rMap["effort"] = "xhigh"
 		}
 		rMap["summary"] = "auto"
+	} else if effort := museSparkEffortSuffix(model); effort != "" {
+		// Fill-only: an explicit body effort already won above, so the model-id
+		// override never silently replaces what the caller asked for in the body.
+		m["reasoning"] = map[string]any{
+			"effort":  effort,
+			"summary": "auto",
+		}
 	}
+	clampMuseSparkOutputBudget(m, cleanModel)
 	// PR #4061: Strip prior reasoning items & continuity properties
 	if inList, ok := m["input"].([]any); ok {
 		cleanInput := make([]any, 0, len(inList))
@@ -1471,7 +1578,7 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 			return fmt.Errorf("transform body for opencode-go muse-spark: %w", err)
 		}
 
-		transformedBody, err = normalizeMuseSparkResponsesBody(transformedBody, cleanModel)
+		transformedBody, err = normalizeMuseSparkResponsesBody(transformedBody, reqObj.Model)
 		if err != nil {
 			return fmt.Errorf("normalize opencode-go muse-spark body: %w", err)
 		}

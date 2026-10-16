@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,6 +69,99 @@ func IsPrivateNetworkingAllowed() bool {
 // hook that aborts connection attempts to private or reserved IP addresses after
 // DNS resolution (mitigating DNS rebinding).
 func NewSafeDialer() *net.Dialer {
+	return newSafeDialerForProxy(ambientProxyAllowlist())
+}
+
+// proxyAllowlist holds the outbound-proxy endpoints a transport is allowed to
+// dial even though they resolve to a private address.
+//
+// The socket-level guard exists to stop a *request* from reaching an internal
+// address. A request routed through an outbound proxy never dials the target at
+// all — the proxy does — so applying the guard to the proxy's own address
+// protects nothing and breaks the operator's egress path instead.
+type proxyAllowlist struct {
+	mu    sync.RWMutex
+	hosts map[string]struct{}
+}
+
+// proxyAllowlistMax bounds the remembered proxy endpoints.
+const proxyAllowlistMax = 64
+
+func newProxyAllowlist(hosts ...string) *proxyAllowlist {
+	a := &proxyAllowlist{}
+	for _, h := range hosts {
+		a.allow(h)
+	}
+	return a
+}
+
+// allow records hostPort ("127.0.0.1:8888", "proxy.example") as a permitted
+// dial target.
+func (a *proxyAllowlist) allow(hostPort string) {
+	if a == nil || hostPort == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.hosts == nil {
+		a.hosts = make(map[string]struct{}, 4)
+	}
+	if _, ok := a.hosts[hostPort]; ok {
+		return
+	}
+	if len(a.hosts) >= proxyAllowlistMax {
+		return
+	}
+	a.hosts[hostPort] = struct{}{}
+}
+
+// allows reports whether address matches a remembered proxy endpoint. address is
+// the dial target as the ControlContext receives it ("host:port").
+func (a *proxyAllowlist) allows(address, host string) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if len(a.hosts) == 0 {
+		return false
+	}
+	if _, ok := a.hosts[address]; ok {
+		return true
+	}
+	_, ok := a.hosts[host]
+	return ok
+}
+
+// ambientProxyAllowlist permits the environment's own proxy endpoint.
+func ambientProxyAllowlist() *proxyAllowlist {
+	if u := ambientProxyURL(); u != nil {
+		return newProxyAllowlist(u.Host)
+	}
+	return nil
+}
+
+// proxyFromEnvironment is http.ProxyFromEnvironment, indirect so a test can
+// supply a proxy without mutating the process environment: the stdlib caches
+// the environment on first use for the life of the process, which would make an
+// env-driven test depend on whether an earlier call had already frozen it.
+var proxyFromEnvironment = http.ProxyFromEnvironment
+
+// ambientProxyURL reports the proxy the environment installs for outbound
+// requests, or nil when the environment asks for a direct dial.
+func ambientProxyURL() *url.URL {
+	req := &http.Request{URL: &url.URL{Scheme: "https", Host: "proxy-target.invalid"}}
+	u, err := proxyFromEnvironment(req)
+	if err != nil || u == nil || u.Host == "" {
+		return nil
+	}
+	return u
+}
+
+// newSafeDialerForProxy returns NewSafeDialer's dialer with the given proxy
+// endpoints exempted from the private-IP guard. A nil allowlist behaves exactly
+// like NewSafeDialer.
+func newSafeDialerForProxy(allow *proxyAllowlist) *net.Dialer {
 	return &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -77,6 +172,12 @@ func NewSafeDialer() *net.Dialer {
 			host, _, err := net.SplitHostPort(address)
 			if err != nil {
 				host = address
+			}
+			// The operator's own egress proxy is not the SSRF surface: the
+			// request never reaches an internal target through it that the
+			// request-scoped checks above have not already judged.
+			if allow.allows(address, host) {
+				return nil
 			}
 			ip := net.ParseIP(host)
 			if ip != nil {

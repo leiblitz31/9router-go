@@ -5,6 +5,33 @@ import (
 	"time"
 )
 
+// usageHistoryColumns is the projection every usageHistory reader shares.
+const usageHistoryColumns = `SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
+	       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
+	       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(status, 'ok'), COALESCE(tokens, '{}')
+		FROM usageHistory`
+
+// The three usageHistory reads are named constants because
+// usage_query_plan_test.go runs EXPLAIN QUERY PLAN against them. The plan is the
+// contract: ordering by rowid forces a full scan that grows with the table and
+// runs on the dashboard's 5-second poll, while `timestamp` is covered by
+// idx_uh_ts. Keeping the SQL here means that test pins what these functions
+// execute rather than a copy that could drift (#138).
+const (
+	usageHistorySinceQuery = usageHistoryColumns + `
+		WHERE timestamp >= ?
+		ORDER BY timestamp DESC
+	`
+	usageHistoryBetweenQuery = usageHistoryColumns + `
+		WHERE timestamp > ? AND timestamp <= ?
+		ORDER BY timestamp ASC
+	`
+	usageHistoryRecentQuery = usageHistoryColumns + `
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`
+)
+
 // GetUsageDaily returns the daily usage JSON data for a given date key.
 func (r *Repo) GetUsageDaily(dateKey string) (string, error) {
 	var data string
@@ -98,14 +125,7 @@ func (r *Repo) GetUsageDailyRecent(limit int) ([]string, error) {
 
 // GetUsageHistorySince returns usage history records since the cutoff timestamp.
 func (r *Repo) GetUsageHistorySince(cutoff string) ([]UsageHistoryRow, error) {
-	rows, err := r.db.Query(`
-		SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
-		       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
-		       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(status, 'ok'), COALESCE(tokens, '{}')
-		FROM usageHistory
-		WHERE timestamp >= ?
-		ORDER BY rowid DESC
-	`, cutoff)
+	rows, err := r.db.Query(usageHistorySinceQuery, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query usageHistory since %s: %w", cutoff, err)
 	}
@@ -145,14 +165,7 @@ func (r *Repo) GetUsageHistoryWatermark() (string, error) {
 // window aggregate has yet to fold in. The bounds are exclusive on the low end
 // so a row already folded in at the watermark is never counted twice.
 func (r *Repo) GetUsageHistoryBetween(since, until string) ([]UsageHistoryRow, error) {
-	rows, err := r.db.Query(`
-		SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
-		       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
-		       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(status, 'ok'), COALESCE(tokens, '{}')
-		FROM usageHistory
-		WHERE timestamp > ? AND timestamp <= ?
-		ORDER BY rowid ASC
-	`, since, until)
+	rows, err := r.db.Query(usageHistoryBetweenQuery, since, until)
 	if err != nil {
 		return nil, fmt.Errorf("query usageHistory between %s and %s: %w", since, until, err)
 	}
@@ -176,14 +189,7 @@ func (r *Repo) GetUsageHistoryBetween(since, until string) ([]UsageHistoryRow, e
 
 // GetRecentUsageHistory returns the latest N usage history records.
 func (r *Repo) GetRecentUsageHistory(limit int) ([]UsageHistoryRow, error) {
-	rows, err := r.db.Query(`
-		SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
-		       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
-		       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(status, 'ok'), COALESCE(tokens, '{}')
-		FROM usageHistory
-		ORDER BY rowid DESC
-		LIMIT ?
-	`, limit)
+	rows, err := r.db.Query(usageHistoryRecentQuery, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query recent usageHistory: %w", err)
 	}

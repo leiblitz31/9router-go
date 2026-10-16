@@ -7,6 +7,7 @@ import (
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/usagetracker"
@@ -511,7 +512,7 @@ func (h *MediaHandler) forwardMiMoSpeech(w http.ResponseWriter, r *http.Request,
 func (h *MediaHandler) HandleAudioTranscriptions(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -522,7 +523,7 @@ func (h *MediaHandler) HandleAudioTranscriptions(w http.ResponseWriter, r *http.
 func (h *MediaHandler) HandleVideoGenerations(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -533,7 +534,7 @@ func (h *MediaHandler) HandleVideoGenerations(w http.ResponseWriter, r *http.Req
 func (h *MediaHandler) HandleVideoEdits(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -544,7 +545,7 @@ func (h *MediaHandler) HandleVideoEdits(w http.ResponseWriter, r *http.Request) 
 func (h *MediaHandler) HandleVideoExtensions(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()

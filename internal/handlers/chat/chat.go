@@ -5,6 +5,7 @@ import (
 	json "9router/proxy/internal/fastjson"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/semanticcache"
 	"9router/proxy/internal/translator"
@@ -45,7 +46,7 @@ func (c *cacheCaptureWriter) Write(b []byte) (int, error) {
 func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -213,7 +214,7 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Error("chat", "read body failed", "error", err)
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -823,7 +824,7 @@ func (h *ChatHandler) HandleAudioVoices(w http.ResponseWriter, r *http.Request) 
 func (h *ChatHandler) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -979,7 +980,7 @@ func contentBlockChars(block any) int {
 func (h *ChatHandler) HandleResponsesCompact(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -1007,7 +1008,7 @@ func (h *ChatHandler) HandleResponsesCompact(w http.ResponseWriter, r *http.Requ
 func (h *ChatHandler) HandleOllamaChat(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
