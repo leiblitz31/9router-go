@@ -396,8 +396,7 @@ func (h *DashboardHandler) probeHTTPClient(data connectionProbeData, raw map[str
 	if err != nil {
 		return nil, ""
 	}
-	tr := proxy.NewSafeTransport()
-	tr.Proxy = http.ProxyURL(parsed)
+	tr := proxy.NewSafeTransportWithProxy(parsed.String(), false)
 	return &http.Client{
 		Transport: tr,
 		Timeout:   connectionProbeTimeout,
@@ -432,8 +431,7 @@ func probeProxyURL(ctx context.Context, proxyURLStr string) error {
 	ctx, cancel := context.WithTimeout(ctx, connectionProxyProbeTimeout)
 	defer cancel()
 
-	tr := proxy.NewSafeTransport()
-	tr.Proxy = http.ProxyURL(parsed)
+	tr := proxy.NewSafeTransportWithProxy(parsed.String(), false)
 	client := &http.Client{
 		Transport: tr,
 		Timeout:   connectionProxyProbeTimeout,

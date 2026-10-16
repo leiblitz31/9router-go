@@ -17,10 +17,11 @@ import (
 // path: re-dialing direct answers the request from the host's real IP, which is
 // exactly what the assignment exists to prevent, so the failure must surface.
 //
-// The two are told apart by identity rather than by configuration: Go forbids
-// comparing funcs, so the pointer of the transport's Proxy field is compared
-// against http.ProxyFromEnvironment, the only proxy value the environment
-// installs on its own.
+// Transports built by NewSafeTransport* record their egress choice in the
+// registry (see utls_dialer.go) because t.Proxy stays nil there — the uTLS
+// dialer tunnels manually so net/http cannot finish the handshake with
+// crypto/tls. Transports with t.Proxy assigned directly (legacy/tests) fall
+// back to the func-pointer comparison.
 func proxiesViaAssignment(client *http.Client) bool {
 	if client == nil {
 		return false
@@ -33,6 +34,9 @@ func transportProxyIsAssigned(rt http.RoundTripper) bool {
 	case nil:
 		return false
 	case *http.Transport:
+		if lookupTransportProxy(t).kind == proxyKindExplicit {
+			return true
+		}
 		return proxyFuncIsAssigned(t.Proxy)
 	case *FallbackTransport:
 		// FallbackTransport owns a Base/Direct pair and already escapes an

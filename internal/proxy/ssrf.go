@@ -94,32 +94,57 @@ func NewSafeDialer() *net.Dialer {
 
 
 // NewSafeTransport returns an *http.Transport configured with production pool
-// defaults and an active SSRF-filtering DialContext.
+// defaults, an active SSRF-filtering DialContext, and a uTLS-spoofed TLS
+// handshake (see utls_dialer.go).
 //
 // The transport honors the standard proxy environment variables
-// (HTTPS_PROXY, HTTP_PROXY, NO_PROXY) via http.ProxyFromEnvironment, matching
-// the behavior of the Node.js 9Router. This is required for relay connections
-// (Vercel/Cloudflare edge pools): the relay URL itself must be reached through
-// the egress proxy, and without env proxy support the TLS handshake fails with
+// (HTTPS_PROXY, HTTP_PROXY, NO_PROXY) with exactly the semantics of
+// http.ProxyFromEnvironment, matching the behavior of the Node.js 9Router.
+// This is required for relay connections (Vercel/Cloudflare edge pools): the
+// relay URL itself must be reached through the egress proxy, and without env
+// proxy support the TLS handshake fails with
 // "tls: first record does not look like a TLS handshake".
 //
-// When no proxy env vars are set, ProxyFromEnvironment returns nil and the
-// transport behaves exactly as before (direct connections).
-func NewSafeTransport() *http.Transport {
+// NOTE: t.Proxy is intentionally left nil. The uTLS dialer tunnels through
+// the proxy itself, because net/http would otherwise finish a proxied
+// handshake with crypto/tls (Transport.dialConn/addTLS), defeating the
+// fingerprint spoof. Use proxiesViaAssignment / proxyURLFor (not t.Proxy)
+// to introspect how a transport dials.
+//
+// When no proxy env vars are set, the dialer connects directly.
+func newTransportWithUTLS(d *utlsDialer, kind transportProxyKind, url string) *http.Transport {
 	t := constants.DefaultHTTPTransportConfig.NewTransport()
-	t.Proxy = http.ProxyFromEnvironment
 	t.DialContext = NewSafeDialer().DialContext
+	t.DialTLSContext = d.dialTLSContext
+	registerTransportProxy(t, kind, url)
 	return t
 }
 
+func NewSafeTransport() *http.Transport {
+	return newTransportWithUTLS(&utlsDialer{useEnvProxy: true}, proxyKindEnv, "")
+}
+
 // NewSafeTransportDirect returns an *http.Transport identical to
-// NewSafeTransport but with proxying explicitly disabled (Proxy: nil).
-// It is the "true direct" transport used by FallbackTransport when the
-// environment proxy refuses a connection: retrying through the same broken
-// env proxy would be pointless, so the fallback must bypass it entirely.
+// NewSafeTransport but always dialing directly (no proxy), with the same
+// uTLS-spoofed handshake. It is the "true direct" transport used by
+// FallbackTransport when the environment proxy refuses a connection:
+// retrying through the same broken env proxy would be pointless, so the
+// fallback must bypass it entirely.
 func NewSafeTransportDirect() *http.Transport {
-	t := constants.DefaultHTTPTransportConfig.NewTransport()
-	t.Proxy = nil
-	t.DialContext = NewSafeDialer().DialContext
-	return t
+	return newTransportWithUTLS(&utlsDialer{}, proxyKindNone, "")
+}
+
+// NewSafeTransportWithProxy returns a transport identical to NewSafeTransport
+// but pinned to an explicit proxy URL (e.g. a per-connection
+// connectionProxyUrl) instead of the environment. An empty proxyURL means
+// direct. insecure disables certificate verification, mirroring
+// InsecureSkipVerify.
+func NewSafeTransportWithProxy(proxyURL string, insecure bool) *http.Transport {
+	if proxyURL == "" {
+		return newTransportWithUTLS(&utlsDialer{insecureSkipVerify: insecure}, proxyKindNone, "")
+	}
+	return newTransportWithUTLS(
+		&utlsDialer{explicitProxyURL: proxyURL, insecureSkipVerify: insecure},
+		proxyKindExplicit, proxyURL,
+	)
 }

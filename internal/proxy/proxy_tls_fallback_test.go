@@ -96,8 +96,12 @@ func TestInsecureClientForCachesAndSkipsVerification(t *testing.T) {
 	if tr.TLSClientConfig == nil || !tr.TLSClientConfig.InsecureSkipVerify {
 		t.Error("the cached transport must disable certificate verification")
 	}
-	if tr.Proxy == nil {
-		t.Error("the cached transport must dial the given proxy")
+	// t.Proxy stays nil by design: the uTLS dialer tunnels through the proxy
+	// itself (see utls_dialer.go), because net/http would otherwise finish a
+	// proxied handshake with crypto/tls. The egress choice is introspected
+	// via the transport registry instead.
+	if got := proxyURLFor(first); got != "http://127.0.0.1:1" {
+		t.Errorf("the cached transport must dial the given proxy, proxyURLFor = %q", got)
 	}
 	if InsecureClientFor("") == first {
 		t.Error("the direct insecure client must not share a pool with a proxied one")

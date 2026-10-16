@@ -259,8 +259,7 @@ func (h *DashboardHandler) HandleProxyTest(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	tr := proxy.NewSafeTransport()
-	tr.Proxy = http.ProxyURL(parsed)
+	tr := proxy.NewSafeTransportWithProxy(parsed.String(), false)
 	client := &http.Client{
 		Transport: tr,
 		Timeout:   timeout,

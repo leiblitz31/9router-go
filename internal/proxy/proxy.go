@@ -103,13 +103,20 @@ func InsecureClientFor(proxyURL string) *http.Client {
 	if client, ok = insecureClients[proxyURL]; ok {
 		return client
 	}
-	transport := NewSafeTransport()
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	var transport *http.Transport
 	if proxyURL != "" {
-		if u, err := url.Parse(proxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(u)
+		if _, err := url.Parse(proxyURL); err == nil {
+			transport = NewSafeTransportWithProxy(proxyURL, true)
 		}
 	}
+	if transport == nil {
+		// Direct + insecure. NewSafeTransportWithProxy("", true) registers
+		// proxyKindNone so this is never mistaken for an assigned proxy.
+		transport = NewSafeTransportWithProxy("", true)
+	}
+	// TLSClientConfig is kept as a marker for introspection/tests; the actual
+	// handshake (with verification disabled) happens inside the uTLS dialer.
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	client = &http.Client{Transport: transport, Timeout: directProxyClient.Timeout}
 	insecureClients[proxyURL] = client
 	return client
@@ -195,18 +202,33 @@ func replayInsecureTLS(ctx context.Context, proxyURL, method, url string, header
 }
 
 // proxyURLFor reports the proxy a client dials, or "" when it dials directly.
+// The egress choice is read from the transport registry for transports built
+// by NewSafeTransport* (see utls_dialer.go); t.Proxy itself stays nil there
+// because the uTLS dialer tunnels manually. Transports with t.Proxy assigned
+// directly fall back to the legacy read.
 func proxyURLFor(client *http.Client) string {
 	if client == nil {
 		return ""
 	}
 	tr, ok := client.Transport.(*http.Transport)
-	if !ok || tr.Proxy == nil {
+	if !ok {
+		return ""
+	}
+	proxyFor := tr.Proxy
+	if a := lookupTransportProxy(tr); a.kind != proxyKindNone {
+		if a.kind == proxyKindExplicit {
+			return a.url
+		}
+		// kind == proxyKindEnv: resolve exactly like http.ProxyFromEnvironment.
+		proxyFor = http.ProxyFromEnvironment
+	}
+	if proxyFor == nil {
 		return ""
 	}
 	// A fixed Proxy func is an *url.URL under the hood, so asking it about a
 	// throwaway URL reveals the destination without touching the network.
 	req := &http.Request{URL: &url.URL{Scheme: "https", Host: "proxy-target.invalid"}}
-	u, err := tr.Proxy(req)
+	u, err := proxyFor(req)
 	if err != nil || u == nil {
 		return ""
 	}
