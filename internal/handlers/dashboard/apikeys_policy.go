@@ -104,6 +104,36 @@ func (h *DashboardHandler) HandleUpdateApiKey(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Every field is validated before the first write, so a refused request
+	// leaves the row exactly as it was instead of applying the fields that
+	// happened to be checked first.
+	expiresAt := ""
+	if req.ExpiresAt != nil {
+		expiresAt = strings.TrimSpace(*req.ExpiresAt)
+		if err := validateAPIKeyExpiry(expiresAt); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	meta := ""
+	if req.Metadata != nil {
+		meta = strings.TrimSpace(*req.Metadata)
+		if err := validateAPIKeyMetadata(meta); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	name := ""
+	if req.Name != nil {
+		// A name is operator-facing only, but an unbounded one is stored in the
+		// dashboard's list and in the auth cache, so cap it rather than let a
+		// pasted megabyte ride along in every response.
+		name = strings.TrimSpace(*req.Name)
+		if len(name) > maxAPIKeyNameLen {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, "name is too long")
+			return
+		}
+	}
 	if err := h.Repo.SetApiKeyRateLimit(id, rpm, tpm, conc); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -113,38 +143,18 @@ func (h *DashboardHandler) HandleUpdateApiKey(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if req.ExpiresAt != nil {
-		if err := h.Repo.SetApiKeyExpiry(id, strings.TrimSpace(*req.ExpiresAt)); err != nil {
+		if err := h.Repo.SetApiKeyExpiry(id, expiresAt); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
 	if req.Metadata != nil {
-		meta := strings.TrimSpace(*req.Metadata)
-		if meta != "" {
-			// Metadata is stored verbatim and read back by the operator; reject
-			// anything that is not a JSON object rather than persisting a value
-			// that later fails to parse.
-			var probe map[string]any
-			if err := json.Unmarshal([]byte(meta), &probe); err != nil {
-				handlerutil.WriteJSONError(w, http.StatusBadRequest, "metadata must be a JSON object")
-				return
-			}
-		}
 		if err := h.Repo.SetApiKeyMetadata(id, meta); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
-
 	if req.Name != nil {
-		// A name is operator-facing only, but an unbounded one is stored in the
-		// dashboard's list and in the auth cache, so cap it rather than let a
-		// pasted megabyte ride along in every response.
-		name := strings.TrimSpace(*req.Name)
-		if len(name) > maxAPIKeyNameLen {
-			handlerutil.WriteJSONError(w, http.StatusBadRequest, "name is too long")
-			return
-		}
 		if err := h.Repo.SetApiKeyName(id, name); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return

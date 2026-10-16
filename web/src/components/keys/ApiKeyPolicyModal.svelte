@@ -311,15 +311,21 @@
         <div>
           <h3 class="font-headline text-xs font-bold text-text-main">Resale metadata</h3>
           <p class="text-text-subtle mt-0.5">
-            Free-form JSON kept with the key, e.g.
-              <span class="font-code">&#123;"customerId":"acme","priceCents":5000&#125;</span>
+            JSON object kept with the key. Accepted keys:
+            <span class="font-code">customerId</span>,
+            <span class="font-code">priceCents</span> (whole cents),
+            <span class="font-code">billingCycle</span> (one-off, monthly, quarterly, yearly),
+            <span class="font-code">contact</span>,
+            <span class="font-code">notes</span>
+            — up to 2 KB. Any other key is refused, so a typo cannot silently drop
+            the key out of the resale report.
           </p>
         </div>
         <textarea
           bind:value={metadata}
           rows="3"
           spellcheck="false"
-          placeholder={'{\n  "customerId": "acme",\n  "priceCents": 5000\n}'}
+          placeholder={'{\n  "customerId": "acme",\n  "priceCents": 5000,\n  "billingCycle": "monthly"\n}'}
           class="w-full bg-surface border border-border rounded-lg px-3 py-2 font-code text-[11px] text-text-main focus:outline-none focus:border-brand-500 resize-y"
         ></textarea>
       </section>
