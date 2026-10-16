@@ -95,8 +95,31 @@ func NewSafeDialer() *net.Dialer {
 
 // NewSafeTransport returns an *http.Transport configured with production pool
 // defaults and an active SSRF-filtering DialContext.
+//
+// The transport honors the standard proxy environment variables
+// (HTTPS_PROXY, HTTP_PROXY, NO_PROXY) via http.ProxyFromEnvironment, matching
+// the behavior of the Node.js 9Router. This is required for relay connections
+// (Vercel/Cloudflare edge pools): the relay URL itself must be reached through
+// the egress proxy, and without env proxy support the TLS handshake fails with
+// "tls: first record does not look like a TLS handshake".
+//
+// When no proxy env vars are set, ProxyFromEnvironment returns nil and the
+// transport behaves exactly as before (direct connections).
 func NewSafeTransport() *http.Transport {
 	t := constants.DefaultHTTPTransportConfig.NewTransport()
+	t.Proxy = http.ProxyFromEnvironment
+	t.DialContext = NewSafeDialer().DialContext
+	return t
+}
+
+// NewSafeTransportDirect returns an *http.Transport identical to
+// NewSafeTransport but with proxying explicitly disabled (Proxy: nil).
+// It is the "true direct" transport used by FallbackTransport when the
+// environment proxy refuses a connection: retrying through the same broken
+// env proxy would be pointless, so the fallback must bypass it entirely.
+func NewSafeTransportDirect() *http.Transport {
+	t := constants.DefaultHTTPTransportConfig.NewTransport()
+	t.Proxy = nil
 	t.DialContext = NewSafeDialer().DialContext
 	return t
 }

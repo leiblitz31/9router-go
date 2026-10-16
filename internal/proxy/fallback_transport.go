@@ -9,7 +9,11 @@ import (
 // FallbackTransport intercepts outbound HTTP requests and automatically retries
 // via a direct connection (Proxy: nil) if the environment proxy or local sandbox proxy
 // refuses the connection (CONNECT tunnel failed, 403 Forbidden, blocked-by-allowlist).
-var defaultDirectTransport = NewSafeTransport()
+//
+// defaultDirectTransport is the true-direct fallback: it must bypass the
+// environment proxy entirely (NewSafeTransportDirect), because retrying a
+// failed env-proxy tunnel through the same env proxy would fail identically.
+var defaultDirectTransport = NewSafeTransportDirect()
 
 type FallbackTransport struct {
 	Base   http.RoundTripper
