@@ -177,10 +177,21 @@ jobs:
             # pulled out as a bare integer before sorting: `sort -k1,1n` on
             # `900-z` treats the field as text and interleaves 88 and 1000
             # anyway, so the order would disagree with the changelog modal.
+            #
+            # Written without `ls | grep` or an unquoted command substitution:
+            # both were shellcheck findings (SC2010, SC2046) that would fail
+            # actionlint once it runs with shellcheck present, and the glob with
+            # a `continue` is the form that also survives a filename containing
+            # a space. The output is byte-identical to what the old pipeline
+            # produced — verified against this repo's fragments.
             if compgen -G ".changes/*.md" > /dev/null; then
-              NOTES=$(cat $(for f in $(ls .changes/*.md | grep -v '/README\.md$'); do \
-                echo "$(basename "$f" .md | cut -d- -f1) $f"; \
-              done | sort -rn | cut -d' ' -f2-))
+              ORDERED=$(for f in .changes/*.md; do
+                if [ "$(basename "$f")" = "README.md" ]; then continue; fi
+                printf '%s %s\n' "$(basename "$f" .md | cut -d- -f1)" "$f"
+              done | sort -rn | cut -d' ' -f2-)
+              NOTES=$(while IFS= read -r f; do
+                if [ -n "$f" ]; then cat "$f"; fi
+              done <<< "$ORDERED")
             fi
           fi
           if [ -z "$NOTES" ]; then

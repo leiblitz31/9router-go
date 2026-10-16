@@ -484,6 +484,21 @@ cd web && bun run build
 # Svelte type-check ratchet (blocks unresolved identifiers, pins type debt)
 make vet-svelte
 
+# Go lint/dispatch ratchet (CI `lint` job: golangci-lint on the diff, govulncheck,
+# oxlint, actionlint). golangci-lint reads source, but web/dist must exist or it
+# reports `pattern dist/*: no matching files found` as a typecheck failure:
+mkdir -p web/dist && printf '<!doctype html>' > web/dist/index.html
+golangci-lint run --new-from-rev="$(git merge-base origin/main HEAD)" ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+cd web && bunx oxlint --deny-warnings
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+# The full 141-finding baseline (not the diff) is printed by the same command
+# with no --new-from-rev; the lint step is a ratchet, not a clean tree.
+
+# Cross-compile check (CI `cross` job: identical to the release build, then
+# `file`-asserts each artifact's architecture and verifies SHA256SUMS.txt)
+make cross
+
 # Build binary (automatically builds web SPA into web/dist first)
 make build
 
