@@ -1539,6 +1539,11 @@ export const api = {
 
   // Usage & Telemetry
   getUsageStats: (period = 'today') => request<any>(`/api/usage/stats?period=${encodeURIComponent(period)}`),
+  /** One chart point: bucket label (HH:MM or MMM D), totals, and the per-model-family token split. */
+  getUsageChart: (period = '7d') =>
+    request<{ label: string; tokens: number; cost: number; byModel: Record<string, number> }[]>(
+      `/api/usage/chart?period=${encodeURIComponent(period)}`
+    ),
   getRequestDetails: (limit = 50, offset = 0) =>
     request<any>(`/api/usage/request-details?limit=${limit}&offset=${offset}`),
   /** Full stored payload for one request; the list omits request/response bodies. */

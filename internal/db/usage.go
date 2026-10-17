@@ -111,6 +111,7 @@ type UsageHistoryRow struct {
 }
 
 // GetUsageDailyRecent returns the most recent daily usage records up to limit.
+
 func (r *Repo) GetUsageDailyRecent(limit int) ([]string, error) {
 	rows, err := r.db.Query(`SELECT data FROM usageDaily ORDER BY dateKey DESC LIMIT ?`, limit)
 	if err != nil {
@@ -128,6 +129,36 @@ func (r *Repo) GetUsageDailyRecent(limit int) ([]string, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate usageDaily recent: %w", err)
+	}
+	return res, nil
+}
+
+// UsageDailyRow is one usageDaily row: the local date key plus its aggregate
+// payload. The chart endpoint needs the key (the existing
+// GetUsageDailyRecent drops it), so this keeps both.
+type UsageDailyRow struct {
+	DateKey string
+	Data    string
+}
+
+// GetUsageDailyRange returns the most recent daily usage rows up to limit,
+// newest first, each with its dateKey.
+func (r *Repo) GetUsageDailyRange(limit int) ([]UsageDailyRow, error) {
+	rows, err := r.db.Query(`SELECT dateKey, data FROM usageDaily ORDER BY dateKey DESC LIMIT ?`, limit) //nolint:noctx
+	if err != nil {
+		return nil, fmt.Errorf("query usageDaily range: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var res []UsageDailyRow
+	for rows.Next() {
+		var row UsageDailyRow
+		if err := rows.Scan(&row.DateKey, &row.Data); err != nil {
+			return nil, fmt.Errorf("scan usageDaily range: %w", err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usageDaily range: %w", err)
 	}
 	return res, nil
 }
