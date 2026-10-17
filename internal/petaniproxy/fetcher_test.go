@@ -376,8 +376,14 @@ func TestFetcherFetchProxies(t *testing.T) {
 		}
 	})
 
-	t.Run("missing config yields empty, no error", func(t *testing.T) {
-		got, err := FetchProxies(context.Background(), FetchOptions{ConfigPath: filepath.Join(dir, "absent.json")})
+	t.Run("missing config falls back to embedded defaults, no error", func(t *testing.T) {
+		// A nonexistent path now falls back to the embedded sources.json.
+		// Use an explicit empty config to test the "no sources" case.
+		emptyCfg := filepath.Join(dir, "empty.json")
+		if err := os.WriteFile(emptyCfg, []byte(`{}`), 0644); err != nil {
+			t.Fatalf("write empty config: %v", err)
+		}
+		got, err := FetchProxies(context.Background(), FetchOptions{ConfigPath: emptyCfg})
 		if err != nil {
 			t.Fatalf("FetchProxies() error = %v", err)
 		}

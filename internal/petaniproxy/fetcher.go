@@ -31,9 +31,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// DefaultMaxWorkers mirrors ThreadPoolExecutor(max_workers=30) from the
-// Python urllib fallback engine.
-const DefaultMaxWorkers = 30
+// DefaultMaxWorkers limits concurrent fetches. Reduced from Python's 30
+// because the egress proxy rate-limits aggressive concurrency (30 parallel
+// = 0 results, 5 parallel = works).
+const DefaultMaxWorkers = 5
 
 // DefaultRequestTimeout mirrors the httpx timeout=12.0 of the primary engine.
 const DefaultRequestTimeout = 12 * time.Second
