@@ -48,7 +48,13 @@ const (
 )
 
 // warpHTTPClient is the shared client for WARP registration (12s timeout, mirroring urllib timeout=12).
-var warpHTTPClient = &http.Client{Timeout: 12 * time.Second}
+// Uses proxy env vars like DefaultClient.
+var warpHTTPClient = &http.Client{
+	Timeout: 12 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+	},
+}
 
 // WarpProfile is a registered Cloudflare WARP WireGuard account.
 type WarpProfile struct {
