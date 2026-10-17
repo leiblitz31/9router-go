@@ -25,8 +25,7 @@
 
   async function fetchStatus() {
     try {
-      const res = await api.get('/api/proxy-gateway/status')
-      status = await res.json()
+      status = await api.getProxyGatewayStatus()
     } catch (e) {
       console.error('Failed to fetch gateway status:', e)
     } finally {
@@ -42,8 +41,7 @@
 
     toggling = true
     try {
-      const res = await api.post('/api/proxy-gateway/toggle', { enabled })
-      status = await res.json()
+      status = await api.toggleProxyGateway(enabled)
       notifications.success(
         enabled ? 'Gateway dinyalakan' : 'Gateway dimatikan'
       )
@@ -58,8 +56,7 @@
   async function handleRestart() {
     toggling = true
     try {
-      const res = await api.post('/api/proxy-gateway/restart', {})
-      status = await res.json()
+      status = await api.restartProxyGateway()
       notifications.success('Gateway di-restart')
     } catch (e) {
       notifications.error('Gagal restart gateway')

@@ -1656,6 +1656,42 @@ export const api = {
     request<{ proxyPools: ProxyPool[] }>(`/api/proxy-pools${includeUsage ? '?includeUsage=true' : ''}`)
       .then((res) => res.proxyPools || [])
       .catch(() => []),
+  // Embedded proxy gateway (petani-proxy) management
+  getProxyGatewayStatus: () =>
+    request<{
+      running: boolean
+      enabled: boolean
+      available: boolean
+      pid?: number
+      uptime?: string
+      startedAt?: string
+      gatewayUrl: string
+    }>('/api/proxy-gateway/status'),
+  toggleProxyGateway: (enabled: boolean) =>
+    request<{
+      running: boolean
+      enabled: boolean
+      available: boolean
+      pid?: number
+      uptime?: string
+      startedAt?: string
+      gatewayUrl: string
+    }>('/api/proxy-gateway/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
+  restartProxyGateway: () =>
+    request<{
+      running: boolean
+      enabled: boolean
+      available: boolean
+      pid?: number
+      uptime?: string
+      startedAt?: string
+      gatewayUrl: string
+    }>('/api/proxy-gateway/restart', {
+      method: 'POST',
+    }),
   createProxyPool: (payload: Partial<ProxyPool>) =>
     request<ProxyPool>('/api/proxy-pools', {
       method: 'POST',
