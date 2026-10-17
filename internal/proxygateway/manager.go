@@ -1,17 +1,16 @@
-// Package proxygateway manages the embedded petani-proxy gateway subprocess.
-// It provides start/stop/status control for the local rotating proxy gateway
-// that 9Router uses as a proxy pool for IP rotation.
+// Package proxygateway manages the embedded petani-proxy gateway.
+// Since 2026-10-17: Go-native implementation using internal/petaniproxy.
+// No more Python subprocess — the gateway runs in-process.
 package proxygateway
 
 import (
+	"context"
 	"fmt"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
+
+	"9router/proxy/internal/petaniproxy"
 )
 
 // Gateway address (fixed)
@@ -21,36 +20,44 @@ const (
 	GatewayURL  = "http://127.0.0.1:8888"
 )
 
-// Manager controls the petani-proxy gateway subprocess.
+// Harvest interval for background proxy refresh
+const harvestInterval = 10 * time.Minute
+
+// Manager controls the Go-native petani-proxy gateway.
 type Manager struct {
 	mu        sync.Mutex
-	cmd       *exec.Cmd
+	server    *petaniproxy.Server
 	startTime time.Time
-	enabled   bool // whether gateway should be running (persisted via DB)
-	scriptDir string
-	pythonBin string
+	enabled   bool
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 // Status represents the current gateway state.
 type Status struct {
-	Running    bool      `json:"running"`
-	Enabled    bool      `json:"enabled"`
-	Available  bool      `json:"available"`
-	PID        int       `json:"pid,omitempty"`
-	Uptime     string    `json:"uptime,omitempty"`
-	StartedAt  time.Time `json:"startedAt,omitempty"`
-	GatewayURL string    `json:"gatewayUrl"`
+	Running    bool       `json:"running"`
+	Enabled    bool       `json:"enabled"`
+	Available  bool       `json:"available"`
+	PID        int        `json:"pid,omitempty"`
+	Uptime     string     `json:"uptime,omitempty"`
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	GatewayURL string     `json:"gatewayUrl"`
+	ProxyCount int        `json:"proxyCount,omitempty"`
 }
 
 // NewManager creates a gateway manager.
-// scriptDir is the petani-proxy installation directory.
-// pythonBin is the Python interpreter (venv).
-func NewManager(scriptDir, pythonBin string) *Manager {
-	return &Manager{
-		scriptDir: scriptDir,
-		pythonBin: pythonBin,
-		enabled:   false,
-	}
+func NewManager() *Manager {
+	return &Manager{}
+}
+
+// NewDefaultManager creates a manager with default settings.
+func NewDefaultManager() *Manager {
+	return NewManager()
+}
+
+// IsAvailable always returns true for the Go-native gateway.
+func (m *Manager) IsAvailable() bool {
+	return true
 }
 
 // isPortInUse checks if a TCP port is listening on the given host.
@@ -63,130 +70,123 @@ func isPortInUse(host string, port int) bool {
 	return true
 }
 
-// defaultPaths returns the default petani-proxy paths.
-func defaultPaths() (scriptDir, pythonBin string) {
-	home, _ := os.UserHomeDir()
-	scriptDir = filepath.Join(home, "vps-persist", "petani-proxy")
-	pythonBin = filepath.Join(scriptDir, "venv", "bin", "python")
-	return scriptDir, pythonBin
-}
-
-// NewDefaultManager creates a manager with default paths.
-func NewDefaultManager() *Manager {
-	sd, pb := defaultPaths()
-	return NewManager(sd, pb)
-}
-
-// IsAvailable checks if the gateway can be started (script + python exist).
-func (m *Manager) IsAvailable() bool {
-	mainPy := filepath.Join(m.scriptDir, "main.py")
-	if _, err := os.Stat(mainPy); err != nil {
-		return false
-	}
-	if _, err := os.Stat(m.pythonBin); err != nil {
-		return false
-	}
-	return true
-}
-
-// Start launches the gateway subprocess.
-// If the gateway is already running (port 8888 in use), it is adopted
-// as running instead of failing.
+// Start launches the Go-native gateway.
 func (m *Manager) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.cmd != nil && m.cmd.Process != nil {
-		// Already running via this manager, check if alive
-		if err := m.cmd.Process.Signal(syscall.Signal(0)); err == nil {
-			m.enabled = true
-			return nil // Already running, treat as success
-		}
-		// Process died, clear it
-		m.cmd = nil
+	if m.server != nil {
+		m.enabled = true
+		return nil // Already running
 	}
 
-	// Check if port 8888 is already in use (externally started gateway)
+	// If something else is on 8888 (e.g. old Python gateway), adopt it
 	if isPortInUse(GatewayHost, GatewayPort) {
 		m.enabled = true
-		// Try to find the PID for status display
-		m.cmd = nil // We don't own it, but mark as enabled
 		return nil
 	}
 
-	if !m.IsAvailable() {
-		return fmt.Errorf("petani-proxy not installed at %s", m.scriptDir)
-	}
-
-	cmd := exec.Command(m.pythonBin, "main.py", "--daemon-gateway")
-	cmd.Dir = m.scriptDir
-	// Inherit proxy env for egress
-	cmd.Env = os.Environ()
-
-	// Detach from parent
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	// Log to file
-	logFile, err := os.OpenFile(
-		filepath.Join(m.scriptDir, "petani-proxy.log"),
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644,
+	// Create the Go server
+	srv := petaniproxy.NewServer(
+		fmt.Sprintf("%s:%d", GatewayHost, GatewayPort),
+		petaniproxy.WithDialTimeout(10*time.Second),
+		petaniproxy.WithMaxAttempts(3),
 	)
-	if err == nil {
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-	}
 
-	if err := cmd.Start(); err != nil {
+	if err := srv.Start(); err != nil {
 		return fmt.Errorf("failed to start gateway: %w", err)
 	}
 
-	m.cmd = cmd
+	// Start background harvester
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.wg.Add(1)
+	go m.harvestLoop(ctx, srv)
+
+	m.server = srv
 	m.startTime = time.Now()
 	m.enabled = true
 
 	return nil
 }
 
-// Stop terminates the gateway subprocess.
-// Also kills externally-started gateways (by port) if manager didn't start it.
+// harvestLoop periodically fetches and validates proxies in the background.
+func (m *Manager) harvestLoop(ctx context.Context, srv *petaniproxy.Server) {
+	defer m.wg.Done()
+
+	// Initial harvest (don't block startup)
+	go m.doHarvest(ctx, srv)
+
+	ticker := time.NewTicker(harvestInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.doHarvest(ctx, srv)
+		}
+	}
+}
+
+// doHarvest fetches proxy candidates, validates them, and updates the pool.
+func (m *Manager) doHarvest(ctx context.Context, srv *petaniproxy.Server) {
+	hctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	// Fetch candidates
+	candidates, err := petaniproxy.FetchProxies(hctx, petaniproxy.FetchOptions{})
+	if err != nil || len(candidates) == 0 {
+		return
+	}
+
+	// Convert to ProxyCandidate for checking
+	var toCheck []petaniproxy.ProxyCandidate
+	for _, c := range candidates {
+		toCheck = append(toCheck, petaniproxy.ProxyCandidate{
+			IP:       c.IP,
+			Port:     c.Port,
+			Protocol: c.Protocol,
+		})
+	}
+
+	// Validate
+	live := petaniproxy.CheckProxiesPool(hctx, toCheck, petaniproxy.CheckPoolOptions{})
+	if len(live) == 0 {
+		return
+	}
+
+	// Update server pool
+	var proxies []petaniproxy.Proxy
+	for _, lp := range live {
+		proxies = append(proxies, petaniproxy.Proxy{
+			IP:       lp.IP,
+			Port:     lp.Port,
+			Protocol: lp.Protocol,
+		})
+	}
+	srv.SetProxies(proxies)
+}
+
+// Stop terminates the gateway.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.enabled = false
 
-	if m.cmd != nil && m.cmd.Process != nil {
-		// Try graceful shutdown first
-		_ = m.cmd.Process.Signal(syscall.SIGTERM)
-
-		// Wait a bit, then force kill
-		done := make(chan struct{})
-		go func() {
-			_, _ = m.cmd.Process.Wait()
-			close(done)
-		}()
-
-		select {
-		case <-done:
-			// Exited cleanly
-		case <-time.After(5 * time.Second):
-			// Force kill
-			_ = m.cmd.Process.Kill()
-			<-done
-		}
-
-		m.cmd = nil
-		return nil
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
 	}
 
-	// No manager-owned process; try to kill by port (external gateway).
-	// We use pkill with a pattern matching the gateway's Python process.
-	// This is best-effort; failure is not an error.
-	if isPortInUse(GatewayHost, GatewayPort) {
-		_ = exec.Command("pkill", "-f", "petani-proxy.*daemon-gateway").Run()
-		// Also try the start script pattern
-		_ = exec.Command("pkill", "-f", "[m]ain.py --daemon-gateway").Run()
+	if m.server != nil {
+		_ = m.server.Stop()
+		m.server = nil
 	}
+	m.mu.Unlock()
+
+	// Wait for harvester to finish (without holding the lock)
+	m.wg.Wait()
 
 	return nil
 }
@@ -198,27 +198,24 @@ func (m *Manager) Status() Status {
 
 	s := Status{
 		Enabled:    m.enabled,
+		Available:  true,
 		GatewayURL: GatewayURL,
 	}
 
-	// Check manager-owned process first
-	if m.cmd != nil && m.cmd.Process != nil {
-		if err := m.cmd.Process.Signal(syscall.Signal(0)); err == nil {
-			s.Running = true
-			s.PID = m.cmd.Process.Pid
-			s.StartedAt = m.startTime
-			s.Uptime = time.Since(m.startTime).Round(time.Second).String()
-			return s
+	if m.server != nil {
+		s.Running = true
+		startTime := m.startTime
+		s.StartedAt = &startTime
+		s.Uptime = time.Since(m.startTime).Round(time.Second).String()
+		if pool := m.server.Pool(); pool != nil {
+			s.ProxyCount = pool.Size()
 		}
-		// Process died
-		m.cmd = nil
+		return s
 	}
 
 	// Fall back to port check (externally started gateway)
 	if isPortInUse(GatewayHost, GatewayPort) {
 		s.Running = true
-		// PID unknown for external process, but mark as running
-		// so the dashboard shows correct state
 	}
 
 	return s
@@ -231,7 +228,7 @@ func (m *Manager) IsEnabled() bool {
 	return m.enabled
 }
 
-// SetEnabled sets the enabled flag (for persistence).
+// SetEnabled sets the enabled flag.
 func (m *Manager) SetEnabled(enabled bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
