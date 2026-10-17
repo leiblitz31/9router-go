@@ -527,9 +527,11 @@ var patternCapabilities = []patternCapability{
 	{pattern: "*claude*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 
 	{pattern: "*gemini*image*", caps: Capabilities{Vision: true, ImageOutput: true, Tools: true}},
-	// Gemini 4 (Argon): no "minimal" tier (400) and no thinkingBudget —
-	// LOW/MEDIUM/HIGH only, cannot disable. First-match-wins keeps it ahead
-	// of the gemini-3 rows. Parity with open-sse/providers/capabilities.js.
+	// Gemini 4 (Argon): LOW/MEDIUM/HIGH only — no "minimal" tier, no
+	// thinkingBudget, and thinking cannot be disabled. The bridge publishes
+	// the bare id "gemini-argon" as well as the "gemini-4-argon" alias, so
+	// both spellings have to hit a row (upstream PATTERN_CAPABILITIES).
+	{pattern: "*gemini*argon*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-4*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false), ContextWindow: 1048576, MaxOutput: 65536}},
 	{pattern: "*gemini-3.8*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-3.7*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
@@ -709,6 +711,55 @@ func GetModelTokenLimits(model string) (contextWindow int, maxOutput int) {
 	return res[0], res[1]
 }
 
+// providerTokenLimits holds per-provider limit declarations for gateways whose
+// figures differ from what the provider-blind substring table would guess.
+//
+// The substring table answers from the model name alone, so it has to pick one
+// number for every gateway serving that name. Where a gateway publishes its own
+// catalog — CodeBuddy declares 393216 output for deepseek-v4.1-flash — the
+// provider-qualified figure belongs here instead of in the shared table.
+//
+// Entries here are consulted by GetCapabilitiesDetailForModel before the
+// models.dev catalog and the substring table, and they carry limits only: the
+// capability flags and thinking shape still resolve through the normal chain,
+// which is why this is not expressed as a providerCapabilities row (those win
+// over patterns and would drag their thinking format along).
+var providerTokenLimits = map[string]map[string][2]int{
+	// CodeBuddy's product-config catalog, the same figures codebuddy-cn
+	// declares in providerCapabilities. codebuddy-intl serves the same ids
+	// but resolves its own thinking levels, so only the limits are shared.
+	"codebuddy-intl": {
+		"glm-5.2":             {1000000, 131072},
+		"glm-5.1":             {200000, 48000},
+		"glm-5.3":             {1000000, 131072},
+		"glm-5.3-flash":       {1000000, 131072},
+		"minimax-m3":          {512000, 524288},
+		"kimi-k2.5":           {164000, 32000},
+		"deepseek-v4-pro":     {1000000, 393216},
+		"deepseek-v4.1-flash": {1000000, 393216},
+	},
+}
+
+// lookupProviderTokenLimits returns the limits a provider declares for a model,
+// or (0, 0) when it declares none.
+func lookupProviderTokenLimits(provider, model string) (contextWindow, maxOutput int) {
+	byModel, ok := providerTokenLimits[strings.ToLower(provider)]
+	if !ok {
+		return 0, 0
+	}
+	base := model
+	if _, after, found := strings.CutLast(model, "/"); found {
+		base = after
+	}
+	if limits, found := byModel[base]; found {
+		return limits[0], limits[1]
+	}
+	if limits, found := byModel[model]; found {
+		return limits[0], limits[1]
+	}
+	return 0, 0
+}
+
 func lookupModelTokenLimits(model string) [2]int {
 	m := strings.ToLower(model)
 
@@ -719,7 +770,7 @@ func lookupModelTokenLimits(model string) [2]int {
 		return [2]int{1050000, 128000}
 	case strings.Contains(m, "deepseek-v4.1-flash") || strings.Contains(m, "deepseek-v4-flash"):
 		return [2]int{1000000, 128000}
-	case strings.Contains(m, "gemini-1.5") || strings.Contains(m, "gemini-2.0") || strings.Contains(m, "gemini-2.5") || strings.Contains(m, "gemini-3") || strings.Contains(m, "glm-5.3-flash"):
+	case strings.Contains(m, "gemini-1.5") || strings.Contains(m, "gemini-2.0") || strings.Contains(m, "gemini-2.5") || strings.Contains(m, "gemini-3") || strings.Contains(m, "gemini-4") || strings.Contains(m, "gemini-argon") || strings.Contains(m, "glm-5.3-flash"):
 		return [2]int{1048576, 65536}
 	case strings.Contains(m, "grok-4.5") || strings.Contains(m, "grok-4.6"):
 		return [2]int{524288, 32768}
@@ -1013,22 +1064,63 @@ func AggregateComboCapabilities(leaves []CapabilitiesDetail) (ComboCapabilities,
 // context_length / max_completion_tokens mirrors.
 func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 	caps := GetCapabilitiesForModel(provider, model)
-	// A provider entry that declares its own limits (CommandCode) is more
-	// specific than the catalog, so it wins. Everything else keeps the
-	// catalog-then-table-then-floor chain.
-	cw, maxOut := caps.ContextWindow, caps.MaxOutput
-	if cw == 0 && maxOut == 0 {
-		// Upstream resolves limits from the models.dev-synced catalog keyed by
-		// provider + model before falling back to its pattern table and the
-		// DEFAULT_CAPABILITIES floor; the catalog is the authoritative source, so
-		// it wins here too and the substring table only fills the gaps.
-		cw, maxOut = GetCatalogLimits(provider, model)
+	// Each level only fills what is still unset, so a source that declares
+	// just one of the two numbers does not block the next level from
+	// answering the other. Order is most specific first:
+	//
+	//   1. a custom row that declares contextWindow/maxOutput — the operator's
+	//      own declaration for this exact endpoint,
+	//   2. a provider-qualified limit declaration (providerTokenLimits),
+	//   3. a provider entry that declares its own limits (CommandCode, the
+	//      codebuddy catalogs) — the gateway's own number,
+	//   4. the models.dev-synced catalog keyed by provider + model — the
+	//      authoritative per-gateway figure,
+	//   5. whatever GetCapabilitiesForModel already resolved, which past this
+	//      point can only be a pattern-table guess,
+	//   6. the substring table,
+	//   7. the 128k floor.
+	//
+	// The catalog has to outrank the pattern table even when the pattern
+	// already filled ContextWindow: `*glm-5.3*` hardcodes 1000000/128000, but
+	// OpenCode's free tier serves the same weights with a 200000/32000 window.
+	// Letting the pattern win published 1M for a 200k endpoint, so clients
+	// budgeted five times the context the gateway would actually accept.
+	var cw, maxOut int
+	fill := func(c, m int) {
+		if cw == 0 && c > 0 {
+			cw = c
+		}
+		if maxOut == 0 && m > 0 {
+			maxOut = m
+		}
 	}
-	if cw == 0 && maxOut == 0 {
-		cw, maxOut = GetModelTokenLimits(model)
+
+	if custom, ok := lookupCustomModelCaps(provider, model); ok {
+		fill(custom.ContextWindow, custom.MaxOutput)
 	}
-	if cw == 0 && maxOut == 0 {
-		cw, maxOut = GetModelTokenLimits(provider + "/" + model)
+	if c, m := lookupProviderTokenLimits(provider, model); c > 0 || m > 0 {
+		fill(c, m)
+	}
+	if pCaps, ok := providerCapabilities[provider]; ok {
+		baseModel := model
+		if _, after, found := strings.CutLast(model, "/"); found {
+			baseModel = after
+		}
+		if c, found := pCaps[model]; found {
+			fill(c.ContextWindow, c.MaxOutput)
+		} else if c, found := pCaps[baseModel]; found {
+			fill(c.ContextWindow, c.MaxOutput)
+		}
+	}
+	if c, m := GetCatalogLimits(provider, model); c > 0 || m > 0 {
+		fill(c, m)
+	}
+	fill(caps.ContextWindow, caps.MaxOutput)
+	if c, m := GetModelTokenLimits(model); c > 0 || m > 0 {
+		fill(c, m)
+	}
+	if c, m := GetModelTokenLimits(provider + "/" + model); c > 0 || m > 0 {
+		fill(c, m)
 	}
 	if cw == 0 {
 		cw = 128000
