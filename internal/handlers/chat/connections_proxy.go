@@ -22,6 +22,15 @@ const maxProxyClients = 128
 // connection asked second.
 const strictCachePrefix = "strict\x00"
 
+// PetaniProxyPoolID is the special pool ID for the embedded petani-proxy
+// gateway. Unlike regular pools, it doesn't need a DB entry — the gateway
+// URL is fixed at http://127.0.0.1:8888 and managed by 9Router itself.
+// Frontend shows it as a native option below "None (direct)".
+const PetaniProxyPoolID = "__petani__"
+
+// PetaniProxyURL is the fixed gateway address.
+const PetaniProxyURL = "http://127.0.0.1:8888"
+
 var (
 	proxyClientsMu sync.RWMutex
 	proxyClients   = make(map[string]*http.Client)
@@ -81,25 +90,33 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 	// proxy was assigned to prevent, and the dashboard would keep showing the
 	// connection as proxied.
 	if connData.ProxyPoolID != "" {
-		pool, err := h.Repo.GetProxyPool(connData.ProxyPoolID)
-		switch {
-		case err != nil || pool == nil:
-			log.Warn("proxy", "assigned pool not found", "pool", connData.ProxyPoolID)
-			return nil, fmt.Errorf("proxy pool %q is assigned but does not exist", connData.ProxyPoolID)
-		case !pool.IsActive:
-			log.Warn("proxy", "assigned pool is inactive", "pool", connData.ProxyPoolID)
-			return nil, fmt.Errorf("proxy pool %q is assigned but inactive", connData.ProxyPoolID)
+		// Special case: embedded petani-proxy gateway (native option).
+		// No DB entry needed — URL is fixed, managed by 9Router.
+		if connData.ProxyPoolID == PetaniProxyPoolID {
+			proxyURLStr = PetaniProxyURL
+			proxyType = "http"
+			connData.ResolvedProxyPool = "Petani Proxy"
+		} else {
+			pool, err := h.Repo.GetProxyPool(connData.ProxyPoolID)
+			switch {
+			case err != nil || pool == nil:
+				log.Warn("proxy", "assigned pool not found", "pool", connData.ProxyPoolID)
+				return nil, fmt.Errorf("proxy pool %q is assigned but does not exist", connData.ProxyPoolID)
+			case !pool.IsActive:
+				log.Warn("proxy", "assigned pool is inactive", "pool", connData.ProxyPoolID)
+				return nil, fmt.Errorf("proxy pool %q is assigned but inactive", connData.ProxyPoolID)
+			}
+			proxyURLStr = pool.NextURL()
+			if proxyURLStr == "" {
+				log.Warn("proxy", "assigned pool has no url", "pool", connData.ProxyPoolID)
+				return nil, fmt.Errorf("proxy pool %q is assigned but carries no url", connData.ProxyPoolID)
+			}
+			proxyType = pool.Type
+			strictProxy = pool.StrictProxy
+			// Name the pool for the log line. The lookup already happened, so this
+			// costs nothing, and "Vercel Relay" answers a question a UUID cannot.
+			connData.ResolvedProxyPool = pool.Name
 		}
-		proxyURLStr = pool.NextURL()
-		if proxyURLStr == "" {
-			log.Warn("proxy", "assigned pool has no url", "pool", connData.ProxyPoolID)
-			return nil, fmt.Errorf("proxy pool %q is assigned but carries no url", connData.ProxyPoolID)
-		}
-		proxyType = pool.Type
-		strictProxy = pool.StrictProxy
-		// Name the pool for the log line. The lookup already happened, so this
-		// costs nothing, and "Vercel Relay" answers a question a UUID cannot.
-		connData.ResolvedProxyPool = pool.Name
 	}
 
 	// 2. Fallback to legacy connection proxy

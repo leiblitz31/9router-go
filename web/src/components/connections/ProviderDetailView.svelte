@@ -2924,6 +2924,7 @@
           class="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-text-main focus:outline-none focus:border-primary disabled:opacity-50 cursor-pointer"
         >
           <option value="none">None (direct)</option>
+          <option value="__petani__">🌐 Petani Proxy (native)</option>
           {#each activeProxyPools as pool}
             <option value={pool.id}>{pool.name}</option>
           {/each}

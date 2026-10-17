@@ -100,6 +100,7 @@
 
   const systemNavLinks = [
     { tab: 'proxy-pools' as ActiveTab, label: 'Proxy Pools', icon: 'lan' },
+    { tab: 'petani-proxy' as ActiveTab, label: 'Petani Proxy', icon: 'agriculture' },
     { tab: 'skills' as ActiveTab, label: 'Skills', icon: 'extension' },
     { tab: 'console-log' as ActiveTab, label: 'Console Log', icon: 'terminal' },
   ] as const

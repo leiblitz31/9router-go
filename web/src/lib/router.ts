@@ -20,6 +20,7 @@ export type ActiveTab =
   | 'media-systemone'
   | 'media-web'
   | 'proxy-pools'
+  | 'petani-proxy'
   | 'skills'
   | 'console-log'
   | 'terminal'
@@ -46,6 +47,7 @@ export const TAB_ROUTES: Record<ActiveTab, string> = {
   'media-systemone': '/dashboard/media-providers/systemone',
   'media-web': '/dashboard/media-providers/web',
   'proxy-pools': '/dashboard/proxy-pools',
+  'petani-proxy': '/dashboard/petani-proxy',
   skills: '/dashboard/skills',
   'console-log': '/dashboard/console-log',
   terminal: '/dashboard/console-log',
@@ -143,6 +145,9 @@ const ROUTE_TO_TAB: Record<string, ActiveTab> = {
   // proxy pools
   '/dashboard/proxy-pools': 'proxy-pools',
   '/proxy-pools': 'proxy-pools',
+  // petani proxy (embedded gateway)
+  '/dashboard/petani-proxy': 'petani-proxy',
+  '/petani-proxy': 'petani-proxy',
 
   // skills
   '/dashboard/skills': 'skills',
@@ -215,6 +220,7 @@ export function pathToTab(pathname: string): ActiveTab {
   if (normalized.includes('token-saver')) return 'token-saver'
   if (normalized.includes('cli-tools')) return 'cli-tools'
   if (normalized.includes('proxy-pools')) return 'proxy-pools'
+  if (normalized.includes('petani-proxy')) return 'petani-proxy'
   if (normalized.includes('skills')) return 'skills'
   if (
     normalized.includes('console-log') ||
