@@ -1718,6 +1718,10 @@ export const api = {
       method: 'POST',
       body: workers ? JSON.stringify({ workers }) : undefined,
     }),
+  generateWarp: () =>
+    request<{ ok: boolean; config: string }>('/api/proxy-gateway/warp', {
+      method: 'POST',
+    }),
   createProxyPool: (payload: Partial<ProxyPool>) =>
     request<ProxyPool>('/api/proxy-pools', {
       method: 'POST',

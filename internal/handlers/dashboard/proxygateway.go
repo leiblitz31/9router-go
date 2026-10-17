@@ -170,3 +170,23 @@ func (h *DashboardHandler) HandleProxyGatewayHarvest(w http.ResponseWriter, r *h
 		"proxyCount": count,
 	})
 }
+
+// HandleProxyGatewayWarp generates a new Cloudflare WARP account.
+// POST /api/proxy-gateway/warp
+func (h *DashboardHandler) HandleProxyGatewayWarp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	conf, err := ProxyGatewayManager.GenerateWarp()
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"config": conf,
+	})
+}

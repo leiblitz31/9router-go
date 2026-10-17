@@ -316,3 +316,19 @@ func (m *Manager) TriggerHarvest(workers int) (int, error) {
 	}
 	return 0, nil
 }
+
+// GenerateWarp creates a new Cloudflare WARP account and returns the
+// WireGuard config. The config can be used with wgcf, sing-box, or any
+// WireGuard client to get a working proxy.
+func (m *Manager) GenerateWarp() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	profile, err := petaniproxy.RegisterWarpAccount(ctx)
+	if err != nil {
+		return "", fmt.Errorf("warp registration failed: %w", err)
+	}
+
+	conf := petaniproxy.BuildWarpWireguardConf(profile)
+	return conf, nil
+}

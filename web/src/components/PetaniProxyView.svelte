@@ -113,6 +113,32 @@
     }
   }
 
+  let warpGenerating = $state(false)
+  let warpConfig = $state('')
+
+  async function handleWarp() {
+    warpGenerating = true
+    try {
+      const res = await api.generateWarp()
+      warpConfig = res.config
+      notifications.success('WARP account berhasil dibuat!')
+    } catch (e) {
+      notifications.error('Gagal generate WARP')
+    } finally {
+      warpGenerating = false
+    }
+  }
+
+  function downloadWarp() {
+    const blob = new Blob([warpConfig], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'warp.conf'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   onMount(() => {
     refresh()
     const interval = setInterval(refresh, 10000)
@@ -199,11 +225,25 @@
               <Button variant="outline" size="sm" disabled={toggling} onclick={handleRestart}>
                 Restart
               </Button>
+              <Button variant="outline" size="sm" disabled={warpGenerating} onclick={handleWarp}>
+                {warpGenerating ? '⏳...' : '⚡ WARP'}
+              </Button>
             {/if}
           </div>
         </div>
       </div>
     </Card>
+
+    {#if warpConfig}
+      <Card class="p-4">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="font-medium">⚡ WARP Config</h3>
+          <Button variant="outline" size="sm" onclick={downloadWarp}>⬇ Download</Button>
+        </div>
+        <pre class="bg-muted p-3 rounded text-xs overflow-x-auto max-h-48 overflow-y-auto">{warpConfig}</pre>
+        <p class="text-xs text-muted-foreground mt-2">Pakai dengan WireGuard / sing-box untuk proxy Cloudflare yang reliable.</p>
+      </Card>
+    {/if}
 
     <!-- Pool stats -->
     {#if poolStats && status.running}
