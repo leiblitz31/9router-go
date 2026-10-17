@@ -7,6 +7,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,6 +73,30 @@ func isPortInUse(host string, port int) bool {
 	return true
 }
 
+// killPortOccupant kills processes listening on the given TCP port.
+// Used to evict the old Python gateway when the Go-native server takes over.
+func killPortOccupant(port int) {
+	// Find PIDs via /proc/net/tcp would be complex; use ss if available.
+	// Fallback: kill known Python gateway patterns.
+	patterns := []string{
+		"[m]ain.py.*daemon-gateway",
+		"[p]etani-proxy",
+	}
+	for _, pat := range patterns {
+		// Use pgrep via exec
+		if out, err := exec.Command("pgrep", "-f", pat).Output(); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if line == "" {
+					continue
+				}
+				if pid, err := strconv.Atoi(strings.TrimSpace(line)); err == nil && pid > 1 {
+					_ = exec.Command("kill", "-9", strconv.Itoa(pid)).Run()
+				}
+			}
+		}
+	}
+}
+
 // Start launches the Go-native gateway.
 func (m *Manager) Start() error {
 	m.mu.Lock()
@@ -80,10 +107,17 @@ func (m *Manager) Start() error {
 		return nil // Already running
 	}
 
-	// If something else is on 8888 (e.g. old Python gateway), adopt it
+	// If something else is on 8888 (e.g. old Python gateway), kill it
+	// so the Go-native server can take over.
 	if isPortInUse(GatewayHost, GatewayPort) {
-		m.enabled = true
-		return nil
+		killPortOccupant(GatewayPort)
+		// Give it a moment to release
+		m.mu.Unlock()
+		time.Sleep(2 * time.Second)
+		m.mu.Lock()
+		if isPortInUse(GatewayHost, GatewayPort) {
+			return fmt.Errorf("port %d still in use after kill attempt", GatewayPort)
+		}
 	}
 
 	// Create the Go server
@@ -213,11 +247,7 @@ func (m *Manager) Status() Status {
 		return s
 	}
 
-	// Fall back to port check (externally started gateway)
-	if isPortInUse(GatewayHost, GatewayPort) {
-		s.Running = true
-	}
-
+	// Server not running (we killed any external occupant on Start)
 	return s
 }
 
