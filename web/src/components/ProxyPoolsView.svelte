@@ -10,6 +10,7 @@
   import Menu from '../lib/ui/Menu.svelte'
   import MenuItem from '../lib/ui/MenuItem.svelte'
   import CountedSelect from '../lib/ui/CountedSelect.svelte'
+  import GatewayCard from './proxypools/GatewayCard.svelte'
   import { api, getAuthHeaders, type ProxyPool } from '../api/client'
   import { notifications } from '../lib/notifications'
   import { parseProxyLine } from '../lib/proxy-import'
@@ -769,6 +770,9 @@
   </div>
 {:else}
   <div class="mx-auto flex w-full max-w-5xl flex-col gap-4 px-1 sm:gap-6 sm:px-0">
+    <!-- Embedded Proxy Gateway (petani-proxy) -->
+    <GatewayCard />
+
     <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div class="min-w-0">
         <h1 class="text-xl font-semibold sm:text-2xl">Proxy Pools</h1>

@@ -227,6 +227,12 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Delete("/api/proxy-pools/{id}", dashH.HandleDeleteProxyPool)
 	r.Post("/api/proxy-pools/{id}/test", dashH.HandleTestProxyPool)
 
+	// Embedded proxy gateway (petani-proxy) management.
+	// Dashboard card with on/off toggle for the local rotating gateway.
+	r.Get("/api/proxy-gateway/status", dashH.HandleProxyGatewayStatus)
+	r.Post("/api/proxy-gateway/toggle", dashH.HandleProxyGatewayToggle)
+	r.Post("/api/proxy-gateway/restart", dashH.HandleProxyGatewayRestart)
+
 	// Relay deploy endpoints. Dashboard reads/writes, not engine traffic: the
 	// SPA reaches them with its session cookie, exactly like the pool CRUD
 	// above. chi prefers the static segment over {id}, so these four cannot

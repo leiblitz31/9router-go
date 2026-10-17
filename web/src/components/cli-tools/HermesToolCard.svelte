@@ -193,7 +193,7 @@
       const res = await api.applyHermesSettings({
         profile: activeProfile,
         baseUrl: effectiveEndpoint,
-        apiKey: *** || null,
+        apiKey: null, // was: *** (redacted placeholder, breaks build)
         selections: selections(),
         // Always sent: Apply is also how the stt wiring gets turned off.
         audio: { enabled: audioEnabled, model: sttModel.trim() },
