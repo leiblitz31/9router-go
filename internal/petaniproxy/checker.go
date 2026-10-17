@@ -304,7 +304,7 @@ type CheckPoolOptions struct {
 func (o *CheckPoolOptions) withDefaults() CheckPoolOptions {
 	out := *o
 	if out.MaxCheck <= 0 {
-		out.MaxCheck = 300
+		out.MaxCheck = 2000
 	}
 	if out.TargetAlive <= 0 {
 		out.TargetAlive = 20
@@ -313,7 +313,7 @@ func (o *CheckPoolOptions) withDefaults() CheckPoolOptions {
 		out.Timeout = 3 * time.Second
 	}
 	if out.MaxWorkers <= 0 {
-		out.MaxWorkers = 60
+		out.MaxWorkers = 10
 	}
 	if out.TestURL == "" {
 		out.TestURL = DefaultTestURL

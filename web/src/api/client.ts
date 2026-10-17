@@ -1713,9 +1713,10 @@ export const api = {
       count: number
       running: boolean
     }>('/api/proxy-gateway/pool'),
-  harvestProxyGateway: () =>
+  harvestProxyGateway: (workers?: number) =>
     request<{ ok: boolean; proxyCount: number }>('/api/proxy-gateway/harvest', {
       method: 'POST',
+      body: workers ? JSON.stringify({ workers }) : undefined,
     }),
   createProxyPool: (payload: Partial<ProxyPool>) =>
     request<ProxyPool>('/api/proxy-pools', {

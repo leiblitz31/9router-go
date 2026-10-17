@@ -138,13 +138,28 @@ func (h *DashboardHandler) HandleProxyGatewayPool(w http.ResponseWriter, r *http
 
 // HandleProxyGatewayHarvest triggers a manual proxy harvest.
 // POST /api/proxy-gateway/harvest
+// Optional JSON body: {"workers": N} — concurrent feed fetch limit (1-30).
 func (h *DashboardHandler) HandleProxyGatewayHarvest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	count, err := ProxyGatewayManager.TriggerHarvest()
+	workers := 0
+	if r.Body != nil {
+		var body struct {
+			Workers int `json:"workers"`
+		}
+		if data, err := io.ReadAll(r.Body); err == nil {
+			if err := json.Unmarshal(data, &body); err == nil {
+				if body.Workers >= 1 && body.Workers <= 30 {
+					workers = body.Workers
+				}
+			}
+		}
+	}
+
+	count, err := ProxyGatewayManager.TriggerHarvest(workers)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return

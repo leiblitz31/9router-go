@@ -149,7 +149,7 @@ func (m *Manager) harvestLoop(ctx context.Context, srv *petaniproxy.Server) {
 	defer m.wg.Done()
 
 	// Initial harvest (don't block startup)
-	go m.doHarvest(ctx, srv)
+	go m.doHarvest(ctx, srv, 0)
 
 	ticker := time.NewTicker(harvestInterval)
 	defer ticker.Stop()
@@ -159,18 +159,18 @@ func (m *Manager) harvestLoop(ctx context.Context, srv *petaniproxy.Server) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.doHarvest(ctx, srv)
+			m.doHarvest(ctx, srv, 0)
 		}
 	}
 }
 
 // doHarvest fetches proxy candidates, validates them, and updates the pool.
-func (m *Manager) doHarvest(ctx context.Context, srv *petaniproxy.Server) {
+func (m *Manager) doHarvest(ctx context.Context, srv *petaniproxy.Server, workers int) {
 	hctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	// Fetch candidates
-	candidates, err := petaniproxy.FetchProxies(hctx, petaniproxy.FetchOptions{})
+	candidates, err := petaniproxy.FetchProxies(hctx, petaniproxy.FetchOptions{MaxWorkers: workers})
 	if err != nil || len(candidates) == 0 {
 		return
 	}
@@ -297,7 +297,7 @@ func (m *Manager) GetPool() *PoolInfo {
 
 // TriggerHarvest runs a manual proxy harvest cycle.
 // Returns the number of live proxies found.
-func (m *Manager) TriggerHarvest() (int, error) {
+func (m *Manager) TriggerHarvest(workers int) (int, error) {
 	m.mu.Lock()
 	srv := m.server
 	m.mu.Unlock()
@@ -309,7 +309,7 @@ func (m *Manager) TriggerHarvest() (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	m.doHarvest(ctx, srv)
+	m.doHarvest(ctx, srv, workers)
 
 	if pool := srv.Pool(); pool != nil {
 		return pool.Size(), nil

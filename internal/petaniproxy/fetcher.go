@@ -88,6 +88,8 @@ type FetchOptions struct {
 	Verbose bool
 	// Client overrides DefaultClient when non-nil.
 	Client *http.Client
+	// MaxWorkers caps concurrent feed fetches. <=0 means DefaultMaxWorkers.
+	MaxWorkers int
 }
 
 // DefaultClient is a package-level shared client: 12s timeout, follows
@@ -222,7 +224,11 @@ func applyCountryFilter(rawURL, country string) string {
 func FetchAllSources(ctx context.Context, targets []FetchTarget, opts FetchOptions) [][]FetcherProxyCandidate {
 	results := make([][]FetcherProxyCandidate, len(targets))
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(DefaultMaxWorkers)
+	workers := opts.MaxWorkers
+	if workers <= 0 {
+		workers = DefaultMaxWorkers
+	}
+	g.SetLimit(workers)
 	for i, t := range targets {
 		g.Go(func() error {
 			batch, _ := FetchSingleSource(gctx, opts.Client, t.URL, t.Protocol)

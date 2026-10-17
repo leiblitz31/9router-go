@@ -44,6 +44,7 @@
   let loading = $state(true)
   let toggling = $state(false)
   let harvesting = $state(false)
+  let workers = $state(5)
 
   async function fetchStatus() {
     try {
@@ -101,7 +102,7 @@
   async function handleHarvest() {
     harvesting = true
     try {
-      const res = await api.harvestProxyGateway()
+      const res = await api.harvestProxyGateway(workers)
       notifications.success(`Harvest selesai: ${res.proxyCount} proxy hidup`)
       await fetchPool()
       await fetchStatus()
@@ -178,8 +179,20 @@
               {status.enabled ? 'Gateway ON' : 'Gateway OFF'}
             </span>
           </div>
-          <div class="flex gap-2">
+          <div class="flex gap-2 items-center">
             {#if status.running}
+              <select
+                bind:value={workers}
+                disabled={harvesting}
+                class="bg-muted border border-border rounded-md px-2 py-1 text-sm"
+                title="Jumlah koneksi paralel saat fetch (lebih tinggi = lebih cepat tapi rawan rate-limit)"
+              >
+                <option value={3}>3 par</option>
+                <option value={5}>5 par</option>
+                <option value={10}>10 par</option>
+                <option value={15}>15 par</option>
+                <option value={30}>30 par</option>
+              </select>
               <Button variant="outline" size="sm" disabled={toggling || harvesting} onclick={handleHarvest}>
                 {harvesting ? '⏳ Harvesting...' : '🌾 Harvest Proxy'}
               </Button>
