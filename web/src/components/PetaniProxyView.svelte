@@ -102,8 +102,20 @@
   async function handleHarvest() {
     harvesting = true
     try {
-      const res = await api.harvestProxyGateway(workers)
-      notifications.success(`Harvest selesai: ${res.proxyCount} proxy hidup`)
+      await api.harvestProxyGateway(workers)
+      // Poll until harvest completes (async backend)
+      while (true) {
+        await new Promise(r => setTimeout(r, 3000))
+        const st = await api.harvestStatus()
+        if (!st.harvesting) {
+          if (st.error) {
+            notifications.error(`Harvest gagal: ${st.error}`)
+          } else {
+            notifications.success(`Harvest selesai: ${st.proxyCount} proxy hidup`)
+          }
+          break
+        }
+      }
       await fetchPool()
       await fetchStatus()
     } catch (e) {

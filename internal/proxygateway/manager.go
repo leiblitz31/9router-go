@@ -34,6 +34,11 @@ type Manager struct {
 	enabled   bool
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+	// Async harvest state
+	harvesting     bool
+	harvestResult  int
+	harvestError   string
+	harvestDoneAt  time.Time
 }
 
 // Status represents the current gateway state.
@@ -295,26 +300,47 @@ func (m *Manager) GetPool() *PoolInfo {
 	}
 }
 
-// TriggerHarvest runs a manual proxy harvest cycle.
-// Returns the number of live proxies found.
-func (m *Manager) TriggerHarvest(workers int) (int, error) {
+// TriggerHarvest starts an async manual proxy harvest cycle.
+// Returns immediately; use HarvestStatus() to poll for completion.
+func (m *Manager) TriggerHarvest(workers int) error {
 	m.mu.Lock()
 	srv := m.server
+	if srv == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("gateway not running")
+	}
+	if m.harvesting {
+		m.mu.Unlock()
+		return fmt.Errorf("harvest already in progress")
+	}
+	m.harvesting = true
+	m.harvestResult = 0
+	m.harvestError = ""
 	m.mu.Unlock()
 
-	if srv == nil {
-		return 0, fmt.Errorf("gateway not running")
-	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+		m.doHarvest(ctx, srv, workers)
 
-	m.doHarvest(ctx, srv, workers)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.harvesting = false
+		m.harvestDoneAt = time.Now()
+		if pool := srv.Pool(); pool != nil {
+			m.harvestResult = pool.Size()
+		}
+	}()
 
-	if pool := srv.Pool(); pool != nil {
-		return pool.Size(), nil
-	}
-	return 0, nil
+	return nil
+}
+
+// HarvestStatus returns the current async harvest state.
+func (m *Manager) HarvestStatus() (harvesting bool, result int, errMsg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.harvesting, m.harvestResult, m.harvestError
 }
 
 // GenerateWarp creates a new Cloudflare WARP account and returns the

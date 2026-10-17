@@ -1714,10 +1714,12 @@ export const api = {
       running: boolean
     }>('/api/proxy-gateway/pool'),
   harvestProxyGateway: (workers?: number) =>
-    request<{ ok: boolean; proxyCount: number }>('/api/proxy-gateway/harvest', {
+    request<{ ok: boolean; started: boolean }>('/api/proxy-gateway/harvest', {
       method: 'POST',
       body: workers ? JSON.stringify({ workers }) : undefined,
     }),
+  harvestStatus: () =>
+    request<{ ok: boolean; harvesting: boolean; proxyCount: number; error: string }>('/api/proxy-gateway/harvest-status'),
   generateWarp: () =>
     request<{ ok: boolean; config: string }>('/api/proxy-gateway/warp', {
       method: 'POST',

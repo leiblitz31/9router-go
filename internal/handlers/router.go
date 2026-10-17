@@ -234,6 +234,7 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Post("/api/proxy-gateway/restart", dashH.HandleProxyGatewayRestart)
 	r.Get("/api/proxy-gateway/pool", dashH.HandleProxyGatewayPool)
 	r.Post("/api/proxy-gateway/harvest", dashH.HandleProxyGatewayHarvest)
+	r.Get("/api/proxy-gateway/harvest-status", dashH.HandleProxyGatewayHarvestStatus)
 	r.Post("/api/proxy-gateway/warp", dashH.HandleProxyGatewayWarp)
 
 	// Relay deploy endpoints. Dashboard reads/writes, not engine traffic: the

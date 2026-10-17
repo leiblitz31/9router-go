@@ -136,9 +136,10 @@ func (h *DashboardHandler) HandleProxyGatewayPool(w http.ResponseWriter, r *http
 	handlerutil.WriteJSON(w, http.StatusOK, pool)
 }
 
-// HandleProxyGatewayHarvest triggers a manual proxy harvest.
+// HandleProxyGatewayHarvest triggers a manual proxy harvest (async).
 // POST /api/proxy-gateway/harvest
 // Optional JSON body: {"workers": N} — concurrent feed fetch limit (1-30).
+// Returns 202 immediately; poll GET /api/proxy-gateway/harvest-status.
 func (h *DashboardHandler) HandleProxyGatewayHarvest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -159,15 +160,32 @@ func (h *DashboardHandler) HandleProxyGatewayHarvest(w http.ResponseWriter, r *h
 		}
 	}
 
-	count, err := ProxyGatewayManager.TriggerHarvest(workers)
-	if err != nil {
+	if err := ProxyGatewayManager.TriggerHarvest(workers); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	handlerutil.WriteJSON(w, http.StatusAccepted, map[string]any{
+		"ok":      true,
+		"started": true,
+	})
+}
+
+// HandleProxyGatewayHarvestStatus returns async harvest progress.
+// GET /api/proxy-gateway/harvest-status
+func (h *DashboardHandler) HandleProxyGatewayHarvestStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	harvesting, result, errMsg := ProxyGatewayManager.HarvestStatus()
+
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
-		"proxyCount": count,
+		"harvesting": harvesting,
+		"proxyCount": result,
+		"error":      errMsg,
 	})
 }
 
