@@ -232,6 +232,7 @@ var modelCapabilities = map[string]Capabilities{
 	"deepseek-v4-vision":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true},
 	"deepseek-v4.1-flash":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
 	"deepseek-v4.1-flash-free":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ContextWindow: 1000000, MaxOutput: 128000},
+	"mimo-v2.6-flash-free":         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ContextWindow: 1000000, MaxOutput: 131072},
 	// Some gateways publish this model under the hyphenated id (dash instead
 	// of dot); without the row it fell through to the text-only `*deepseek-v4*`
 	// pattern and lost its vision and 1M window.
