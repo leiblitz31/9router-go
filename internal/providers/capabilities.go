@@ -242,7 +242,7 @@ var modelCapabilities = map[string]Capabilities{
 	"muse-spark-1.3-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
 	"nemotron-3-ultra-free":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
 	"nemotron-3.5-lightning-free":      {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
-	"nemotron-3.5-super-vl-free":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
+	"nemotron-3.5-super-vl-free":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144},
 
 	// OpenCode Free ids that models.dev reports reasoning-capable and that no
 	// table or pattern covers. Without an entry they fall through to
