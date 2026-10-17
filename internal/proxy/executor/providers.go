@@ -1191,24 +1191,22 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 						"input": inputMap,
 					})
 				}
-				newMsg := make(map[string]any)
-				for k, v := range msgMap {
-					if k != "tool_calls" && k != "content" {
-						newMsg[k] = v
-					}
-				}
-				newMsg["role"] = "assistant"
-				newMsg["content"] = contentBlocks
-				intermediate = append(intermediate, newMsg)
+				// The rebuilt turn carries only what the Messages API accepts: the
+				// client's remaining keys are its OpenAI shape, not Claude's.
+				intermediate = append(intermediate, map[string]any{
+					"role":    "assistant",
+					"content": contentBlocks,
+				})
 				continue
 			}
 		}
 
-		newMsg := make(map[string]any, len(msgMap))
-		for k, v := range msgMap {
-			newMsg[k] = v
-		}
-		intermediate = append(intermediate, newMsg)
+		// Nothing to reshape on this turn, but it still arrives in the client's
+		// OpenAI shape. Replayed assistant turns are the ones that matter: an
+		// OpenAI client echoes back the `reasoning_content` this proxy streamed
+		// to it, and Anthropic rejects the field as an extra input, poisoning
+		// every later turn of that conversation.
+		intermediate = append(intermediate, claudeMessage(msgMap))
 	}
 
 	var merged []any
@@ -1227,6 +1225,25 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 
 	systemText = strings.Join(systemParts, "\n\n")
 	return systemText, merged
+}
+
+// claudeMessageAllowedKeys are the only keys a Messages API message object
+// accepts. Anthropic answers anything else with
+// "messages.<n>.<key>: Extra inputs are not permitted" and refuses the request.
+var claudeMessageAllowedKeys = map[string]bool{
+	"role":    true,
+	"content": true,
+}
+
+// claudeMessage returns msgMap reduced to the keys the Messages API accepts.
+func claudeMessage(msgMap map[string]any) map[string]any {
+	clean := make(map[string]any, len(claudeMessageAllowedKeys))
+	for k, v := range msgMap {
+		if claudeMessageAllowedKeys[k] {
+			clean[k] = v
+		}
+	}
+	return clean
 }
 
 func combineClaudeContent(c1, c2 any) any {

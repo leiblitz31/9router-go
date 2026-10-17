@@ -509,6 +509,9 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 	for _, mRaw := range messagesRaw {
 		if msgMap, ok := mRaw.(map[string]any); ok {
 			normalizeMessageContent(msgMap)
+			if dropForeignMessageKeys(msgMap) {
+				changed = true
+			}
 		}
 	}
 
@@ -694,6 +697,31 @@ func LastCacheableToolIndex(tools []any) int {
 
 // AnchorClaudeCache ensures prompt-caching breakpoint lands on the last non-deferred tool.
 // Port of open-sse/translator/formats/claude.js#lastCacheableToolIndex / anchorClaudeCache (#3567).
+// claudeMessageKeys are the only keys a Messages API message object accepts.
+// Anthropic answers anything else with
+// "messages.<n>.<key>: Extra inputs are not permitted" and refuses the whole
+// request, so a foreign key that reaches history poisons every later turn.
+var claudeMessageKeys = map[string]struct{}{
+	"role":    {},
+	"content": {},
+}
+
+// dropForeignMessageKeys removes keys Anthropic would reject from one message
+// and reports whether anything was dropped. The usual offender is
+// `reasoning_content`, which OpenAI-shaped clients echo back on assistant turns
+// and which passes through untouched when a combo mixes lanes.
+func dropForeignMessageKeys(msgMap map[string]any) bool {
+	dropped := false
+	for k := range msgMap {
+		if _, ok := claudeMessageKeys[k]; ok {
+			continue
+		}
+		delete(msgMap, k)
+		dropped = true
+	}
+	return dropped
+}
+
 func normalizeMessageContent(msgMap map[string]any) {
 	if c, ok := msgMap["content"].(map[string]any); ok {
 		delete(c, "cache_control")
