@@ -94,6 +94,10 @@ var patternThinking = []thinkingPattern{
 	// deepseek-v4.1-flash (upstream decolua/9router#4614).
 	{Provider: "codebuddy-cn", Pattern: "deepseek-v4-pro", Levels: []string{"low", "high", "xhigh"}},
 	{Provider: "codebuddy-cn", Pattern: "deepseek-v4.1-flash", Levels: []string{"low", "high", "max"}},
+	// oc/deepseek-v4.1-flash-free (OpenCode Zen free lane) serves exactly
+	// low|high|max — must stay above the generic *deepseek-v4.* glob
+	// (first-match-wins). Port of upstream decolua/9router#4984.
+	{Pattern: "*deepseek-v4.1-flash-free*", Levels: []string{"low", "high", "max"}},
 	{Pattern: "*deepseek-v4.*", Levels: []string{"none", "low", "medium", "high", "xhigh", "max"}},
 	// codebuddy-cn per-model effort sets — the server's product-config payload
 	// publishes `reasoning.supportedEfforts` per model. NOTE: the chat endpoint
@@ -304,11 +308,18 @@ func parseDigits(s string) (int, bool) {
 // The rule is deliberately general: any level set omitting "max" would hit the
 // same rejection, and levelOpenAI (GPT-5.x, o-series) has no "max" either.
 func ClampDeepseekEffort(provider, model, level string) string {
+	levels := GetThinkingLevels(provider, model)
+	// Honor declared "low" (upstream decolua/9router#4984): low/minimal → low,
+	// but only when the model's declared level set includes low. Models whose
+	// set omits it (generic deepseek levelHiMax) keep the old low→high map.
+	if (level == "low" || level == "minimal") && slices.Contains(levels, "low") {
+		return "low"
+	}
 	want := "high"
 	if level == "xhigh" || level == "max" {
 		want = "max"
 	}
-	if want == "max" && !slices.Contains(GetThinkingLevels(provider, model), "max") {
+	if want == "max" && !slices.Contains(levels, "max") {
 		return "high"
 	}
 	return want

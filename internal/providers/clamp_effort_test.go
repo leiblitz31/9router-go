@@ -49,10 +49,31 @@ func TestClampDeepseekEffort(t *testing.T) {
 			want:     "high",
 		},
 		{
-			name:     "low maps to high",
+			name:     "low stays low when declared (upstream #4984)",
 			provider: "mimo-free",
 			model:    "mimo-v2.5-pro",
 			level:    "low",
+			want:     "low",
+		},
+		{
+			name:     "deepseek-v4.1-flash-free low stays low (upstream #4984)",
+			provider: "opencode",
+			model:    "deepseek-v4.1-flash-free",
+			level:    "low",
+			want:     "low",
+		},
+		{
+			name:     "deepseek-v4.1-flash-free minimal collapses to low (upstream #4984)",
+			provider: "opencode",
+			model:    "deepseek-v4.1-flash-free",
+			level:    "minimal",
+			want:     "low",
+		},
+		{
+			name:     "deepseek-v4.1-flash-free medium stays high (upstream #4984)",
+			provider: "opencode",
+			model:    "deepseek-v4.1-flash-free",
+			level:    "medium",
 			want:     "high",
 		},
 	}
