@@ -5,6 +5,7 @@ package proxygateway
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +53,16 @@ func NewManager(scriptDir, pythonBin string) *Manager {
 	}
 }
 
+// isPortInUse checks if a TCP port is listening on the given host.
+func isPortInUse(host string, port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 // defaultPaths returns the default petani-proxy paths.
 func defaultPaths() (scriptDir, pythonBin string) {
 	home, _ := os.UserHomeDir()
@@ -79,15 +90,28 @@ func (m *Manager) IsAvailable() bool {
 }
 
 // Start launches the gateway subprocess.
+// If the gateway is already running (port 8888 in use), it is adopted
+// as running instead of failing.
 func (m *Manager) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.cmd != nil && m.cmd.Process != nil {
-		// Already running, check if alive
+		// Already running via this manager, check if alive
 		if err := m.cmd.Process.Signal(syscall.Signal(0)); err == nil {
-			return fmt.Errorf("gateway already running (PID %d)", m.cmd.Process.Pid)
+			m.enabled = true
+			return nil // Already running, treat as success
 		}
+		// Process died, clear it
+		m.cmd = nil
+	}
+
+	// Check if port 8888 is already in use (externally started gateway)
+	if isPortInUse(GatewayHost, GatewayPort) {
+		m.enabled = true
+		// Try to find the PID for status display
+		m.cmd = nil // We don't own it, but mark as enabled
+		return nil
 	}
 
 	if !m.IsAvailable() {
@@ -124,36 +148,46 @@ func (m *Manager) Start() error {
 }
 
 // Stop terminates the gateway subprocess.
+// Also kills externally-started gateways (by port) if manager didn't start it.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.enabled = false
 
-	if m.cmd == nil || m.cmd.Process == nil {
-		return nil // Not running
+	if m.cmd != nil && m.cmd.Process != nil {
+		// Try graceful shutdown first
+		_ = m.cmd.Process.Signal(syscall.SIGTERM)
+
+		// Wait a bit, then force kill
+		done := make(chan struct{})
+		go func() {
+			_, _ = m.cmd.Process.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Exited cleanly
+		case <-time.After(5 * time.Second):
+			// Force kill
+			_ = m.cmd.Process.Kill()
+			<-done
+		}
+
+		m.cmd = nil
+		return nil
 	}
 
-	// Try graceful shutdown first
-	_ = m.cmd.Process.Signal(syscall.SIGTERM)
-
-	// Wait a bit, then force kill
-	done := make(chan struct{})
-	go func() {
-		_, _ = m.cmd.Process.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// Exited cleanly
-	case <-time.After(5 * time.Second):
-		// Force kill
-		_ = m.cmd.Process.Kill()
-		<-done
+	// No manager-owned process; try to kill by port (external gateway).
+	// We use pkill with a pattern matching the gateway's Python process.
+	// This is best-effort; failure is not an error.
+	if isPortInUse(GatewayHost, GatewayPort) {
+		_ = exec.Command("pkill", "-f", "petani-proxy.*daemon-gateway").Run()
+		// Also try the start script pattern
+		_ = exec.Command("pkill", "-f", "[m]ain.py --daemon-gateway").Run()
 	}
 
-	m.cmd = nil
 	return nil
 }
 
@@ -167,16 +201,24 @@ func (m *Manager) Status() Status {
 		GatewayURL: GatewayURL,
 	}
 
+	// Check manager-owned process first
 	if m.cmd != nil && m.cmd.Process != nil {
 		if err := m.cmd.Process.Signal(syscall.Signal(0)); err == nil {
 			s.Running = true
 			s.PID = m.cmd.Process.Pid
 			s.StartedAt = m.startTime
 			s.Uptime = time.Since(m.startTime).Round(time.Second).String()
-		} else {
-			// Process died
-			m.cmd = nil
+			return s
 		}
+		// Process died
+		m.cmd = nil
+	}
+
+	// Fall back to port check (externally started gateway)
+	if isPortInUse(GatewayHost, GatewayPort) {
+		s.Running = true
+		// PID unknown for external process, but mark as running
+		// so the dashboard shows correct state
 	}
 
 	return s
