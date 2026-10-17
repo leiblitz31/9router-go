@@ -1692,6 +1692,31 @@ export const api = {
     }>('/api/proxy-gateway/restart', {
       method: 'POST',
     }),
+  getProxyGatewayPool: () =>
+    request<{
+      proxies: Array<{
+        IP: string
+        Port: number
+        Protocol: string
+        Country: string
+        CountryCode: string
+        Anonymity: string
+      }>
+      stats: {
+        PoolSize: number
+        TotalRouted: number
+        Successful: number
+        Failed: number
+        SuccessRatePercent: number
+        ActiveProxy: string
+      }
+      count: number
+      running: boolean
+    }>('/api/proxy-gateway/pool'),
+  harvestProxyGateway: () =>
+    request<{ ok: boolean; proxyCount: number }>('/api/proxy-gateway/harvest', {
+      method: 'POST',
+    }),
   createProxyPool: (payload: Partial<ProxyPool>) =>
     request<ProxyPool>('/api/proxy-pools', {
       method: 'POST',

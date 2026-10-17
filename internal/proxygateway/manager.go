@@ -234,3 +234,55 @@ func (m *Manager) SetEnabled(enabled bool) {
 	defer m.mu.Unlock()
 	m.enabled = enabled
 }
+
+// PoolInfo contains the current proxy pool data.
+type PoolInfo struct {
+	Proxies []petaniproxy.Proxy      `json:"proxies"`
+	Stats   petaniproxy.PoolStats    `json:"stats"`
+	Count   int                      `json:"count"`
+}
+
+// GetPool returns the current proxy pool info.
+// Returns nil if the gateway is not running its own server.
+func (m *Manager) GetPool() *PoolInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.server == nil {
+		return nil
+	}
+
+	pool := m.server.Pool()
+	if pool == nil {
+		return nil
+	}
+
+	proxies := pool.GetAll()
+	return &PoolInfo{
+		Proxies: proxies,
+		Stats:   pool.Stats(),
+		Count:   len(proxies),
+	}
+}
+
+// TriggerHarvest runs a manual proxy harvest cycle.
+// Returns the number of live proxies found.
+func (m *Manager) TriggerHarvest() (int, error) {
+	m.mu.Lock()
+	srv := m.server
+	m.mu.Unlock()
+
+	if srv == nil {
+		return 0, fmt.Errorf("gateway not running")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	m.doHarvest(ctx, srv)
+
+	if pool := srv.Pool(); pool != nil {
+		return pool.Size(), nil
+	}
+	return 0, nil
+}

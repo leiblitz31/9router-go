@@ -1,7 +1,6 @@
 <script lang="ts">
   // Petani Proxy - dedicated page for the embedded rotating proxy gateway.
-  // The gateway is managed by 9Router (start/stop) and used as a native
-  // proxy option for providers, without needing a proxy pool entry.
+  // Go-native gateway managed by 9Router with live proxy pool.
   import { onMount } from 'svelte'
   import Card from '../lib/ui/Card.svelte'
   import Button from '../lib/ui/Button.svelte'
@@ -18,11 +17,33 @@
     uptime?: string
     startedAt?: string
     gatewayUrl: string
+    proxyCount?: number
+  }
+
+  interface PoolProxy {
+    IP: string
+    Port: number
+    Protocol: string
+    Country: string
+    CountryCode: string
+    Anonymity: string
+  }
+
+  interface PoolStats {
+    PoolSize: number
+    TotalRouted: number
+    Successful: number
+    Failed: number
+    SuccessRatePercent: number
+    ActiveProxy: string
   }
 
   let status = $state<GatewayStatus | null>(null)
+  let proxies = $state<PoolProxy[]>([])
+  let poolStats = $state<PoolStats | null>(null)
   let loading = $state(true)
   let toggling = $state(false)
+  let harvesting = $state(false)
 
   async function fetchStatus() {
     try {
@@ -34,15 +55,29 @@
     }
   }
 
-  async function handleToggle(enabled: boolean) {
-    if (!status?.available) {
-      notifications.error('Petani-proxy tidak terinstall')
-      return
+  async function fetchPool() {
+    try {
+      const pool = await api.getProxyGatewayPool()
+      proxies = pool.proxies || []
+      poolStats = pool.stats || null
+    } catch (e) {
+      // Pool not available when gateway is down — not an error
+      proxies = []
+      poolStats = null
     }
+  }
+
+  async function refresh() {
+    await fetchStatus()
+    await fetchPool()
+  }
+
+  async function handleToggle(enabled: boolean) {
     toggling = true
     try {
       status = await api.toggleProxyGateway(enabled)
       notifications.success(enabled ? 'Gateway dinyalakan' : 'Gateway dimatikan')
+      await fetchPool()
     } catch (e) {
       notifications.error('Gagal mengubah status gateway')
     } finally {
@@ -55,6 +90,7 @@
     try {
       status = await api.restartProxyGateway()
       notifications.success('Gateway di-restart')
+      await fetchPool()
     } catch (e) {
       notifications.error('Gagal restart gateway')
     } finally {
@@ -62,9 +98,23 @@
     }
   }
 
+  async function handleHarvest() {
+    harvesting = true
+    try {
+      const res = await api.harvestProxyGateway()
+      notifications.success(`Harvest selesai: ${res.proxyCount} proxy hidup`)
+      await fetchPool()
+      await fetchStatus()
+    } catch (e) {
+      notifications.error('Harvest gagal — gateway mungkin mati')
+    } finally {
+      harvesting = false
+    }
+  }
+
   onMount(() => {
-    fetchStatus()
-    const interval = setInterval(fetchStatus, 10000)
+    refresh()
+    const interval = setInterval(refresh, 10000)
     return () => clearInterval(interval)
   })
 </script>
@@ -73,10 +123,10 @@
   <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
       <h1 class="text-xl font-semibold sm:text-2xl">Petani Proxy</h1>
-      <p class="text-sm text-muted">Embedded rotating proxy gateway — managed by 9Router</p>
+      <p class="text-sm text-muted">Go-native rotating proxy gateway — embedded di 9Router</p>
     </div>
     {#if status}
-      <Badge variant={status.running ? 'success' : 'secondary'}>
+      <Badge variant={status.running ? 'success' : 'neutral'}>
         {status.running ? 'Running' : 'Stopped'}
       </Badge>
     {/if}
@@ -104,8 +154,8 @@
             <div class="font-medium">{status.running ? '🟢 Aktif' : '⚪ Mati'}</div>
           </div>
           <div>
-            <div class="text-muted">PID</div>
-            <div class="font-medium">{status.pid || '-'}</div>
+            <div class="text-muted">Proxy Hidup</div>
+            <div class="font-medium">{status.proxyCount ?? proxies.length}</div>
           </div>
           <div>
             <div class="text-muted">Uptime</div>
@@ -117,31 +167,116 @@
           </div>
         </div>
 
-        {#if !status.available}
-          <div class="rounded-lg bg-warning/10 p-3 text-sm text-warning">
-            ⚠️ Petani-proxy tidak terinstall di ~/vps-persist/petani-proxy/
-          </div>
-        {/if}
-
         <div class="flex items-center justify-between border-t border-border-subtle pt-4">
           <div class="flex items-center gap-3">
             <Toggle
               checked={status.enabled}
-              disabled={toggling || !status.available}
-              onchange={(e) => handleToggle(e.currentTarget.checked)}
+              disabled={toggling}
+              onchange={(v) => handleToggle(v)}
             />
             <span class="text-sm font-medium">
               {status.enabled ? 'Gateway ON' : 'Gateway OFF'}
             </span>
           </div>
-          {#if status.running}
-            <Button variant="outline" size="sm" disabled={toggling} onclick={handleRestart}>
-              Restart
-            </Button>
-          {/if}
+          <div class="flex gap-2">
+            {#if status.running}
+              <Button variant="outline" size="sm" disabled={toggling || harvesting} onclick={handleHarvest}>
+                {harvesting ? '⏳ Harvesting...' : '🌾 Harvest Proxy'}
+              </Button>
+              <Button variant="outline" size="sm" disabled={toggling} onclick={handleRestart}>
+                Restart
+              </Button>
+            {/if}
+          </div>
         </div>
       </div>
     </Card>
+
+    <!-- Pool stats -->
+    {#if poolStats && status.running}
+      <Card>
+        <div class="flex flex-col gap-3 p-4">
+          <h3 class="font-semibold">📊 Statistik Pool</h3>
+          <div class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <div>
+              <div class="text-muted">Total Di-route</div>
+              <div class="font-medium text-lg">{poolStats.TotalRouted}</div>
+            </div>
+            <div>
+              <div class="text-muted">Sukses</div>
+              <div class="font-medium text-lg text-green-500">{poolStats.Successful}</div>
+            </div>
+            <div>
+              <div class="text-muted">Gagal</div>
+              <div class="font-medium text-lg text-red-500">{poolStats.Failed}</div>
+            </div>
+            <div>
+              <div class="text-muted">Success Rate</div>
+              <div class="font-medium text-lg">{poolStats.SuccessRatePercent.toFixed(1)}%</div>
+            </div>
+          </div>
+          {#if poolStats.ActiveProxy}
+            <div class="text-xs text-muted">
+              Proxy aktif: <span class="font-mono text-foreground">{poolStats.ActiveProxy}</span>
+            </div>
+          {/if}
+        </div>
+      </Card>
+    {/if}
+
+    <!-- Proxy list -->
+    {#if status.running}
+      <Card>
+        <div class="flex flex-col gap-3 p-4">
+          <div class="flex items-center justify-between">
+            <h3 class="font-semibold">🔗 Proxy Hidup ({proxies.length})</h3>
+            <span class="text-xs text-muted">Auto-refresh 10 dtk</span>
+          </div>
+          {#if proxies.length === 0}
+            <div class="rounded-lg bg-surface-2 p-4 text-center text-sm text-muted">
+              Pool kosong. Klik <span class="font-medium">🌾 Harvest Proxy</span> untuk mencari proxy baru,
+              atau tunggu harvest otomatis (tiap 10 menit).
+            </div>
+          {:else}
+            <div class="max-h-96 overflow-y-auto rounded-lg border border-border-subtle">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-surface-2">
+                  <tr class="text-left text-xs text-muted">
+                    <th class="px-3 py-2">Proxy</th>
+                    <th class="px-3 py-2">Negara</th>
+                    <th class="px-3 py-2">Anonimitas</th>
+                    <th class="px-3 py-2">Protokol</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each proxies.slice(0, 50) as p}
+                    <tr class="border-t border-border-subtle hover:bg-surface-2/50">
+                      <td class="px-3 py-2 font-mono text-xs">{p.IP}:{p.Port}</td>
+                      <td class="px-3 py-2">{p.Country || '-'}</td>
+                      <td class="px-3 py-2">
+                        {#if p.Anonymity === 'Elite'}
+                          <span class="text-green-500">🛡️ Elite</span>
+                        {:else if p.Anonymity === 'Anonymous'}
+                          <span class="text-yellow-500">🔒 Anonymous</span>
+                        {:else}
+                          <span class="text-muted">{p.Anonymity || '-'}</span>
+                        {/if}
+                      </td>
+                      <td class="px-3 py-2 text-xs">{p.Protocol || 'http'}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              {#if proxies.length > 50}
+                <div class="p-2 text-center text-xs text-muted">
+                  ... dan {proxies.length - 50} lainnya
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      </Card>
+    {/if}
 
     <!-- How to use card -->
     <Card>
@@ -149,6 +284,7 @@
         <h3 class="font-semibold">Cara Pakai</h3>
         <ol class="list-decimal list-inside text-sm text-muted space-y-1">
           <li>Nyalakan gateway dengan toggle di atas</li>
+          <li>Klik <span class="font-medium text-foreground">🌾 Harvest Proxy</span> untuk isi pool (atau tunggu otomatis)</li>
           <li>
             Buka <span class="font-medium text-foreground">Providers</span> → pilih provider
             (mis. OpenCode) → <span class="font-medium text-foreground">Proxy</span> →
@@ -156,11 +292,7 @@
             (opsi native, tepat di bawah "None (direct)")
           </li>
           <li>Request akan lewat gateway yang auto-rotate IP tiap request</li>
-          <li>Kalau IP kena flag/rate-limit, matikan-nyalakan gateway untuk IP fresh</li>
         </ol>
-        <p class="text-xs text-muted">
-          Tidak perlu buat proxy pool entry — Petani Proxy adalah opsi bawaan 9Router.
-        </p>
       </div>
     </Card>
   {/if}

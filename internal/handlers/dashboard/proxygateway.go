@@ -114,3 +114,44 @@ func (h *DashboardHandler) syncProxyPoolWithGateway(enabled bool) {
 	// If the pool doesn't exist, this is a no-op
 	_ = h.Repo.UpdateProxyPool("petani-local-8888", updates)
 }
+
+// HandleProxyGatewayPool returns the current proxy pool (proxies + stats).
+// GET /api/proxy-gateway/pool
+func (h *DashboardHandler) HandleProxyGatewayPool(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	pool := ProxyGatewayManager.GetPool()
+	if pool == nil {
+		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+			"proxies": []any{},
+			"count":   0,
+			"running": false,
+		})
+		return
+	}
+
+	handlerutil.WriteJSON(w, http.StatusOK, pool)
+}
+
+// HandleProxyGatewayHarvest triggers a manual proxy harvest.
+// POST /api/proxy-gateway/harvest
+func (h *DashboardHandler) HandleProxyGatewayHarvest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	count, err := ProxyGatewayManager.TriggerHarvest()
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"proxyCount": count,
+	})
+}
