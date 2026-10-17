@@ -364,7 +364,27 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 		if readErr != nil {
 			return nil, fmt.Errorf("upstream returned %d and body read failed: %w", resp.StatusCode, readErr)
 		}
+		// PR #4988: If a proxied request returns 403 FreeTierError, the proxy's
+		// egress IP has been flagged. Replay once on direct egress (unless
+		// strictProxy is set).
+		if resp.StatusCode == http.StatusForbidden && isFreeTierError(errBody) {
+			if proxyURLFor(client) != "" && !strictOnly(ctx) && !forbidsDirectReplay(client) {
+				log.Warn("proxy", "proxied 403 FreeTierError, replaying once on direct egress", "url", url)
+				directResp, directErr := replayDirect(ctx, method, url, headers, body)
+				if directErr == nil {
+					return directResp, nil
+				}
+				// Direct replay failed: surface the original 403, not the transport error.
+				log.Warn("proxy", "direct replay after 403 failed, surfacing original 403", "url", url, "error", directErr)
+			}
+		}
 		return nil, &UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
 	}
 	return resp, nil
+}
+
+// isFreeTierError reports whether the response body contains the OpenCode
+// FreeTierError marker (PR #4988).
+func isFreeTierError(body []byte) bool {
+	return bytes.Contains(body, []byte("FreeTierError"))
 }

@@ -56,10 +56,15 @@ func TestBuildOpenCodeHeaders_SessionHintMirrorsEverywhere(t *testing.T) {
 	})
 	t.Run("foreign hint is translated once and mirrored", func(t *testing.T) {
 		headers := proxy.BuildOpenCodeHeaders(map[string]string{"x-opencode-session": "uuid-1234"}, "", true)
-		want := proxy.TranslateOpenCodeSessionID("uuid-1234", "")
-		for _, key := range []string{"x-opencode-session", "x-opencode-session-id", "x-session-affinity", "x-session-id"} {
-			if headers[key] != want {
-				t.Errorf("%s = %q, want %q", key, headers[key], want)
+		// Foreign hints get a fresh timestamped ID (not deterministic) —
+		// verify it's valid canonical format and mirrored consistently.
+		ses := headers["x-opencode-session"]
+		if !proxy.OpenCodeSessionRegex.MatchString(ses) {
+			t.Errorf("x-opencode-session = %q, want valid canonical format", ses)
+		}
+		for _, key := range []string{"x-opencode-session-id", "x-session-affinity", "x-session-id"} {
+			if headers[key] != ses {
+				t.Errorf("%s = %q, want mirrored %q", key, headers[key], ses)
 			}
 		}
 	})

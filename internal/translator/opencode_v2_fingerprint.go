@@ -59,6 +59,14 @@ func ConcealOpenCodeV2FingerprintTools(body []byte, flat bool, forceAutoChoice b
 			kept = append(kept, tool)
 			continue
 		}
+		// PR #4972: try in-place normalization before falling back to alias.
+		// If the caller's tool has compatible arguments, replace description +
+		// parameters with the fingerprint's and keep the caller's name.
+		if canNormalizeInPlace(tool, name) {
+			normalizeToolInPlace(tool, name, flat)
+			kept = append(kept, tool)
+			continue
+		}
 		alias := name + "_client"
 		for i := 2; taken[alias]; i++ {
 			alias = name + "_client" + strconv.Itoa(i)
@@ -167,6 +175,82 @@ func isExactOpenCodeV2Definition(tool any, name string) bool {
 	}
 	params, _ := json.Marshal(definition["parameters"], json.Deterministic(true))
 	return definition["description"] == wantDescription && string(params) == openCodeV2Parameters(name)
+}
+
+// canNormalizeInPlace reports whether the caller's tool can be normalized
+// in-place to the fingerprint definition (PR #4972).
+// Compatible = every caller parameter is a fingerprint parameter, and every
+// required fingerprint parameter is declared by the caller.
+func canNormalizeInPlace(tool any, name string) bool {
+	toolMap, ok := tool.(map[string]any)
+	if !ok {
+		return false
+	}
+	definition := toolMap
+	if fn, ok := toolMap["function"].(map[string]any); ok {
+		definition = fn
+	}
+	params, ok := definition["parameters"].(map[string]any)
+	if !ok {
+		return false
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		return false
+	}
+	// Get fingerprint's expected properties and required fields
+	var fingerprintSchema map[string]any
+	if err := json.Unmarshal([]byte(openCodeV2Parameters(name)), &fingerprintSchema); err != nil {
+		return false
+	}
+	fpProps, _ := fingerprintSchema["properties"].(map[string]any)
+	fpRequired, _ := fingerprintSchema["required"].([]any)
+
+	// Every caller parameter must be a fingerprint parameter
+	for propName := range props {
+		if _, ok := fpProps[propName]; !ok {
+			return false
+		}
+	}
+	// Every required fingerprint parameter must be declared
+	for _, req := range fpRequired {
+		if reqName, ok := req.(string); ok {
+			if _, ok := props[reqName]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// normalizeToolInPlace replaces the tool's description and parameters with
+// the fingerprint's, keeping the caller's name (PR #4972).
+func normalizeToolInPlace(tool any, name string, flat bool) {
+	toolMap, ok := tool.(map[string]any)
+	if !ok {
+		return
+	}
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(openCodeV2Parameters(name)), &schema); err != nil {
+		return
+	}
+	description := openCodeReadDescription
+	if name == "shell" {
+		description = openCodeShellDescription
+	}
+	if fn, ok := toolMap["function"].(map[string]any); ok {
+		// Nested shape: {function: {name, description, parameters}}
+		fn["description"] = description
+		fn["parameters"] = schema
+	} else {
+		// Flat shape: {name, description, parameters}
+		toolMap["description"] = description
+		toolMap["parameters"] = schema
+		if flat {
+			// Upstream appends flat tools with strict:false
+			toolMap["strict"] = false
+		}
+	}
 }
 
 // openCodeV2DefaultSchema is the fallback the upstream executor applies when a

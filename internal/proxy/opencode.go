@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
 	"strconv"
@@ -72,38 +71,20 @@ func GenerateOpenCodeRequestID() string {
 	return "msg_" + hex.EncodeToString(timeBytes[:]) + unstableRandomBase62(14)
 }
 
-// TranslateOpenCodeSessionID deterministically maps foreign sessions to valid 30-char canonical IDs.
+// TranslateOpenCodeSessionID maps foreign sessions to valid 30-char canonical IDs.
+// If the input is already canonical, it's preserved (session affinity).
+// Otherwise, a fresh timestamped ID is generated — the OpenCode free-tier gate
+// rejects non-recent timestamps with 403 FreeTierError, so a deterministic
+// hash-based timestamp (which is effectively random) will not pass.
 func TranslateOpenCodeSessionID(sessionID, clientTool string) string {
 	trimmed := strings.TrimSpace(sessionID)
 	if OpenCodeSessionRegex.MatchString(trimmed) {
 		return trimmed
 	}
-	tool := clientTool
-	if tool == "" {
-		tool = "generic"
-	}
-	h := sha256.New()
-	h.Write([]byte("opencode\x00" + tool + "\x00" + trimmed))
-	digest := h.Sum(nil)
-	// Keep the deterministic time component but pin the low 12 counter bits
-	// to the small value accepted by the OpenCode v2 free-tier gate.
-	timeValue := uint64(0)
-	for _, b := range digest[:5] {
-		timeValue = (timeValue << 8) | uint64(b)
-	}
-	timeValue &= (uint64(1) << 36) - 1
-	current := timeValue*0x1000 + 1
-	var prefix [6]byte
-	for i := range 6 {
-		prefix[i] = byte((^current >> (40 - 8*uint64(i))) & 0xff)
-	}
-	timeHex := hex.EncodeToString(prefix[:])
-	var sb strings.Builder
-	sb.Grow(14)
-	for i := 6; i < 20; i++ {
-		sb.WriteByte(base62Chars[int(digest[i])%62])
-	}
-	return "ses_" + timeHex + sb.String()
+	// Not canonical: generate a fresh ID with current timestamp.
+	// clientTool is unused for now; kept for API compatibility.
+	_ = clientTool
+	return GenerateOpenCodeSessionID()
 }
 
 var opencodeUARegex = regexp.MustCompile(`(?i)^opencode/([a-z0-9-]+)/(\d+)\.(\d+)\.(\d+)/([a-z0-9-]+)$`)
