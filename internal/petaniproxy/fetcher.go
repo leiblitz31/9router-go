@@ -17,6 +17,7 @@ package petaniproxy
 import (
 	"context"
 	"crypto/tls"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -100,9 +101,16 @@ var DefaultClient = &http.Client{
 	},
 }
 
-// defaultSourcesConfig mirrors the Python fallback when the config file
-// is absent: {"http": [], "socks4": [], "socks5": []}.
+//go:embed sources.json
+var embeddedSourcesJSON []byte
+
+// defaultSourcesConfig returns the embedded sources.json (ported from
+// Python config/sources.json). Falls back to empty if embed fails.
 func defaultSourcesConfig() SourcesConfig {
+	var cfg SourcesConfig
+	if err := json.Unmarshal(embeddedSourcesJSON, &cfg); err == nil && cfg != nil {
+		return cfg
+	}
 	return SourcesConfig{"http": {}, "socks4": {}, "socks5": {}}
 }
 
