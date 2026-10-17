@@ -29,6 +29,10 @@ import (
 // StatusClientClosedRequest is the canonical HTTP status for client connection aborts (nginx 499).
 const StatusClientClosedRequest = 499
 
+// clientClosedBody is the JSON body that travels with StatusClientClosedRequest.
+// Single-sourced so the combo and account-fallback paths cannot drift apart.
+const clientClosedBody = `{"error":{"message":"client closed request","type":"client_closed_request","code":499}}`
+
 // borrowZenKeyForGo returns the identity and key of an active opencode-zen
 // connection for the paid go lane, which shares the same backend account.
 // Only used when no go connection exists at all; resolution goes through the
@@ -888,6 +892,14 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	}
 
 	observ.IncUpstreamError(provider, model, statusCode)
+	// A client that hung up is not an upstream failure. Returning the raw error
+	// here made every abort surface as a bare 502 at the write sites in chat.go:
+	// the caller saw "upstream error: context canceled" and the request log
+	// recorded a 5xx for a disconnect the gateway did not cause. The combo path
+	// already reports this as 499, so the two agree.
+	if isClientCanceled(ctx, fwdErr) {
+		return &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(clientClosedBody)}
+	}
 	return fwdErr
 }
 func isClientCanceled(ctx context.Context, err error) bool {
