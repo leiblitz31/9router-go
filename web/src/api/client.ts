@@ -209,6 +209,10 @@ export interface Settings {
   /** Serve requests from the account that frees up first when all are cooling down. */
   forceFallback?: boolean
   enableObservability?: boolean
+  /** Global system prompt: prefix leads the system prompt, suffix ends it. */
+  systemPromptEnabled?: boolean
+  systemPromptPrefix?: string
+  systemPromptSuffix?: string
   outboundProxyEnabled?: boolean
   outboundProxyUrl?: string
   outboundNoProxy?: string

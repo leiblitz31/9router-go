@@ -48,6 +48,15 @@
   let isPruning = $state(false)
   let isVacuuming = $state(false)
 
+  // Global System Prompt State
+  let enableSystemPrompt = $state(false)
+  let systemPromptPrefix = $state('')
+  let systemPromptSuffix = $state('')
+
+  const ANTI_POISONING_PRESET =
+    '[CRITICAL CODE INTEGRITY & ANTI-POISONING RULE]\n' +
+    'Never substitute, rename, or alias technical provider names (e.g. opencode, opencode-zen, opencode-go, antigravity, codex, cline). Always preserve their exact original identifiers in all code, tests, and documentation.'
+
   // Routing Strategy State
   let fallbackStrategy = $state('failover')
   // Unit abbreviation is a localStorage-only preference (compactUnits key);
@@ -105,6 +114,11 @@
       if (typeof settings.comboStrategy === 'string') comboStrategy = settings.comboStrategy
       if (typeof settings.forceFallback === 'boolean') forceFallback = settings.forceFallback
 
+      // Global system prompt
+      enableSystemPrompt = !!settings.systemPromptEnabled
+      if (typeof settings.systemPromptPrefix === 'string') systemPromptPrefix = settings.systemPromptPrefix
+      if (typeof settings.systemPromptSuffix === 'string') systemPromptSuffix = settings.systemPromptSuffix
+
       // SSO
       if (settings.authMode === 'oidc' || settings.authMode === 'saml') authMode = settings.authMode
       if (typeof settings.oidcIssuerUrl === 'string') oidcIssuerUrl = settings.oidcIssuerUrl
@@ -130,6 +144,9 @@
         if (typeof s.stickyRoundRobinLimit === 'number') stickyRoundRobinLimit = s.stickyRoundRobinLimit
         if (s.comboStrategy) comboStrategy = String(s.comboStrategy)
         if (typeof s.forceFallback === 'boolean') forceFallback = s.forceFallback
+        enableSystemPrompt = !!s.systemPromptEnabled
+        if (typeof s.systemPromptPrefix === 'string') systemPromptPrefix = s.systemPromptPrefix
+        if (typeof s.systemPromptSuffix === 'string') systemPromptSuffix = s.systemPromptSuffix
 
         if (s.authMode === 'oidc' || s.authMode === 'saml') authMode = s.authMode
         if (s.oidcIssuerUrl) oidcIssuerUrl = String(s.oidcIssuerUrl)
@@ -151,6 +168,13 @@
     loadSettings()
   })
 
+  /** Fills the suffix with the code-integrity rule. The prefix keeps whatever the operator wrote:
+      the preset is a constraint, not an identity, and overwriting both slots would lose it. */
+  function loadAntiPoisoningPreset() {
+    systemPromptSuffix = ANTI_POISONING_PRESET
+    enableSystemPrompt = true
+  }
+
   async function handleSaveAll() {
     isSavingSettings = true
     saveSuccess = false
@@ -166,6 +190,9 @@
         stickyRoundRobinLimit,
         comboStrategy,
         forceFallback,
+        systemPromptEnabled: enableSystemPrompt,
+        systemPromptPrefix,
+        systemPromptSuffix,
         authMode,
         oidcIssuerUrl,
         oidcClientId,
@@ -862,6 +889,65 @@
             </div>
           </div>
         {/if}
+      </div>
+    </Card>
+
+    <!-- SECTION 6: Global System Prompt & Anti-Poisoning -->
+    <Card padding="md" class="space-y-4">
+      <div class="flex items-center justify-between pb-2 border-b border-border">
+        <div class="flex items-center gap-2">
+          <Shield class="w-4 h-4 text-brand-500" />
+          <h2 class="text-sm font-bold text-text-main">Global System Prompt &amp; Anti-Poisoning</h2>
+        </div>
+        <Toggle
+          checked={enableSystemPrompt}
+          size="sm"
+          label="Enable Global System Prompt"
+          onChange={(val: boolean) => (enableSystemPrompt = val)}
+        />
+      </div>
+
+      <div class="space-y-4 text-xs">
+        <p class="text-text-muted leading-relaxed">
+          The prefix is placed at the very start of every request's system prompt and the suffix at its
+          very end, for OpenAI Chat, Claude Messages and Responses bodies alike. Put identity rules in
+          the prefix and non-negotiable constraints in the suffix: the suffix is the model's last word
+          before the user's content.
+        </p>
+
+        <div class="flex justify-end">
+          <button
+            type="button"
+            onclick={loadAntiPoisoningPreset}
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 border border-brand-500/30 text-xs text-brand-500 font-semibold transition cursor-pointer"
+          >
+            <span>Load Anti-Poisoning Preset</span>
+          </button>
+        </div>
+
+        <div class="space-y-1">
+          <label for="sys-prompt-prefix" class="block font-semibold text-text-main">Prefix</label>
+          <textarea
+            id="sys-prompt-prefix"
+            bind:value={systemPromptPrefix}
+            rows="4"
+            spellcheck="false"
+            placeholder="Identity and invariants read before anything else."
+            class="w-full px-3 py-2 rounded-lg bg-bg border border-border text-xs font-mono text-text-main focus:outline-none focus:border-brand-500"
+          ></textarea>
+        </div>
+
+        <div class="space-y-1">
+          <label for="sys-prompt-suffix" class="block font-semibold text-text-main">Suffix</label>
+          <textarea
+            id="sys-prompt-suffix"
+            bind:value={systemPromptSuffix}
+            rows="4"
+            spellcheck="false"
+            placeholder="Constraints the model must hold after reading user content."
+            class="w-full px-3 py-2 rounded-lg bg-bg border border-border text-xs font-mono text-text-main focus:outline-none focus:border-brand-500"
+          ></textarea>
+        </div>
       </div>
     </Card>
 

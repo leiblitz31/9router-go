@@ -987,6 +987,21 @@ func (h *ChatHandler) applyTokenSavers(body []byte, claudeNative bool) ([]byte, 
 			out = next
 		}
 	}
+	// Global system prompt, last in the chain so the prefix stays the first
+	// thing the model reads and the suffix its last word — after every style
+	// prompt has been appended in between.
+	if h.TokenSaver.SystemPromptEnabled() {
+		if prefix := h.TokenSaver.SystemPromptPrefix(); prefix != "" {
+			if next, did := tokensaver.InjectPrefixSystemPrompt(out, prefix, claudeNative); did {
+				out = next
+			}
+		}
+		if suffix := h.TokenSaver.SystemPromptSuffix(); suffix != "" {
+			if next, did := tokensaver.InjectSuffixSystemPrompt(out, suffix, claudeNative); did {
+				out = next
+			}
+		}
+	}
 	return out, origTokens, savedTokens, savedPct
 }
 

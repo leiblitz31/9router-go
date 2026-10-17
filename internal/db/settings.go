@@ -66,6 +66,9 @@ type SettingsData struct {
 	PonytailLevel              string                          `json:"ponytailLevel"`
 	ADHDEnabled                bool                            `json:"adhdEnabled"`
 	ADHDLevel                  string                          `json:"adhdLevel"`
+	SystemPromptEnabled        bool                            `json:"systemPromptEnabled"`
+	SystemPromptPrefix         string                          `json:"systemPromptPrefix,omitempty"`
+	SystemPromptSuffix         string                          `json:"systemPromptSuffix,omitempty"`
 	HeadroomUrl                string                          `json:"headroomUrl"`
 	HeadroomCodeAware          bool                            `json:"headroomCodeAware"`
 	HeadroomKompress           bool                            `json:"headroomKompress"`
@@ -92,12 +95,12 @@ type SettingsData struct {
 // DefaultSettings returns fallback settings.
 func DefaultSettings() *SettingsData {
 	return &SettingsData{
-		RTKEnabled:        true,
-		RTKMode:           "simple",
-		RTKIntensity:      "standard",
-		RTKMaxLines:       100,
-		RTKMaxChars:       8000,
-		RTKDeduplicate:    true,
+		RTKEnabled:     true,
+		RTKMode:        "simple",
+		RTKIntensity:   "standard",
+		RTKMaxLines:    100,
+		RTKMaxChars:    8000,
+		RTKDeduplicate: true,
 		RTKCategories: map[string]bool{
 			"git":     true,
 			"build":   true,
@@ -118,13 +121,16 @@ func DefaultSettings() *SettingsData {
 		PonytailLevel:           "full",
 		ADHDEnabled:             false,
 		ADHDLevel:               "full",
-		HeadroomUrl:       "http://localhost:8787",
-		HeadroomKompress:  true,
-		HeadroomTimeoutMs: 3000,
-		SemanticCacheEnabled:     false,
-		SemanticCacheTTL:         1440,
-		SemanticCacheMaxEntries:  1000,
-		AutoUpdate:        false,
+		SystemPromptEnabled:     false,
+		SystemPromptPrefix:      "",
+		SystemPromptSuffix:      "",
+		HeadroomUrl:             "http://localhost:8787",
+		HeadroomKompress:        true,
+		HeadroomTimeoutMs:       3000,
+		SemanticCacheEnabled:    false,
+		SemanticCacheTTL:        1440,
+		SemanticCacheMaxEntries: 1000,
+		AutoUpdate:              false,
 		CapacityAdapter: map[string]CapacityAdapterEntry{
 			"vision":     {Enabled: true, RoundRobin: false, Models: []string{}},
 			"pdf":        {Enabled: false, RoundRobin: false, Models: []string{}},
@@ -217,6 +223,15 @@ func (r *Repo) GetSettings() (*SettingsData, error) {
 	}
 	if lvl := handlerutil.GetString(raw, "adhdLevel"); lvl != "" {
 		s.ADHDLevel = lvl
+	}
+	if v, ok := raw["systemPromptEnabled"].(bool); ok {
+		s.SystemPromptEnabled = v
+	}
+	if v := handlerutil.GetString(raw, "systemPromptPrefix"); v != "" {
+		s.SystemPromptPrefix = v
+	}
+	if v := handlerutil.GetString(raw, "systemPromptSuffix"); v != "" {
+		s.SystemPromptSuffix = v
 	}
 	if v := handlerutil.GetString(raw, "headroomUrl"); v != "" {
 		s.HeadroomUrl = v
@@ -622,7 +637,6 @@ func settingsInt(v any) int {
 	}
 	return 0
 }
-
 
 // stringMap coerces a decoded JSON value into map[string]string, skipping
 // anything that is not a string. The settings blob is hand-editable through
