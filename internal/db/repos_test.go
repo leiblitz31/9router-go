@@ -701,6 +701,7 @@ func TestInsertUsageHistory(t *testing.T) {
 		model TEXT,
 		connectionId TEXT,
 		apiKey TEXT,
+		clientKey TEXT,
 		endpoint TEXT,
 		promptTokens INTEGER,
 		completionTokens INTEGER,

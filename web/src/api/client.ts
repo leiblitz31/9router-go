@@ -89,6 +89,8 @@ export interface APIKey {
   rateLimitConcurrency?: number
   /** Lifetime prompt+completion token budget. 0 means unlimited. */
   tokenQuota?: number
+  /** Spend recorded against tokenQuota since the budget was last reset (#365). */
+  usedTokens?: number
   /** How long a request waits for a free concurrency slot, in ms. 0 uses the server default. */
   queueTimeoutMs?: number
   /** RFC3339 UTC. Empty means the key never expires. */
@@ -1124,6 +1126,16 @@ export const api = {
     request<{ status: string; id: string; key: string }>(`/api/keys/${encodeURIComponent(id)}/rotate`, {
       method: 'POST',
     }),
+  /**
+   * Clears a key's spent token budget (#365). The server stamps the usage mark
+   * the budget is measured from, so the key starts over while its history stays
+   * intact, and the response carries the spend it now has (0).
+   */
+  resetApiKeyQuota: (id: string) =>
+    request<{ status: string; id: string; usedTokens: number; tokenQuota: number; quotaResetId: number }>(
+      `/api/keys/${encodeURIComponent(id)}/reset-quota`,
+      { method: 'POST' },
+    ),
   setApiKeyActive: (id: string, isActive: boolean) =>
     request<{ status: string; id: string; isActive: boolean }>(
       `/api/keys/${encodeURIComponent(id)}/toggle`,

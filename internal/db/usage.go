@@ -43,12 +43,21 @@ func (r *Repo) GetUsageDaily(dateKey string) (string, error) {
 }
 
 // InsertUsageHistory logs a single request's token usage to the usageHistory table.
-func (r *Repo) InsertUsageHistory(provider, model, connectionID, apiKey, endpoint string, promptTokens, completionTokens int, cost float64, status string, totalTokens int, meta string, tokensJSON string) error {
+//
+// clientKey is the CLIENT key that sent the request, masked, and it is what a
+// per-key token budget is measured from (#365). It is a trailing variadic so the
+// call sites that have no client attribution (migrations, fixtures) keep
+// compiling unchanged: only the live request path knows the caller.
+func (r *Repo) InsertUsageHistory(provider, model, connectionID, apiKey, endpoint string, promptTokens, completionTokens int, cost float64, status string, totalTokens int, meta string, tokensJSON string, clientKey ...string) error {
+	attributedTo := ""
+	if len(clientKey) > 0 {
+		attributedTo = clientKey[0]
+	}
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	_, err := r.db.Exec(
-		`INSERT INTO usageHistory (timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		timestamp, provider, model, connectionID, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokensJSON, meta,
+		`INSERT INTO usageHistory (timestamp, provider, model, connectionId, apiKey, clientKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		timestamp, provider, model, connectionID, apiKey, attributedTo, endpoint, promptTokens, completionTokens, cost, status, tokensJSON, meta,
 	)
 	if err != nil {
 		return fmt.Errorf("insert usage history: %w", err)

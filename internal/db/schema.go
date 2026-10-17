@@ -292,6 +292,19 @@ var goOnlyColumns = [][3]string{
 	{"apiKeys", "lastUsedAt", "TEXT DEFAULT ''"},
 	{"apiKeys", "usedCount", "INTEGER DEFAULT 0"},
 	{"apiKeys", "metadata", "TEXT DEFAULT ''"},
+	// #365 Resettable token budget: the usageHistory row id a key's tokenQuota is
+	// measured from, so an exhausted key can be given a fresh budget without
+	// deleting the usage history behind it. A row id rather than a timestamp
+	// because usageHistory.timestamp is second-precision and a reset in the same
+	// second as the spend would keep charging the key.
+	{"apiKeys", "quotaResetId", "INTEGER DEFAULT 0"},
+	// #365 Client attribution in the usage ledger. usageHistory.apiKey holds the
+	// UPSTREAM credential (masked), so a per-key token budget measured from that
+	// column never matched a client and never fired. This column names the client
+	// that spent the tokens: the same masked shape the reader already looks for,
+	// so rows the upstream dashboard wrote (client key in apiKey) keep counting
+	// through the fallback term.
+	{"usageHistory", "clientKey", "TEXT DEFAULT ''"},
 }
 
 // keiRouterTables are Go-only tables for KeiRouter port features.

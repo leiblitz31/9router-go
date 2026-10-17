@@ -21,8 +21,14 @@ import (
 // the same question through the same code. A client that can list a model but
 // not call it (or worse, call one it cannot see) is the bug this file exists to
 // prevent, so there is exactly ONE loader (effectiveAllowedModels), ONE matcher
-// (providers.MatchModelPattern, the model resolver's own) and ONE decision
-// function (modelAllowed). Handlers never re-derive an allowlist.
+// (providers.MatchAllowPattern) and ONE decision function (modelAllowed).
+// Handlers never re-derive an allowlist.
+//
+// The matcher is deliberately the allowlist one and not the resolver's own
+// segment-local providers.MatchModelPattern: `*claude*` has to reach
+// `anthropic/claude-sonnet` (#365). Both live in the providers package, side by
+// side and documented, so the two globs stay visibly distinct instead of
+// quietly drifting apart.
 
 // ErrModelNotAllowed is the typed 403 the handlers translate. Callers match it
 // with errors.As; it is deliberately distinct from a resolution failure, which
@@ -77,28 +83,76 @@ func (h *ChatHandler) allowedModelPatterns(keyID string) []string {
 	return patterns
 }
 
-// modelAllowed is the single allow/deny decision. An empty pattern set allows
-// everything; otherwise some pattern must match some candidate id.
+// modelAllowed is the single allow/deny decision.
+//
+// An empty pattern set — or one holding nothing but blanks — means "no
+// allowlist configured" and allows everything, which is what keeps every key
+// minted before this feature behaving exactly as it did.
+//
+// Otherwise the set is parsed into an allowlist and a deny list (#365):
+//
+//   - `!term` / `-term` entries deny. A deny always wins, even over a positive
+//     rule that would have allowed the same model.
+//   - A set with no positive entry at all is deny-only: everything not named is
+//     allowed, which is how an operator excludes one model without having to
+//     enumerate the rest of the catalogue.
+//   - Positive entries match as allowlist globs (`*claude*`, `oc/*`), see
+//     providers.MatchAllowPattern.
 //
 // candidates carries both spellings of the same model — the bare id and the
 // `provider/model` form — because a client may request either and an operator
-// may write the allowlist as either.
+// may write the allowlist as either. Deny terms are checked against every
+// spelling, so `-haiku` cannot be dodged by requesting the provider-qualified
+// id.
 func modelAllowed(patterns []string, candidates ...string) bool {
-	if len(patterns) == 0 {
+	allows, denies, entries := parseAllowRules(patterns)
+	if entries == 0 {
 		return true
 	}
-	for _, pattern := range patterns {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" {
-			continue
-		}
+	for _, deny := range denies {
 		for _, candidate := range candidates {
-			if candidate != "" && providers.MatchModelPattern(pattern, candidate) {
+			if providers.MatchDenyEntry(deny, candidate) {
+				return false
+			}
+		}
+	}
+	if len(allows) == 0 {
+		// Deny-only: open except what was denied above.
+		return true
+	}
+	for _, pattern := range allows {
+		for _, candidate := range candidates {
+			if providers.MatchAllowPattern(pattern, candidate) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// parseAllowRules splits an allowlist into its positive patterns and its deny
+// terms, and reports how many non-blank entries the list held.
+//
+// entries counts positives and denies together: it is what distinguishes "no
+// allowlist" from "a deny-only allowlist", and only the caller can make that
+// call because only the caller knows the list came from a key's policy.
+func parseAllowRules(patterns []string) (allows, denies []string, entries int) {
+	allows = make([]string, 0, len(patterns))
+	denies = make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if term, ok := providers.IsDenyEntry(pattern); ok {
+			denies = append(denies, term)
+			entries++
+			continue
+		}
+		allows = append(allows, pattern)
+		entries++
+	}
+	return allows, denies, entries
 }
 
 // accessCandidates returns the id spellings a request for modelID can arrive
