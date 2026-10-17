@@ -18,8 +18,8 @@ import "strings"
 // no-key usage rows stay in the same bucket instead of splitting.
 func MaskAPIKey(key string) string {
 	key = strings.TrimSpace(key)
-	if len(key) <= 8 {
+	if RuneCount(key) <= 8 {
 		return "***"
 	}
-	return key[:8] + "***" + key[len(key)-4:]
+	return RunePrefix(key, 8) + "***" + RuneSuffix(key, 4)
 }

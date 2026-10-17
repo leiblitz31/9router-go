@@ -242,8 +242,8 @@ var longTokenPattern = regexp.MustCompile(`[A-Za-z0-9_-]{32,}`)
 
 // maskConnectionName mirrors upstream maskName: long token-like names are truncated.
 func maskConnectionName(name string) string {
-	if len(name) > 16 && longTokenPattern.MatchString(name) {
-		return name[:8] + "***"
+	if handlerutil.RuneCount(name) > 16 && longTokenPattern.MatchString(name) {
+		return handlerutil.RunePrefix(name, 8) + "***"
 	}
 	return name
 }
@@ -253,10 +253,10 @@ func maskConnectionName(name string) string {
 // file, never enough to replay it. Same shape as maskClientKey, which the
 // dashboard already uses for client API keys.
 func maskConnectionSecret(secret string) string {
-	if len(secret) <= 12 {
+	if handlerutil.RuneCount(secret) <= 12 {
 		return "***"
 	}
-	return secret[:6] + "…" + secret[len(secret)-4:]
+	return handlerutil.RunePrefix(secret, 6) + "…" + handlerutil.RuneSuffix(secret, 4)
 }
 
 // connectionSecretHint returns the credential a connection actually

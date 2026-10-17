@@ -79,10 +79,10 @@ func apiKeyDisplay(k *models.APIKey) string {
 // maskClientKey shows the first/last few chars of a client key (dashboard
 // display only).
 func maskClientKey(key string) string {
-	if len(key) <= 12 {
+	if handlerutil.RuneCount(key) <= 12 {
 		return "***"
 	}
-	return key[:6] + "…" + key[len(key)-4:]
+	return handlerutil.RunePrefix(key, 6) + "…" + handlerutil.RuneSuffix(key, 4)
 }
 
 // intOrZero unwraps an optional int column, treating NULL and 0 alike: both
