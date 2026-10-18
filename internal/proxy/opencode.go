@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -162,6 +163,8 @@ func BuildOpenCodeHeaders(rawHeaders map[string]string, sessionID string, isStre
 		"x-opencode-session-id": session,
 		"x-session-affinity":    session,
 		"x-session-id":          session,
+		"b3":                    b3,
+		"traceparent":           traceparent,
 		// Upstream defaults the project to "global"
 		// (open-sse/executors/opencode.js buildHeaders).
 		"x-opencode-project": "global",
@@ -203,6 +206,18 @@ func BuildOpenCodeHeaders(rawHeaders map[string]string, sessionID string, isStre
 		if lk == "x-opencode-project" {
 			if trimmed := strings.TrimSpace(v); trimmed != "" {
 				res["x-opencode-project"] = trimmed
+			}
+		}
+		if lk == "b3" {
+			trimmed := strings.TrimSpace(v)
+			if trimmed != "" {
+				res["b3"] = trimmed
+			}
+		}
+		if lk == "traceparent" {
+			trimmed := strings.TrimSpace(v)
+			if trimmed != "" {
+				res["traceparent"] = trimmed
 			}
 		}
 	}
