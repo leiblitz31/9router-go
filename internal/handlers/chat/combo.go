@@ -929,6 +929,22 @@ func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]stri
 	if connID == "" {
 		return
 	}
+	// Upstream decolua/9router#4998: proxy-backed virtual no-auth connections
+	// (`proxy:${poolId}`) allow fallback on 403/429/5xx via checkFallbackError.
+	// The pool is added to excludeIDs so rotation skips it on retry; there is
+	// no DB row to lock for a virtual connection.
+	if strings.HasPrefix(connID, "proxy:") {
+		cls := providers.ClassifyError(ue.StatusCode, extractErrorText(ue.Body), 0)
+		if cls.ShouldFallback {
+			*excludeIDs = append(*excludeIDs, connID)
+		}
+		return
+	}
+	// A bare "noauth" virtual connection has no pool to fall back to (upstream
+	// #4998: shouldFallback=false for "noauth").
+	if connID == "noauth" {
+		return
+	}
 	currentLevel := h.Repo.GetConnectionBackoffLevel(connID)
 	cls := providers.ClassifyError(ue.StatusCode, extractErrorText(ue.Body), currentLevel)
 	// Upstream parity (checkFallbackError): request-scoped 4xx (400/404/405/
