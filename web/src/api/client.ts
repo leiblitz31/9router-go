@@ -261,6 +261,16 @@ export interface Settings {
    * (internal/handlers/dashboard/navvisibility.go).
    */
   navVisibility?: { hidden?: string[] }
+  /**
+   * Display currency for every cost surface. Costs themselves are stored in USD;
+   * see web/src/lib/currency.ts for the catalog and the formatting rules.
+   */
+  displayCurrency?: {
+    code?: string
+    rates?: Record<string, number>
+    showBoth?: boolean
+    updatedAt?: string
+  }
   [key: string]: unknown
 }
 
@@ -1401,6 +1411,18 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(settings),
     }),
+  /**
+   * Reads live USD rates for the requested codes and stores the subset.
+   * `codes` is the catalog the dashboard offers (web/src/lib/currency.ts).
+   */
+  refreshCurrencyRates: (payload: { code: string; showBoth: boolean; codes: string[] }) =>
+    request<{ displayCurrency: unknown; source: string; ratesStored: number }>(
+      '/api/settings/currency/refresh',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
   getDatabaseStats: () => request<DatabaseStats>('/api/settings/database/stats'),
   pruneDatabase: () =>
     request<{ success: boolean; pruned: number }>('/api/settings/database/prune', {

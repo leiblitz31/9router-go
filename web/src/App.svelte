@@ -41,6 +41,7 @@
   import { getIconPath } from './components/connections/types'
   import { isNavHidden, normalizeHiddenNav } from './lib/nav'
   import { setHiddenNavEntries } from './lib/navVisibility.svelte'
+  import { setDisplayCurrency } from './lib/currency.svelte'
 
   let activeTab = $state<ActiveTab>(
     typeof window !== 'undefined' ? pathToTab(window.location.pathname) : 'endpoint'
@@ -151,6 +152,9 @@
       combos = combosRes
       apiKeys = keysRes
       settings = settingsRes
+      // Every cost surface reads the display currency from the store, so it is
+      // pushed in wherever the settings land.
+      setDisplayCurrency(settingsRes.displayCurrency)
     } finally {
       settingsLoaded = true
       isLoading = false

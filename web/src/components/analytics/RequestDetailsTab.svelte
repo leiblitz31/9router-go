@@ -17,6 +17,7 @@
     formatLocalTimestamp,
     type RequestDetailItem,
   } from './types'
+  import { costIn } from '../../lib/currency.svelte'
 
   interface Props {
     details?: RequestDetailItem[]
@@ -254,7 +255,7 @@
                 {fmt(cachedTokensFor(item))}
               </td>
               <td class="py-3 px-4 text-right font-mono text-emerald-500 text-[11px]">
-                {item.cost ? `$${item.cost.toFixed(4)}` : '—'}
+                {item.cost ? costIn(item.cost, 4) : '—'}
               </td>
               <td class="py-3 px-4 text-right">
                 <button
@@ -489,7 +490,7 @@
           <div class="p-3 rounded-xl bg-surface-2 border border-border space-y-1">
             <div class="text-text-muted text-[10px] uppercase font-bold tracking-wider">Est. Cost</div>
             <div class="font-code text-xs text-emerald-500 font-bold">
-              ${selectedDetail.cost ? selectedDetail.cost.toFixed(4) : '0.0000'}
+              {costIn(selectedDetail.cost ?? 0, 4)}
             </div>
           </div>
           {#if selectedDetail.id}

@@ -5,6 +5,7 @@
   // chart dependency, matching CacheAnalyticsView / CompressionAnalyticsView.
   import { api } from '../../api/client'
   import { fmtTokens } from '../../lib/compactNumber'
+  import { costIn } from '../../lib/currency.svelte'
 
   interface Props {
     period?: string
@@ -222,7 +223,7 @@
           </div>
           <div class="flex items-center justify-between gap-3 text-warning">
             <span>Est. cost</span>
-            <span class="font-mono font-bold">~${stack[hovered].bucket.cost.toFixed(2)}</span>
+            <span class="font-mono font-bold">~{costIn(stack[hovered].bucket.cost ?? 0)}</span>
           </div>
           {#each families as s, band (s.family)}
             {@const value = stack[hovered].cumulative[band] - (band > 0 ? stack[hovered].cumulative[band - 1] : 0)}

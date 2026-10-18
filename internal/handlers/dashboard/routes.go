@@ -131,6 +131,7 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/settings/database/prune-usage", h.HandlePruneUsageHistory)
 		r.Post("/settings/database/vacuum", h.HandleVacuumDatabase)
 		r.Post("/settings/proxy-test", h.HandleProxyTest)
+		r.Post("/settings/currency/refresh", h.HandleRefreshCurrencyRates)
 
 		// Token Saver Testing Benches
 		r.Post("/tokensaver/rtk/test", h.HandleTestRTK)

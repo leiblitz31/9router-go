@@ -185,10 +185,6 @@ export function cachedTokensFor(detail: RequestDetailItem): number {
   return detail.tokens?.cached_tokens ?? detail.tokens?.cache_read_input_tokens ?? 0
 }
 
-export function fmtCost(n?: number): string {
-  return '$' + (n || 0).toFixed(2)
-}
-
 export function timeAgo(timestamp?: string): string {
   if (!timestamp) return 'just now'
   const diff = Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000)

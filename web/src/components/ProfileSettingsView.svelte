@@ -3,6 +3,7 @@
   import {
     AlertCircle,
     Check,
+    Coins,
     Database,
     Download,
     Key,
@@ -26,6 +27,15 @@
   import { isCompactUnitsEnabled, setCompactUnits } from '../lib/compactNumber'
   import { isDetailsExpandedByDefault, setDetailsExpandedByDefault } from '../lib/displayPrefs'
   import { TOGGLEABLE_NAV_ENTRIES, orderHiddenNav, setNavVisible } from '../lib/nav'
+  import {
+    CURRENCY_CATALOG,
+    DEFAULT_RATES,
+    describeRates,
+    formatCost,
+    normalizeDisplayCurrency,
+    type DisplayCurrency
+  } from '../lib/currency'
+  import { setDisplayCurrency } from '../lib/currency.svelte'
 
   interface Props {
     settings?: Settings
@@ -77,6 +87,14 @@
   // button is offered on its own for a few seconds after a change.
   let showSaveHint = $state(false)
   let saveHintTimer: ReturnType<typeof setTimeout> | null = null
+  // Currency & rates: the display currency every cost surface reads. The catalog
+  // and the formatting rules live in web/src/lib/currency.ts.
+  let currencyCode = $state('USD')
+  let currencyRates = $state<Record<string, number>>({})
+  let currencyShowBoth = $state(false)
+  let currencyUpdatedAt = $state<string | undefined>(undefined)
+  let isRefreshingRates = $state(false)
+  let ratesMessage = $state<string | null>(null)
 
   // Password Management State
   let currentPassword = $state('')
@@ -148,6 +166,8 @@
 
       // Feature Visibility
       hiddenNav = orderHiddenNav(settings.navVisibility)
+      // Currency
+      applyCurrency(settings.displayCurrency)
     }
   })
 
@@ -178,6 +198,7 @@
         if (s.samlIssuer) samlIssuer = String(s.samlIssuer)
         if (s.samlCert) samlCert = String(s.samlCert)
         if (s.samlLoginLabel) samlLoginLabel = String(s.samlLoginLabel)
+        applyCurrency(s.displayCurrency)
       }
     } catch {
       // silent
@@ -228,6 +249,64 @@
     markUnsaved()
   }
 
+  /** Pushes the stored currency setting into the panel's fields and the store. */
+  function applyCurrency(value: unknown) {
+    const normalized = normalizeDisplayCurrency(value)
+    currencyCode = normalized.code
+    currencyRates = { ...normalized.rates }
+    currencyShowBoth = normalized.showBoth
+    currencyUpdatedAt = normalized.updatedAt
+    setDisplayCurrency(normalized)
+  }
+
+  /** The object this panel saves, and the one the cost surfaces read. */
+  function currencySetting(): DisplayCurrency {
+    return {
+      code: currencyCode,
+      rates: currencyRates,
+      showBoth: currencyShowBoth,
+      ...(currencyUpdatedAt ? { updatedAt: currencyUpdatedAt } : {}),
+    }
+  }
+
+  /** An emptied field drops the rate, so the seed shows through again. */
+  function setRate(code: string, raw: string) {
+    if (raw === '') {
+      const next = { ...currencyRates }
+      delete next[code]
+      currencyRates = next
+      return
+    }
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value <= 0) return
+    currencyRates = { ...currencyRates, [code]: value }
+  }
+
+  /**
+   * Asks the server for the live rates the catalog cares about. A failure leaves
+   * the manual table untouched — it is a refresh, never a clear.
+   */
+  async function refreshRates() {
+    isRefreshingRates = true
+    ratesMessage = null
+    try {
+      const result = await api.refreshCurrencyRates({
+        code: currencyCode,
+        showBoth: currencyShowBoth,
+        codes: CURRENCY_CATALOG.map((option) => option.code),
+      })
+      applyCurrency(result.displayCurrency)
+      ratesMessage = `Refreshed ${result.ratesStored} rates from ${new URL(result.source).host}.`
+      onRefresh?.()
+    } catch (err) {
+      ratesMessage = `Refresh failed, the rates below are unchanged: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    } finally {
+      isRefreshingRates = false
+    }
+  }
+
   async function handleSaveAll() {
     isSavingSettings = true
     saveSuccess = false
@@ -257,6 +336,7 @@
         samlIssuer,
         samlCert,
         samlLoginLabel,
+        displayCurrency: currencySetting(),
       })
       saveSuccess = true
       showSaveHint = false
@@ -1124,6 +1204,78 @@
         </Button>
       </div>
     {/if}
+    <!-- SECTION 7: Currency -->
+    <Card padding="md" class="space-y-4">
+      <div class="flex items-center gap-2 pb-2 border-b border-border">
+        <Coins class="w-4 h-4 text-brand-500" />
+        <h2 class="text-sm font-bold text-text-main">Currency</h2>
+      </div>
+
+      <p class="text-xs text-text-muted leading-relaxed">
+        Every cost is measured in USD and shown here in the currency you pick. The rates are yours
+        to keep: edit them, or refresh them from a public provider.
+      </p>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="space-y-1">
+          <label for="currency-code" class="text-[11px] font-medium text-text-muted">Display currency</label>
+          <select
+            id="currency-code"
+            bind:value={currencyCode}
+            class="w-full px-3 py-2 rounded-lg bg-bg border border-border text-xs text-text-main focus:outline-none focus:border-brand-500"
+          >
+            {#each CURRENCY_CATALOG as option (option.code)}
+              <option value={option.code}>{option.code} — {option.label}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="flex items-center justify-between gap-3 rounded-[10px] border border-border-subtle px-3 py-2">
+          <span class="text-xs text-text-muted">Show USD next to the converted amount</span>
+          <Toggle
+            checked={currencyShowBoth}
+            size="sm"
+            label="Show USD next to the converted amount"
+            onChange={(val) => (currencyShowBoth = val)}
+          />
+        </div>
+      </div>
+
+      <div class="space-y-1">
+        <p class="text-[11px] font-medium text-text-muted">Rates — one USD in each currency</p>
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+          {#each CURRENCY_CATALOG as option (option.code)}
+            <label class="flex items-center gap-2 rounded-[10px] border border-border-subtle px-2 py-1.5">
+              <span class="w-9 text-[11px] font-semibold text-text-muted">{option.code}</span>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                inputmode="decimal"
+                value={currencyRates[option.code] ?? ''}
+                placeholder={String(DEFAULT_RATES[option.code] ?? '')}
+                oninput={(e) => setRate(option.code, (e.target as HTMLInputElement).value)}
+                class="w-full bg-transparent text-xs text-text-main focus:outline-none"
+              />
+            </label>
+          {/each}
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <p class="text-[11px] text-text-subtle">
+          1 USD = {formatCost(1, { code: currencyCode, rates: currencyRates, showBoth: false })} ·
+          {describeRates(currencySetting())}
+        </p>
+        <Button variant="ghost" onclick={refreshRates} loading={isRefreshingRates}>
+          <RefreshCw class="w-3.5 h-3.5" />
+          <span>Refresh from provider</span>
+        </Button>
+      </div>
+
+      {#if ratesMessage}
+        <p class="text-[11px] text-text-muted leading-relaxed">{ratesMessage}</p>
+      {/if}
+    </Card>
 
     <Modal
       isOpen={dbAuthOpen}

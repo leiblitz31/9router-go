@@ -170,6 +170,7 @@ docker run -d --name 9router-go --restart unless-stopped \
 ## 💡 Key Features
 
 - 🖥️ Native Svelte 5 dashboard: providers, OAuth, combos, proxy pools, API keys, usage, quota, settings, plans, per-entry sidebar visibility
+- 💱 Cost display in USD, IDR, EUR and ten more currencies — editable rate table, dual display, one-click refresh from a public provider
 - 🔌 OpenAI Chat, Claude Messages, Gemini, Ollama-compatible, Responses, embeddings, media, search, web tools
 - 🔁 Combos with fallback, round-robin, sticky routing, fusion, capability-aware reordering
 - 👥 Per-provider executors, OAuth refresh, reactive 401 retry
