@@ -291,7 +291,17 @@ func TestPasswordHeaderScopeKeepsOtherCredentialsWorking(t *testing.T) {
 		t.Fatalf("sign: %v", err)
 	}
 
-	for _, path := range []string{"/api/version/shutdown", "/api/version/update", PasswordHeaderCarriesOwnAuth} {
+	for _, path := range []string{
+		"/api/version/shutdown",
+		"/api/version/update",
+		PasswordHeaderCarriesOwnAuth,
+		"/api/settings/database/prune",
+		"/api/settings/database/prune-usage",
+		"/api/settings/database/vacuum",
+	} {
+		if !IsAlwaysProtectedPath(path) {
+			t.Errorf("%s is not always-protected: a destructive settings route would answer an unauthenticated local caller when requireLogin is off", path)
+		}
 		cliReq := httptest.NewRequest(http.MethodPost, path, nil)
 		cliReq.Header.Set(auth.CLITokenHeader, auth.CLIToken())
 		if rec := httptest.NewRecorder(); func() int {

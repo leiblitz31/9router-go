@@ -128,6 +128,7 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/settings/database", h.HandleImportDatabase)
 		r.Get("/settings/database/stats", h.HandleGetDatabaseStats)
 		r.Post("/settings/database/prune", h.HandlePruneDatabase)
+		r.Post("/settings/database/prune-usage", h.HandlePruneUsageHistory)
 		r.Post("/settings/database/vacuum", h.HandleVacuumDatabase)
 		r.Post("/settings/proxy-test", h.HandleProxyTest)
 

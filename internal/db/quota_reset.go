@@ -66,6 +66,16 @@ func (r *Repo) ResetApiKeyQuota(ctx context.Context, keyID string) (int, error) 
 	if n, err := res.RowsAffected(); err == nil && n == 0 {
 		return 0, errNoSuchApiKey
 	}
+
+	// The carryover holds spend that lived in rows the ledger prune deleted. A
+	// reset says "measure from here", and "here" is after everything already
+	// recorded — including that carried spend. Leaving it would charge the key
+	// for tokens it had just been forgiven, so it is cleared in the same
+	// transaction as the mark: the reader can never observe a new mark with the
+	// old carryover still counted.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM usageLedgerCarryover WHERE keyId = ?`, keyID); err != nil {
+		return 0, fmt.Errorf("reset api key quota %s: clear carried usage: %w", keyID, err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("reset api key quota %s: commit: %w", keyID, err)
 	}
@@ -153,20 +163,38 @@ func (r *Repo) GetApiKeyTokenUsageByID(ctx context.Context, keyID string) (int, 
 // that ledger stored the client key in apiKey, where this one stores the upstream
 // credential, so both spellings are summed.
 //
-// No index is added for the column: the predicate is an OR across two columns,
+// The carryover term is what keeps the sum exact once an operator prunes the
+// ledger (usage_retention_ledger.go): spend that lived in deleted rows is kept in
+// usageLedgerCarryover and added back here. It is resolved by the same key
+// secret this query already holds rather than by an id, so no caller has to know
+// one. A key whose row is absent resolves to no carryover, which is the same
+// answer as a key that never had one — and the ledger prune drops orphaned
+// carryover rows, so that only happens for a key created after a prune.
+//
+// The history sum and the carryover are read in one statement so a prune landing
+// between two reads cannot report a spend that is neither the before nor the
+// after value.
+//
+// No index is added for the history predicate: it is an OR across two columns,
 // which no single-column index serves, and the alternative — a join on the
-// apiKeys table — costs more than the scan it replaces.
+// apiKeys table — costs more than the scan it replaces. The carryover lookup is a
+// primary-key hit on a table with one row per client key.
 func (r *Repo) tokenUsageSince(ctx context.Context, rawKey string, mark int) (int, error) {
 	if rawKey == "" {
 		return 0, nil
 	}
-	query := `SELECT COALESCE(SUM(COALESCE(promptTokens,0) + COALESCE(completionTokens,0)), 0)
+	history := `COALESCE(SUM(COALESCE(promptTokens,0) + COALESCE(completionTokens,0)), 0)
 	   FROM usageHistory WHERE (clientKey = ? OR apiKey = ? OR apiKey = ?)`
 	args := []any{handlerutil.MaskAPIKey(rawKey), rawKey, handlerutil.MaskAPIKey(rawKey)}
 	if mark > 0 {
-		query += ` AND id > ?`
+		history += ` AND id > ?`
 		args = append(args, mark)
 	}
+	query := `SELECT (SELECT ` + history + `)
+	   + COALESCE((SELECT tokens FROM usageLedgerCarryover
+	                WHERE keyId = (SELECT id FROM apiKeys WHERE key = ? LIMIT 1)), 0)`
+	args = append(args, rawKey)
+
 	var used int64
 	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&used); err != nil {
 		return 0, fmt.Errorf("get api key token usage: %w", err)

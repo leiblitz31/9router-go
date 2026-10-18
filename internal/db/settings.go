@@ -90,6 +90,17 @@ type SettingsData struct {
 	ObservabilityMode          string                          `json:"observabilityMode,omitempty"`
 	RetentionDays              int                             `json:"retentionDays,omitempty"`
 	MaxRequestRecords          int                             `json:"maxRequestRecords,omitempty"`
+	// UsageHistoryRetentionDays bounds how far back the usage ledger is kept.
+	// It is a separate knob from RetentionDays on purpose: that one governs
+	// requestDetails, which is diagnostics nothing bills from, while this one
+	// deletes billing rows. Folding them into one control would mean an operator
+	// trimming a diagnostic log silently shortened their usage history — and
+	// the two are wanted at different lengths, since a month of request bodies
+	// is a lot of disk and a month of per-request counters is not.
+	//
+	// 0 means "keep forever", which is the default: the ledger is only pruned
+	// when an operator asks for it. See usage_retention_ledger.go.
+	UsageHistoryRetentionDays int `json:"usageHistoryRetentionDays,omitempty"`
 }
 
 // DefaultSettings returns fallback settings.
@@ -270,6 +281,13 @@ func (r *Repo) GetSettings() (*SettingsData, error) {
 	}
 	if v := settingsInt(raw["maxRequestRecords"]); v > 0 {
 		s.MaxRequestRecords = v
+	}
+
+	// The ledger window. Explicit 0 means "keep forever" and is the default, so
+	// the value is only taken when the key is actually present — a missing key
+	// must not read as an instruction to prune at zero days.
+	if _, present := raw["usageHistoryRetentionDays"]; present {
+		s.UsageHistoryRetentionDays = settingsInt(raw["usageHistoryRetentionDays"])
 	}
 
 	// Global provider fallback strategy
