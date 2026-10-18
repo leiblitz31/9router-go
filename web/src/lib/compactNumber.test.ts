@@ -67,6 +67,11 @@ describe('fmtTokens', () => {
     expect(fmtTokens(2_400_000)).toBe((2_400_000).toLocaleString())
   })
 
+  it('force abbreviates even when the switch is off', () => {
+    setCompactUnits(false)
+    expect(fmtTokens(2_400_000, 'en', true)).toBe('2.4M')
+  })
+
   it('uses 亿/万 for zh locale when enabled', () => {
     setCompactUnits(true)
     expect(fmtTokens(150_000_000, 'zh')).toBe('1.5亿')

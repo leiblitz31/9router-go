@@ -163,6 +163,138 @@ func (r *Repo) GetUsageDailyRange(limit int) ([]UsageDailyRow, error) {
 	return res, nil
 }
 
+// UsageGroupRow is one provider (or provider+model) aggregate over a time
+// window, used by the usage dashboard's node-health table.
+type UsageGroupRow struct {
+	Provider         string
+	Model            string
+	Requests         int
+	Errors           int
+	PromptTokens     int
+	CompletionTokens int
+	Cost             float64
+	LastUsed         string
+}
+
+const usageGroupStats = `
+	COUNT(*) AS requests,
+	SUM(CASE WHEN status NOT IN ('ok', 'success') THEN 1 ELSE 0 END) AS errors,
+	COALESCE(SUM(promptTokens), 0) AS promptTokens,
+	COALESCE(SUM(completionTokens), 0) AS completionTokens,
+	COALESCE(SUM(cost), 0) AS cost,
+	MAX(timestamp) AS lastUsed
+`
+
+func scanUsageGroupRows(rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}, op string) ([]UsageGroupRow, error) {
+	var res []UsageGroupRow
+	for rows.Next() {
+		var row UsageGroupRow
+		if err := rows.Scan(
+			&row.Provider, &row.Model, &row.Requests, &row.Errors,
+			&row.PromptTokens, &row.CompletionTokens, &row.Cost, &row.LastUsed,
+		); err != nil {
+			return nil, fmt.Errorf("scan usage group %s: %w", op, err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usage group %s: %w", op, err)
+	}
+	return res, nil
+}
+
+// GetUsageGroupByProviderSince aggregates usageHistory per provider since the
+// cutoff. The model column is a constant empty string: provider rows have no
+// single model, and the shared scanner expects both key columns.
+func (r *Repo) GetUsageGroupByProviderSince(since string) ([]UsageGroupRow, error) {
+	rows, err := r.db.Query( //nolint:noctx,rowserrcheck
+		`SELECT COALESCE(provider, ''), '', `+usageGroupStats+`
+		   FROM usageHistory WHERE timestamp >= ? GROUP BY COALESCE(provider, '')`, since)
+	if err != nil {
+		return nil, fmt.Errorf("query usage group by provider: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanUsageGroupRows(rows, "provider")
+}
+
+// GetUsageGroupByModelSince aggregates usageHistory per provider+model since
+// the cutoff.
+func (r *Repo) GetUsageGroupByModelSince(since string) ([]UsageGroupRow, error) {
+	rows, err := r.db.Query( //nolint:noctx,rowserrcheck
+		`SELECT COALESCE(provider, ''), COALESCE(model, ''), `+usageGroupStats+`
+		   FROM usageHistory WHERE timestamp >= ? GROUP BY COALESCE(provider, ''), COALESCE(model, '')`, since)
+	if err != nil {
+		return nil, fmt.Errorf("query usage group by model: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanUsageGroupRows(rows, "model")
+}
+
+// CacheUsageRow carries the raw fields needed to compute the cache hit rate:
+// the row's input count and its token JSON (cached/creation live inside it).
+type CacheUsageRow struct {
+	PromptTokens int
+	Tokens       string
+}
+
+// GetCacheUsageRows returns every history row whose token payload mentions a
+// cache field. The lifetime cache-hit rate is unbounded by design (it judges
+// the whole ledger), and the LIKE prefilter keeps the JSON decode off rows
+// that can never contribute.
+func (r *Repo) GetCacheUsageRows() ([]CacheUsageRow, error) {
+	rows, err := r.db.Query(`SELECT promptTokens, tokens FROM usageHistory WHERE tokens LIKE '%cache%'`) //nolint:noctx
+	if err != nil {
+		return nil, fmt.Errorf("query cache usage rows: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var res []CacheUsageRow
+	for rows.Next() {
+		var row CacheUsageRow
+		if err := rows.Scan(&row.PromptTokens, &row.Tokens); err != nil {
+			return nil, fmt.Errorf("scan cache usage row: %w", err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cache usage rows: %w", err)
+	}
+	return res, nil
+}
+
+// RequestDetailPerfRow is one latency observation from the requestDetails ring.
+type RequestDetailPerfRow struct {
+	Provider string
+	Model    string
+	Data     string
+}
+
+// GetRequestDetailPerf returns the stored payload of every request detail.
+// The ring is retention-bounded, so this stays cheap; it is the gateway's only
+// source of per-request latency for the node-health table.
+func (r *Repo) GetRequestDetailPerf() ([]RequestDetailPerfRow, error) {
+	rows, err := r.db.Query(`SELECT COALESCE(provider, ''), COALESCE(model, ''), data FROM requestDetails`) //nolint:noctx
+	if err != nil {
+		return nil, fmt.Errorf("query request detail perf: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var res []RequestDetailPerfRow
+	for rows.Next() {
+		var row RequestDetailPerfRow
+		if err := rows.Scan(&row.Provider, &row.Model, &row.Data); err != nil {
+			return nil, fmt.Errorf("scan request detail perf: %w", err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate request detail perf: %w", err)
+	}
+	return res, nil
+}
+
 // GetUsageHistorySince returns usage history records since the cutoff timestamp.
 func (r *Repo) GetUsageHistorySince(cutoff string) ([]UsageHistoryRow, error) {
 	rows, err := r.db.Query(usageHistorySinceQuery, cutoff)
