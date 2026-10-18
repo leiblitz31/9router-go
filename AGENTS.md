@@ -171,6 +171,15 @@ looks. A large pure-Go library is fine; a small one that needs cgo is not.
   - Any library requiring cgo. It ends the `CGO_ENABLED=0` guarantee for every target at once.
   - Build tags or platform-specific files that break any target in `CROSS_TARGETS`. These turn a single portable binary into a per-platform build, which is the one property this pipeline exists to keep.
 
+
+### G. Deployment Target: Small Hardware
+
+The gateway is expected to serve from a **1 vCPU box with a small memory ceiling** — an operator's router, a Raspberry Pi, or the cheapest VPS they own. That is why §4.A–§4.F read the way they do: stream instead of buffering, bound every cache and goroutine, reuse the pooled `http.Client`. Code can be correct and still be a regression here.
+
+- **A change that measurably raises steady RSS or per-request CPU on that box is a regression**, even when every test passes and the wire contract is unchanged. Measure the real binary on a real request path before and after, and put the number in the PR.
+- **Bound everything that grows.** A cache needs a size or a TTL, per-connection state needs a lifetime, and a goroutine per request needs a reason to exist. An unbounded map keyed by a client-supplied value is a memory leak with a schedule.
+- **Take the smaller mechanism when both meet the requirement** — a slice over a map, a counter over a histogram, `json.RawMessage` over `map[string]any` on a hot path. When the heavier one is genuinely needed, say which requirement needs it.
+
 ---
 
 ## 5. Idiomatic Go Unit Testing Convention (`testing.T`)
@@ -379,6 +388,22 @@ cd web && bun run ratchet:svelte -- --update
 ```
 
 Never widen the baseline to make a failure disappear — fix the error, or split the PR and land the debt reduction on its own. The `--tsconfig tsconfig.app.json` flag is mandatory: the default resolves `tsconfig.json`, which has `files: []`, and silently checks **zero** components.
+
+
+### F. Client Weight Budget
+
+The dashboard is embedded in the binary and served by the same small box, usually to a phone. Weight is a review criterion here, not a matter of taste. Note the axis: §4.F governs what may enter `go.mod`, this governs what ships to the browser.
+
+Measured on `main`, 2026-10-18 (`cd web && bun run build`):
+
+- `dist/` total: **7.2 MB**
+- Material Symbols woff2: **3.9 MB** — the heaviest single file, and every dashboard visit fetches it through the `@font-face` in the built CSS
+- JS bundle: 1.2 MB · CSS: 112 KB · `dist/providers` artwork: 2.1 MB (only the views that render it)
+
+- **Report the numbers for a UI change**: `bun run build`, then `du -sh dist` and the largest files. A few percent of drift is noise; a larger jump needs a reason in the PR.
+- **A new runtime dependency has to pay for itself.** Icon packs, chart libraries, date/utility bundles and animation frameworks are the usual offenders. State what it buys and what it adds.
+- **Costs that never appear in the bundle still count on this box**: an animation or transition on a list that can hold hundreds of rows, a poll faster than the data changes, an unbounded client-side array, one DOM node per data point, `backdrop-filter` or a large blur inside a scrolling container, and per-frame JS on a view that stays open.
+- **A visual addition that costs measurably more than it gives may be refused, with the measured reason attached** — name the asset or the per-frame cost, and what the user gets for it. The build output is the measurement; "it is only a small card" is not.
 
 ---
 
