@@ -442,6 +442,34 @@ func init() {
 	providerCapabilities["ollama"] = map[string]Capabilities{
 		"deepseek-v4.1-flash:cloud": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
 	}
+
+	// gemini-web overrides the generic `*gemini-3*` pattern row. The web surface
+	// and the API surface both answer `gemini-3*` requests, but they are not the
+	// same product, and the pattern row was written for the API. What the site's
+	// own composer offers is text and three thinking levels: no image input, no
+	// audio, no video, and no search toggle the executor can set. Declaring them
+	// would advertise controls that silently do nothing.
+	//
+	// "gemini-level" is the site's own enum (low/medium/high) and it cannot be
+	// turned off: level 1 is thinking's own floor.
+	//
+	// Every catalogued name is listed, not only the versioned ones: a name that
+	// falls through to the generic `*gemini-3*` pattern row would advertise the
+	// API surface's vision and search flags, which is the outcome this override
+	// exists to prevent.
+	geminiWebCaps := Capabilities{Tools: true, Reasoning: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}
+	providerCapabilities["gemini-web"] = map[string]Capabilities{
+		"gemini-3.1-pro":        geminiWebCaps,
+		"gemini-3.7-flash":      geminiWebCaps,
+		"gemini-3.1-flash-lite": geminiWebCaps,
+		"gemini-pro":            geminiWebCaps,
+		"gemini-flash":          geminiWebCaps,
+		"gemini-flash-lite":     geminiWebCaps,
+		"gemini-argon":          geminiWebCaps,
+		"gemini-3-pro":          geminiWebCaps,
+		"gemini-4-argon":        geminiWebCaps,
+	}
+
 	providerCapabilities["opencode-go"] = map[string]Capabilities{
 		"glm-5.3-flash": {
 			Vision: true, VideoInput: true, PDF: true, Reasoning: true, Tools: true,
