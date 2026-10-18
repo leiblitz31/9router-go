@@ -2396,8 +2396,8 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "kind": "embedding"
     },
     {
-      "id": "text-embedding-3-large",
-      "name": "Text Embedding 3 Large (GitHub)",
+      "id": "text-embedding-ada-002",
+      "name": "Text Embedding Ada 002 (GitHub)",
       "kind": "embedding"
     }
   ],
