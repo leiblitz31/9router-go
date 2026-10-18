@@ -142,6 +142,7 @@ func coreSchema() []tableDef {
 				{"status", "TEXT"},
 				{"tokens", "TEXT"},
 				{"meta", "TEXT"},
+				{"clientKey", "TEXT DEFAULT ''"},
 			},
 			indexes: []string{
 				"CREATE INDEX IF NOT EXISTS idx_uh_ts ON usageHistory(timestamp DESC)",
@@ -151,13 +152,17 @@ func coreSchema() []tableDef {
 				"CREATE INDEX IF NOT EXISTS idx_uh_ts_prov ON usageHistory(timestamp DESC, provider)",
 				"CREATE INDEX IF NOT EXISTS idx_uh_ts_model ON usageHistory(timestamp DESC, model)",
 				// The per-key lifetime token quota sums prompt+completion tokens
-				// WHERE (clientKey = ? OR apiKey = ? OR ...) on every request
-				// for a quota-bearing key. Without this index that sum is a full
-				// scan on a ledger that can grow large — measured at ~150 ms on a
-				// 200k-row ledger versus sub-millisecond with it. EnsureCoreSchema
-				// re-runs this list on every boot, so existing installs pick the
-				// index up on the next start.
+				// over `clientKey = ? OR apiKey = ? OR apiKey = ?` (tokenUsageSince,
+				// quota_reset.go). SQLite answers a disjunction with a multi-index
+				// OR only when EVERY arm is indexable, so idx_uh_apikey alone was
+				// not enough: the unindexed clientKey arm degraded the whole
+				// statement to `SCAN usageHistory`. That scan ran once per key row
+				// in GET /api/keys (apiKeyUsedTokens), which is on the dashboard's
+				// boot path — measured on a 512k-row ledger at ~127 ms per key, so
+				// a 50-key install spent ~10 s in that one request. Both columns
+				// need their own index for the OR to use indexes at all.
 				"CREATE INDEX IF NOT EXISTS idx_uh_apikey ON usageHistory(apiKey)",
+				"CREATE INDEX IF NOT EXISTS idx_uh_clientkey ON usageHistory(clientKey)",
 			},
 		},
 		{
