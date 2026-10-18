@@ -29,7 +29,12 @@
   } from '../../lib/oauth-handoff'
   import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
   import { copyToClipboard } from '../../lib/clipboard'
-  import { notifyCustomModelsChanged } from '../../lib/customModels'
+  import {
+    importCustomModelsBestEffort,
+    notifyCustomModelsChanged,
+    type CustomModelImportOutcome,
+    type CustomModelWrite,
+  } from '../../lib/customModels'
   import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
   import { loadDeprecations, refreshDeprecations, subscribeDeprecations } from '../../lib/modelDeprecations.svelte'
   import DeprecatedBadge from '../../lib/ui/DeprecatedBadge.svelte'
@@ -2467,6 +2472,18 @@
     return id.endsWith(':free') || id.endsWith('/free') || id.endsWith('-free')
   }
 
+  // The server names the occupant in the refusal body, so the summary can say
+  // what has to be renamed instead of only that the id was skipped.
+  function reportImportRefusals(outcome: CustomModelImportOutcome) {
+    if (outcome.refused.length === 0) return
+    const noun = outcome.refused.length === 1 ? 'model' : 'models'
+    alert(
+      `Imported ${outcome.imported} model${outcome.imported === 1 ? '' : 's'}. ` +
+        `${outcome.refused.length} ${noun} could not be registered:\n\n` +
+        outcome.refused.map((r) => `${r.id} — ${r.reason}`).join('\n'),
+    )
+  }
+
   async function handleImportCompatibleModels(freeOnly = false) {
     if (isImportingCompatibleModels) return
     const active = providerConnections.find((c) => c.isActive !== 0)
@@ -2479,21 +2496,22 @@
         alert('No models returned from /models.')
         return
       }
-      let imported = 0
+      const pending: CustomModelWrite[] = []
       for (const m of models) {
         const modelId = typeof m === 'string' ? m : (m.id || m.name || m.model || '')
         if (!modelId || compatibleRows.some((r) => r.id === modelId)) continue
         if (freeOnly && !isFreeTierModelId(modelId)) continue
-        await api.saveCustomModel(`${storageAlias}|${modelId}|llm`, {
+        pending.push({
           id: modelId,
-          providerAlias: storageAlias,
-          type: 'llm',
+          key: `${storageAlias}|${modelId}|llm`,
+          value: { id: modelId, providerAlias: storageAlias, type: 'llm' },
         })
-        imported += 1
       }
+      const outcome = await importCustomModelsBestEffort(pending, api.saveCustomModel)
       await refreshCompatibleModels()
-      if (imported > 0) notifyCustomModelsChanged()
-      else if (freeOnly) alert('No free models found in /models.')
+      if (outcome.imported > 0) notifyCustomModelsChanged()
+      else if (outcome.refused.length === 0 && freeOnly) alert('No free models found in /models.')
+      reportImportRefusals(outcome)
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to import models')
     } finally {
@@ -2534,7 +2552,7 @@
         alert('No models returned from /models.')
         return
       }
-      let imported = 0
+      const pending: CustomModelWrite[] = []
       for (const m of models) {
         const modelId = typeof m === 'string' ? m : (m.id || m.name || m.model || '')
         if (!modelId) continue
@@ -2560,19 +2578,24 @@
           typeof m === 'object' && m !== null && 'max_completion_tokens' in m
             ? Number(m.max_completion_tokens) || 0
             : 0
-        await api.saveCustomModel(`${storageAlias}|${modelId}|llm`, {
+        pending.push({
           id: modelId,
-          providerAlias: storageAlias,
-          type: 'llm',
-          ...(caps ? { caps } : {}),
-          ...(declaredCtxLen > 0 ? { contextWindow: declaredCtxLen } : {}),
-          ...(declaredMaxOut > 0 ? { maxOutput: declaredMaxOut } : {}),
+          key: `${storageAlias}|${modelId}|llm`,
+          value: {
+            id: modelId,
+            providerAlias: storageAlias,
+            type: 'llm',
+            ...(caps ? { caps } : {}),
+            ...(declaredCtxLen > 0 ? { contextWindow: declaredCtxLen } : {}),
+            ...(declaredMaxOut > 0 ? { maxOutput: declaredMaxOut } : {}),
+          },
         })
-        imported++
       }
+      const outcome = await importCustomModelsBestEffort(pending, api.saveCustomModel)
       const modelsData = await fetchProviderModelsData(providerId, storageAlias)
       customModels = modelsData.customModels
-      if (imported > 0) notifyCustomModelsChanged()
+      if (outcome.imported > 0) notifyCustomModelsChanged()
+      reportImportRefusals(outcome)
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to import models')
     } finally {
