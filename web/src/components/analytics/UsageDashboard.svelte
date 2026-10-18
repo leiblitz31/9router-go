@@ -9,6 +9,7 @@
   import Card from '../../lib/ui/Card.svelte'
   import ActivityHeatmap from './ActivityHeatmap.svelte'
   import NodeHealthTable from './NodeHealthTable.svelte'
+  import { isDetailsExpandedByDefault } from '../../lib/displayPrefs'
 
   let data = $state<UsageDashboardResponse | null>(null)
   let loading = $state(true)
@@ -25,6 +26,11 @@
   })
 
   const lifetime = $derived(data?.lifetime ?? null)
+
+  // Both detail panels start collapsed unless Settings > Display says
+  // otherwise; each one still opens on its own for the current view.
+  let heatmapOpen = $state(isDetailsExpandedByDefault())
+  let healthOpen = $state(isDetailsExpandedByDefault())
 
   interface CardDef {
     label: string
@@ -99,13 +105,17 @@
       </div>
     {/if}
 
-    <Card padding="md" title="Activity Heatmap" icon={calIcon}>
-      <ActivityHeatmap daily={data.daily || []} currentStreak={lifetime?.currentStreak ?? 0} />
+    <Card padding="md" title="Activity Heatmap" icon={calIcon} action={heatmapToggle}>
+      {#if heatmapOpen}
+        <ActivityHeatmap daily={data.daily || []} currentStreak={lifetime?.currentStreak ?? 0} />
+      {/if}
     </Card>
 
-    <Card padding="md" title="Node Health" icon={dnsIcon}>
-      <p class="mb-2 text-xs text-text-muted">Last 7 days (≥50 real requests)</p>
-      <NodeHealthTable nodes={data.nodes || []} models={data.models || []} />
+    <Card padding="md" title="Node Health" icon={dnsIcon} action={healthToggle}>
+      {#if healthOpen}
+        <p class="mb-2 text-xs text-text-muted">Last 7 days (≥50 real requests)</p>
+        <NodeHealthTable nodes={data.nodes || []} models={data.models || []} />
+      {/if}
     </Card>
   {/if}
 </div>
@@ -115,4 +125,36 @@
 {/snippet}
 {#snippet dnsIcon()}
   <span class="material-symbols-outlined text-[18px]" aria-hidden="true">dns</span>
+{/snippet}
+{#snippet heatmapToggle()}
+  <button
+    type="button"
+    aria-expanded={heatmapOpen}
+    aria-label="Toggle Activity Heatmap"
+    onclick={() => (heatmapOpen = !heatmapOpen)}
+    class="p-1 rounded-lg text-text-muted hover:text-text-main hover:bg-surface-2 transition-colors cursor-pointer"
+  >
+    <span
+      class="material-symbols-outlined text-[18px] transition-transform duration-200"
+      style:transform={heatmapOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
+    >
+      expand_more
+    </span>
+  </button>
+{/snippet}
+{#snippet healthToggle()}
+  <button
+    type="button"
+    aria-expanded={healthOpen}
+    aria-label="Toggle Node Health"
+    onclick={() => (healthOpen = !healthOpen)}
+    class="p-1 rounded-lg text-text-muted hover:text-text-main hover:bg-surface-2 transition-colors cursor-pointer"
+  >
+    <span
+      class="material-symbols-outlined text-[18px] transition-transform duration-200"
+      style:transform={healthOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
+    >
+      expand_more
+    </span>
+  </button>
 {/snippet}

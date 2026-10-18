@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, type APIKey, type APIKeyPolicy, type Plan } from '../../api/client'
   import { Loader2, Save, X } from 'lucide-svelte'
+  import { isNavEntryHidden } from '../../lib/navVisibility.svelte'
 
   interface Props {
     apiKey: APIKey
@@ -44,6 +45,10 @@
   let planId = $state(apiKey.planId ?? '')
   let plans = $state<Plan[]>([])
   let isLoadingPlans = $state(false)
+
+  // The Plan field belongs to the Advanced usage feature: with the sidebar
+  // entry hidden, the plans page is unreachable, so the field is not offered.
+  let plansHidden = $derived(isNavEntryHidden('plans'))
 
   function toLocalInput(rfc3339?: string): string {
     if (!rfc3339) return ''
@@ -94,7 +99,7 @@
   // planId leaves the stored assignment alone.
   $effect(() => {
     if (!hasLoadedModels) loadModels()
-    void loadPlans()
+    if (!plansHidden) void loadPlans()
   })
 
   async function loadPlans() {
@@ -226,33 +231,37 @@
         />
       </section>
 
-      <!-- F-3 plan template -->
-      <section class="space-y-3">
-        <div>
-          <h3 class="font-headline text-xs font-bold text-text-main">Plan</h3>
-          <p class="text-text-subtle mt-0.5">
-            The key inherits this plan's limits as defaults. Any limit set below overrides the plan.
-            Choose <span class="font-code">No plan</span> to detach the key.
-          </p>
-        </div>
-        <select
-          bind:value={planId}
-          aria-label="Plan"
-          class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs text-text-main focus:outline-none focus:border-brand-500"
-        >
-          <option value="">No plan — this key's own columns only</option>
-          {#each plans as plan (plan.id)}
-            <option value={plan.id}>{plan.name}</option>
-          {/each}
-        </select>
-        {#if isLoadingPlans}
-          <p class="text-text-subtle text-[11px]">Loading plans…</p>
-        {:else if plans.length === 0}
-          <p class="text-text-subtle text-[11px]">
-            No plans defined yet. Create one on the Plans page.
-          </p>
-        {/if}
-      </section>
+      <!-- F-3 plan template. Part of the Advanced usage feature: with the
+           sidebar entry hidden the plans page is unreachable, so the field goes
+           with it instead of pointing at a page that redirects. -->
+      {#if !plansHidden}
+        <section class="space-y-3">
+          <div>
+            <h3 class="font-headline text-xs font-bold text-text-main">Plan</h3>
+            <p class="text-text-subtle mt-0.5">
+              The key inherits this plan's limits as defaults. Any limit set below overrides the plan.
+              Choose <span class="font-code">No plan</span> to detach the key.
+            </p>
+          </div>
+          <select
+            bind:value={planId}
+            aria-label="Plan"
+            class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs text-text-main focus:outline-none focus:border-brand-500"
+          >
+            <option value="">No plan — this key's own columns only</option>
+            {#each plans as plan (plan.id)}
+              <option value={plan.id}>{plan.name}</option>
+            {/each}
+          </select>
+          {#if isLoadingPlans}
+            <p class="text-text-subtle text-[11px]">Loading plans…</p>
+          {:else if plans.length === 0}
+            <p class="text-text-subtle text-[11px]">
+              No plans defined yet. Create one on the Plans page.
+            </p>
+          {/if}
+        </section>
+      {/if}
 
       <!-- Rate limits -->
       <section class="space-y-3">

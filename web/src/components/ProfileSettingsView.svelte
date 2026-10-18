@@ -1,12 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import {
     AlertCircle,
     Check,
     Database,
     Download,
-    Eye,
-    EyeOff,
     Key,
     Laptop,
     Loader2,
@@ -26,6 +24,8 @@
   import Input from '../lib/ui/Input.svelte'
   import { api, getAuthHeaders, responseErrorMessage, type DatabaseStats, type Settings } from '../api/client'
   import { isCompactUnitsEnabled, setCompactUnits } from '../lib/compactNumber'
+  import { isDetailsExpandedByDefault, setDetailsExpandedByDefault } from '../lib/displayPrefs'
+  import { TOGGLEABLE_NAV_ENTRIES, orderHiddenNav, setNavVisible } from '../lib/nav'
 
   interface Props {
     settings?: Settings
@@ -62,9 +62,20 @@
   // Unit abbreviation is a localStorage-only preference (compactUnits key);
   // there is no server-side setting for it.
   let compactUnits = $state(isCompactUnitsEnabled())
+  // Usage detail panels (Activity Heatmap, Node Health) start collapsed; the
+  // switch below flips that default (detailsExpandedByDefault, localStorage).
+  let detailsExpanded = $state(isDetailsExpandedByDefault())
   let stickyRoundRobinLimit = $state(3)
   let comboStrategy = $state('first-model')
   let forceFallback = $state(false)
+
+  // Feature Visibility: ids of the sidebar entries this deployment hides. The
+  // entry list itself lives in web/src/lib/nav.ts, shared with the sidebar.
+  let hiddenNav = $state<string[]>([])
+  // A visibility change is not saved until the operator presses Save, so the
+  // button is offered on its own for a few seconds after a change.
+  let showSaveHint = $state(false)
+  let saveHintTimer: ReturnType<typeof setTimeout> | null = null
 
   // Password Management State
   let currentPassword = $state('')
@@ -130,6 +141,9 @@
       if (typeof settings.samlIssuer === 'string') samlIssuer = settings.samlIssuer
       if (typeof settings.samlCert === 'string') samlCert = settings.samlCert
       if (typeof settings.samlLoginLabel === 'string') samlLoginLabel = settings.samlLoginLabel
+
+      // Feature Visibility
+      hiddenNav = orderHiddenNav(settings.navVisibility)
     }
   })
 
@@ -142,6 +156,8 @@
         if (s.sessionTimeout) sessionTimeout = String(s.sessionTimeout)
         if (s.fallbackStrategy) fallbackStrategy = String(s.fallbackStrategy)
         if (typeof s.stickyRoundRobinLimit === 'number') stickyRoundRobinLimit = s.stickyRoundRobinLimit
+        // Feature Visibility
+        hiddenNav = orderHiddenNav(s.navVisibility)
         if (s.comboStrategy) comboStrategy = String(s.comboStrategy)
         if (typeof s.forceFallback === 'boolean') forceFallback = s.forceFallback
         enableSystemPrompt = !!s.systemPromptEnabled
@@ -175,6 +191,34 @@
     enableSystemPrompt = true
   }
 
+  /** Offers the save button for a few seconds after a visibility change. */
+  function markUnsaved() {
+    showSaveHint = true
+    if (saveHintTimer) clearTimeout(saveHintTimer)
+    saveHintTimer = setTimeout(() => (showSaveHint = false), 4000)
+  }
+
+  onDestroy(() => {
+    if (saveHintTimer) clearTimeout(saveHintTimer)
+  })
+
+  /**
+   * Any edit in the settings form raises the save reminder. Controls that save
+   * themselves opt out with data-save-hint="off": the Display card, whose
+   * preferences live in localStorage, the password form, the backup file
+   * picker, and the backup password dialog.
+   *
+   * The switches are <button role="switch">, so they emit click rather than
+   * input/change; every other button in the form either saves on its own or
+   * opens a dialog, so only a switch click counts.
+   */
+  function handleSettingsInput(event: Event) {
+    const target = event.target as HTMLElement | null
+    if (target?.closest('[data-save-hint="off"]')) return
+    if (event.type === 'click' && !target?.closest('button[role="switch"]')) return
+    markUnsaved()
+  }
+
   async function handleSaveAll() {
     isSavingSettings = true
     saveSuccess = false
@@ -198,12 +242,16 @@
         oidcClientId,
         oidcScopes,
         oidcLoginLabel,
+        navVisibility: { hidden: hiddenNav },
         samlEntryPoint,
         samlIssuer,
         samlCert,
         samlLoginLabel,
       })
       saveSuccess = true
+      showSaveHint = false
+      if (saveHintTimer) clearTimeout(saveHintTimer)
+      saveHintTimer = null
       onRefresh?.()
       setTimeout(() => (saveSuccess = false), 3000)
     } catch (err) {
@@ -432,8 +480,15 @@
     </button>
   </div>
 
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
-    <!-- SECTION: Display preferences (localStorage-backed, not saved server-side) -->
+  <div
+    class="grid grid-cols-1 lg:grid-cols-2 gap-5"
+    oninput={handleSettingsInput}
+    onchange={handleSettingsInput}
+    onclick={handleSettingsInput}
+  >
+    <!-- SECTION: Display. Unit abbreviation and the usage-detail default are
+         localStorage preferences; the sidebar switch below them is a saved
+         setting (navVisibility), so a change there raises the save reminder. -->
     <Card padding="md" class="space-y-4">
       <div class="flex items-center justify-between pb-2 border-b border-border">
         <div class="flex items-center gap-2">
@@ -447,16 +502,58 @@
           <p class="font-semibold text-text-main">Unit abbreviation</p>
           <p class="text-[11px] text-text-subtle">Large numbers as 亿/万 (zh) or M/B (en); off → full numbers</p>
         </div>
-        <Toggle
-          checked={compactUnits}
-          size="sm"
-          label="Unit abbreviation"
-          onChange={(val: boolean) => {
-            setCompactUnits(val)
-            compactUnits = isCompactUnitsEnabled()
-          }}
-        />
+        <div data-save-hint="off">
+          <Toggle
+            checked={compactUnits}
+            size="sm"
+            label="Unit abbreviation"
+            onChange={(val: boolean) => {
+              setCompactUnits(val)
+              compactUnits = isCompactUnitsEnabled()
+            }}
+          />
+        </div>
       </div>
+
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <p class="font-semibold text-text-main">Expand usage details</p>
+          <p class="text-[11px] text-text-subtle">
+            Activity Heatmap and Node Health open instead of starting collapsed
+          </p>
+        </div>
+        <div data-save-hint="off">
+          <Toggle
+            checked={detailsExpanded}
+            size="sm"
+            label="Expand usage details"
+            onChange={(val: boolean) => {
+              setDetailsExpandedByDefault(val)
+              detailsExpanded = isDetailsExpandedByDefault()
+            }}
+          />
+        </div>
+      </div>
+
+      {#each TOGGLEABLE_NAV_ENTRIES as entry (entry.id)}
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <p class="font-semibold text-text-main">Advanced usage</p>
+            <p class="text-[11px] text-text-subtle">
+              Off: {entry.label} leaves the sidebar, its URL stops resolving, and the API-key
+              editor hides the Plan field
+            </p>
+          </div>
+          <Toggle
+            checked={!hiddenNav.includes(entry.id)}
+            size="sm"
+            label="Advanced usage"
+            onChange={(val) => {
+              hiddenNav = setNavVisible(hiddenNav, entry.id, val)
+            }}
+          />
+        </div>
+      {/each}
     </Card>
     <!-- SECTION 1: Runtime Storage -->
     <Card padding="md" class="space-y-4">
@@ -502,6 +599,7 @@
 
           <input
             type="file"
+            data-save-hint="off"
             accept=".zip,.json,application/zip,application/json"
             bind:this={fileInput}
             onchange={handleFileSelected}
@@ -570,7 +668,7 @@
           </button>
 
           {#if showPasswordFields}
-            <form onsubmit={handleUpdatePassword} class="space-y-2.5 pt-3">
+            <form onsubmit={handleUpdatePassword} class="space-y-2.5 pt-3" data-save-hint="off">
               {#if passwordErrorMessage}
                 <div class="p-2.5 rounded-lg bg-danger/10 border border-danger/20 text-red-600 dark:text-red-400 text-[11px]">
                   {passwordErrorMessage}
@@ -951,13 +1049,29 @@
       </div>
     </Card>
 
+    <!-- Save reminder: an operator who flipped a switch must not walk away
+         without saving. It appears on a change and hides itself again after a
+         few seconds (markUnsaved). -->
+    {#if showSaveHint}
+      <div
+        role="status"
+        class="fixed bottom-5 right-5 z-40 flex items-center gap-3 rounded-[10px] border border-border bg-surface-2 px-4 py-3 shadow-[var(--shadow-elev)]"
+      >
+        <span class="text-xs text-text-muted">Unsaved changes</span>
+        <Button variant="primary" onclick={handleSaveAll} loading={isSavingSettings}>
+          <Save class="w-3.5 h-3.5" />
+          <span>Save</span>
+        </Button>
+      </div>
+    {/if}
+
     <Modal
       isOpen={dbAuthOpen}
       onClose={closeDbAuth}
       title={pendingImportFile ? 'Confirm Import' : 'Confirm Download'}
       size="sm"
     >
-      <div class="space-y-3">
+      <div class="space-y-3" data-save-hint="off">
         <p class="text-text-muted">
           {pendingImportFile
             ? `Import "${pendingImportFile.name}"? This will overwrite existing server data.`

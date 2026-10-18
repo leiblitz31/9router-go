@@ -244,6 +244,12 @@ export interface Settings {
   outboundProxyUrl?: string
   outboundNoProxy?: string
   providerStrategies?: Record<string, ProviderStrategyConfig>
+  /**
+   * Feature Visibility: sidebar entry ids the operator hid. The canonical id
+   * list lives in web/src/lib/nav.ts; the server only checks the shape
+   * (internal/handlers/dashboard/navvisibility.go).
+   */
+  navVisibility?: { hidden?: string[] }
   [key: string]: unknown
 }
 
