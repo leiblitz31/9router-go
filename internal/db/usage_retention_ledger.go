@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json/v2"
 	"fmt"
 	"log"
@@ -109,8 +110,8 @@ func (r *Repo) PruneUsageHistory(ctx context.Context, retention time.Duration) (
 		if len(chunk) == 0 {
 			break
 		}
-		carried := watched.fold(chunk)
-		if err := r.deleteLedgerChunk(ctx, chunk, carried); err != nil {
+		carried, err := r.deleteLedgerChunk(ctx, chunk, watched)
+		if err != nil {
 			return result, err
 		}
 		cursor = chunk[len(chunk)-1].rowid
@@ -214,6 +215,43 @@ func (w *ledgerWatchIndex) add(id, rawKey string, mark int64) {
 	w.byRaw[rawKey] = append(w.byRaw[rawKey], i)
 }
 
+// refreshMarks re-reads every watched key's reset mark through the caller's
+// transaction, so the marks a chunk is folded against are the ones that are
+// current at the instant the carryover commits.
+//
+// It only updates the marks in place; the index's key list is left alone,
+// because a key created after the prune started cannot own a row this pass is
+// deleting (that row predates the key's first request).
+func (w *ledgerWatchIndex) refreshMarks(ctx context.Context, tx *sql.Tx) error {
+	if len(w.keys) == 0 {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, COALESCE(`+quotaResetColumn+`, 0) FROM apiKeys`)
+	if err != nil {
+		return fmt.Errorf("refresh reset marks for carryover: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	marks := make(map[string]int64, len(w.keys))
+	for rows.Next() {
+		var id string
+		var mark int64
+		if err := rows.Scan(&id, &mark); err != nil {
+			return fmt.Errorf("scan reset mark for carryover: %w", err)
+		}
+		marks[id] = mark
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate reset marks for carryover: %w", err)
+	}
+	for i := range w.keys {
+		if mark, ok := marks[w.keys[i].id]; ok {
+			w.keys[i].mark = mark
+		}
+	}
+	return nil
+}
+
 // fold sums, per key, what this chunk contributed to that key's budget.
 //
 // The three lookups are exactly the three terms tokenUsageSince sums: the row's
@@ -293,21 +331,34 @@ func (r *Repo) readLedgerChunk(ctx context.Context, cursor int64, cutoff string)
 // deleteLedgerChunk carries the chunk's spend and deletes the chunk, in one
 // transaction. The rowids travel as a JSON array so the delete is bounded by the
 // rows that were folded: only rows whose spend was carried are removed.
-func (r *Repo) deleteLedgerChunk(ctx context.Context, chunk []ledgerRow, carried map[string]int64) error {
+//
+// The reset marks are re-read inside this transaction rather than reused from
+// PruneUsageHistory's up-front snapshot. A reset that commits mid-prune raises a
+// key's mark past the doomed rows and clears its carryover; folding against the
+// older mark would re-bank spend that reset had just forgiven, and the key would
+// be charged for it again. Reading the marks here — in the same transaction that
+// writes the carryover and deletes the rows — makes "which mark decided what to
+// carry" and "which rows are gone" the same instant.
+func (r *Repo) deleteLedgerChunk(ctx context.Context, chunk []ledgerRow, watched *ledgerWatchIndex) (map[string]int64, error) {
 	rowids := make([]int64, 0, len(chunk))
 	for _, row := range chunk {
 		rowids = append(rowids, row.rowid)
 	}
 	encoded, err := json.Marshal(rowids)
 	if err != nil {
-		return fmt.Errorf("encode usageHistory chunk rowids: %w", err)
+		return nil, fmt.Errorf("encode usageHistory chunk rowids: %w", err)
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("prune usageHistory: begin: %w", err)
+		return nil, fmt.Errorf("prune usageHistory: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	if err := watched.refreshMarks(ctx, tx); err != nil {
+		return nil, err
+	}
+	carried := watched.fold(chunk)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, keyID := range sortedKeyIDs(carried) {
@@ -316,20 +367,20 @@ func (r *Repo) deleteLedgerChunk(ctx context.Context, chunk []ledgerRow, carried
 			ON CONFLICT(keyId) DO UPDATE SET tokens = tokens + excluded.tokens, updatedAt = excluded.updatedAt`,
 			keyID, carried[keyID], now,
 		); err != nil {
-			return fmt.Errorf("carry usage tokens for key %s: %w", keyID, err)
+			return nil, fmt.Errorf("carry usage tokens for key %s: %w", keyID, err)
 		}
 	}
 
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM usageHistory WHERE rowid IN (SELECT value FROM json_each(?))`, string(encoded),
 	); err != nil {
-		return fmt.Errorf("delete usageHistory chunk: %w", err)
+		return nil, fmt.Errorf("delete usageHistory chunk: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("prune usageHistory: commit: %w", err)
+		return nil, fmt.Errorf("prune usageHistory: commit: %w", err)
 	}
-	return nil
+	return carried, nil
 }
 
 // sortedKeyIDs orders the carryover writes so a prune produces the same
