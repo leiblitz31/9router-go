@@ -408,7 +408,11 @@ func NormalizeAntigravityModel(model string) string {
 // decolua/9router#a07ed95b, refreshed by #24034f69). Every value was probed
 // live against daily-cloudcode-pa.googleapis.com on 2026-10-09.
 var antigravityUpstreamModelIDs = map[string]string{
-	// The 3.8 family serves one backend id per tier. The bare catalog id is
+	// Gemini 4 Argon family
+	"gemini-4-argon-high":   "gemini-4-argon-high",
+	"gemini-4-argon-medium": "gemini-4-argon-medium",
+	"gemini-4-argon-low":    "gemini-4-argon-low",
+	"gemini-4-argon":        "gemini-4-argon-medium",
 	// the medium tier.
 	"gemini-4-argon-high":   "gemini-4-argon-high",
 	"gemini-3.8-flash":        "gemini-3.8-flash-medium",
@@ -629,7 +633,7 @@ func replaceThoughtSignaturesRecursive(v any, replacement string) {
 // fixup: role correction for functionResponse, stripping of thought-only parts
 // that Gemini 3 rejects, and backfilling of thoughtSignature on functionCall
 // parts (parity with open-sse/executors/antigravity.js).
-func fixAntigravityContents(req *GeminiRequest) bool {
+func fixAntigravityContents(req *GeminiRequest, model string) bool {
 	if req == nil || len(req.Contents) == 0 {
 		return false
 	}
@@ -686,7 +690,7 @@ func fixAntigravityContents(req *GeminiRequest) bool {
 		}
 		fixed[i] = GeminiContent{Role: role, Parts: filtered}
 	}
-	normalized := NormalizeGeminiContents(fixed)
+	normalized := NormalizeGeminiContentsForModel(fixed, model)
 	if changed || len(normalized) != len(req.Contents) {
 		req.Contents = normalized
 		return true
@@ -707,7 +711,7 @@ func WrapForAntigravity(geminiBody []byte, projectID, modelName string) ([]byte,
 	var geminiReq GeminiRequest
 	if err := json.Unmarshal(geminiBody, &geminiReq); err == nil {
 		contentCount = len(geminiReq.Contents)
-		fixAntigravityContents(&geminiReq)
+		fixAntigravityContents(&geminiReq, modelName)
 		cleanedReq := StripCompetitivePrompts(&geminiReq)
 		if len(cleanedReq.Tools) > 0 {
 			cloaked, _ := CloakAntigravityRequest(cleanedReq, "")

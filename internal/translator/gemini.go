@@ -462,7 +462,28 @@ func TranslateOpenAIToGemini(openaiBody []byte) ([]byte, error) {
 	return out, nil
 }
 
-// extractThoughtSig extracts a thought_signature encoded in a tool call ID (format: "...__ts__<sig>").
+func isGemini4Model(model string) bool {
+	m := strings.ToLower(model)
+	return strings.Contains(m, "gemini-4") || strings.Contains(m, "gemini-argon")
+}
+
+// moveFunctionResponsesLast places all functionResponse parts at the end of the parts array for Gemini 4 models.
+func moveFunctionResponsesLast(parts []GeminiPart) []GeminiPart {
+	var nonResp []GeminiPart
+	var resp []GeminiPart
+	for _, p := range parts {
+		if p.FunctionResponse != nil {
+			resp = append(resp, p)
+		} else {
+			nonResp = append(nonResp, p)
+		}
+	}
+	if len(resp) == 0 {
+		return parts
+	}
+	return append(nonResp, resp...)
+}
+
 func extractThoughtSig(id string) string {
 	const sep = "__ts__"
 	if _, after, ok := strings.CutLast(id, sep); ok && after != "" {
@@ -1039,9 +1060,13 @@ func NormalizeGeminiContents(contents []GeminiContent, model ...string) []Gemini
 				out[len(out)-1].Parts = moveGeminiFunctionResponsesLast(out[len(out)-1].Parts)
 			}
 		} else {
+			parts := validParts
+			if c.Role == "user" && isGemini4 {
+				parts = moveFunctionResponsesLast(parts)
+			}
 			out = append(out, GeminiContent{
 				Role:  c.Role,
-				Parts: validParts,
+				Parts: parts,
 			})
 		}
 	}
