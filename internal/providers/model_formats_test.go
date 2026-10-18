@@ -127,3 +127,22 @@ func TestIsOpencodeFreeTierModel(t *testing.T) {
 		})
 	}
 }
+
+// Port of upstream decolua/9router#4998: deepseek-v4.1-flash-free must inherit
+// the same family formats as deepseek-v4-flash (the .1 version segment broke
+// the upstream regex /^deepseek-v4-(pro|flash)/).
+func TestGetModelFormats_DeepseekV41FlashFree(t *testing.T) {
+	got, declared := GetModelFormats("oc", "deepseek-v4.1-flash-free")
+	if !declared {
+		t.Fatalf("deepseek-v4.1-flash-free not declared, want family fallback")
+	}
+	if got.TargetFormat != FormatOpenAI {
+		t.Errorf("TargetFormat = %q, want %q", got.TargetFormat, FormatOpenAI)
+	}
+	if !got.SupportsFormat(FormatClaude) {
+		t.Errorf("expected %q among supported formats %v", FormatClaude, got.SupportedFormats)
+	}
+	if !got.SupportsFormat(FormatOpenAIResponses) {
+		t.Errorf("expected %q among supported formats %v", FormatOpenAIResponses, got.SupportedFormats)
+	}
+}

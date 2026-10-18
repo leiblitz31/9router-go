@@ -447,6 +447,15 @@ func init() {
 			Vision: true, VideoInput: true, PDF: true, Reasoning: true, Tools: true,
 			ThinkingFormat: "openai", ThinkingCanDisable: new(false),
 		},
+		// OpenCode's glm-5.3-flash-free is served by their own inference
+		// service (not z.ai) which strictly validates the request body and
+		// rejects zai's `thinking:{type:"enabled"}` with 400 unknown field.
+		// It accepts `reasoning_effort` (OpenAI style) instead, so override
+		// the global *glm-5.3* pattern for this id (upstream #5003).
+		"glm-5.3-flash-free": {
+			Vision: true, Reasoning: true, Tools: true,
+			ThinkingFormat: "openai", ThinkingCanDisable: new(false),
+		},
 		// OpenCode Go's claude-haiku-5-5 rejects `thinking.type.enabled` — the
 		// shape the global *claude-haiku* pattern sends — with 400:
 		// `"thinking.type.enabled" is not supported for this model`. Use

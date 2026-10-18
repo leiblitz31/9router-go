@@ -180,6 +180,10 @@ var openCodeFamilyFormats = []struct {
 	{"muse_spark", openCodeZenResponsesFormat},
 	{"deepseek-v4-pro", openCodeZenFormats(FormatOpenAI, FormatOpenAI, FormatClaude, FormatOpenAIResponses)},
 	{"deepseek-v4-flash", openCodeZenFormats(FormatOpenAI, FormatOpenAI, FormatClaude, FormatOpenAIResponses)},
+	// Upstream decolua/9router#4998: the .1 version segment (deepseek-v4.1-flash-free)
+	// must inherit the same formats as the base v4 ids.
+	{"deepseek-v4.1-pro", openCodeZenFormats(FormatOpenAI, FormatOpenAI, FormatClaude, FormatOpenAIResponses)},
+	{"deepseek-v4.1-flash", openCodeZenFormats(FormatOpenAI, FormatOpenAI, FormatClaude, FormatOpenAIResponses)},
 	{"minimax", openCodeZenFormats(FormatOpenAI, FormatOpenAI, FormatClaude)},
 	{"qwen", openCodeZenFormats(FormatOpenAI, FormatOpenAI, FormatClaude)},
 	{"claude-", openCodeZenFormats(FormatClaude, FormatClaude)},

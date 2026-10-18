@@ -268,3 +268,24 @@ func TestGetThinkingLevels_ClaudeAdaptiveXHigh(t *testing.T) {
 		})
 	}
 }
+
+// Port of upstream decolua/9router#5003: OpenCode's glm-5.3-flash-free is
+// served by their own inference service (not z.ai) which strictly validates
+// the request body and rejects zai's `thinking:{type:"enabled"}` with 400
+// unknown field. It accepts `reasoning_effort` (OpenAI style) instead.
+func TestOpencodeGoGlm53FlashFreeUsesReasoningEffort(t *testing.T) {
+	caps := capabilitiesOf(t, "opencode-go", "glm-5.3-flash-free")
+	if caps.ThinkingFormat != "openai" {
+		t.Errorf("glm-5.3-flash-free on opencode-go resolved ThinkingFormat=%q, want %q",
+			caps.ThinkingFormat, "openai")
+	}
+	if !caps.Reasoning {
+		t.Errorf("glm-5.3-flash-free on opencode-go lost Reasoning flag")
+	}
+	// The global *glm-5.3* pattern still sends zai shape for other providers.
+	global := capabilitiesOf(t, "z-ai", "glm-5.3-flash")
+	if global.ThinkingFormat != "zai" {
+		t.Errorf("glm-5.3-flash on z-ai resolved ThinkingFormat=%q, want %q",
+			global.ThinkingFormat, "zai")
+	}
+}
