@@ -2,6 +2,7 @@ package translator
 
 import (
 	json "encoding/json/v2"
+	"reflect"
 	"strings"
 )
 
@@ -158,13 +159,10 @@ func sameTail(repaired, original []any) bool {
 	if !aOK || !bOK {
 		return true
 	}
-	left, err := json.Marshal(a)
-	if err != nil {
-		return true
-	}
-	right, err := json.Marshal(b)
-	if err != nil {
-		return true
-	}
-	return string(left) == string(right)
+	// Compare the decoded values, not their JSON text: json/v2 marshals a Go map
+	// in a non-deterministic order (v1 sorted the keys, v2 does not), so two
+	// identical messages serialise differently about half the time. Comparing
+	// text made this report a change that had not happened, and the caller then
+	// re-encoded a body it should have forwarded untouched.
+	return reflect.DeepEqual(a, b)
 }
