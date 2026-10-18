@@ -156,7 +156,7 @@ type geminiWebRequestEnvelope struct {
 // provider's turns are self-contained (see geminiWebSlotMetadata), so nothing here
 // needs the frozen-transcript rendering that a session-persisting caller does.
 func geminiWebMessagesToPrompt(messages []deepSeekMessage) string {
-	return strings.TrimSpace(deepSeekMessagesToPrompt(messages, 0))
+	return strings.TrimSpace(deepSeekMessagesToPrompt(messages, 0, false))
 }
 
 // geminiWebCatalogAlias maps the catalog model ids this provider advertises onto
