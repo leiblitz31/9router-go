@@ -219,21 +219,7 @@
           </div>
           <div class="flex gap-2 items-center">
             {#if status.running}
-              <select
-                bind:value={workers}
-                disabled={harvesting}
-                class="bg-muted border border-border rounded-md px-2 py-1 text-sm"
-                title="Jumlah koneksi paralel saat fetch (lebih tinggi = lebih cepat tapi rawan rate-limit)"
-              >
-                <option value={3}>3 par</option>
-                <option value={5}>5 par</option>
-                <option value={10}>10 par</option>
-                <option value={15}>15 par</option>
-                <option value={30}>30 par</option>
-              </select>
-              <Button variant="outline" size="sm" disabled={toggling || harvesting} onclick={handleHarvest}>
-                {harvesting ? '⏳ Harvesting...' : '🌾 Harvest Proxy'}
-              </Button>
+              <!-- Harvest disabled 2026-10-18: free proxy lists dead, gives false hope -->
               <Button variant="outline" size="sm" disabled={toggling} onclick={handleRestart}>
                 Restart
               </Button>
@@ -299,8 +285,7 @@
           </div>
           {#if proxies.length === 0}
             <div class="rounded-lg bg-surface-2 p-4 text-center text-sm text-muted">
-              Pool kosong. Klik <span class="font-medium">🌾 Harvest Proxy</span> untuk mencari proxy baru,
-              atau tunggu harvest otomatis (tiap 10 menit).
+              Pool kosong. Gunakan tombol <span class="font-medium">⚡ WARP</span> untuk generate proxy Cloudflare.
             </div>
           {:else}
             <div class="max-h-96 overflow-y-auto rounded-lg border border-border-subtle">

@@ -150,23 +150,12 @@ func (m *Manager) Start() error {
 }
 
 // harvestLoop periodically fetches and validates proxies in the background.
+// DISABLED 2026-10-18: free proxy lists are dead (0% hit rate), auto-harvest
+// gives false hope. Manual harvest via API still works if needed.
 func (m *Manager) harvestLoop(ctx context.Context, srv *petaniproxy.Server) {
 	defer m.wg.Done()
-
-	// Initial harvest (don't block startup)
-	go m.doHarvest(ctx, srv, 0)
-
-	ticker := time.NewTicker(harvestInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			m.doHarvest(ctx, srv, 0)
-		}
-	}
+	// Disabled: do nothing, just wait for context cancellation.
+	<-ctx.Done()
 }
 
 // doHarvest fetches proxy candidates, validates them, and updates the pool.
