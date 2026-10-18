@@ -27,6 +27,11 @@ type UpstreamError struct {
 	// where the response is still in hand, so this is the only chance to keep
 	// them.
 	Header http.Header
+	// ReadErr records a failure to read the error body in full (a truncated or
+	// mis-declared response). The status and whatever bytes arrived are still
+	// valid and callers branch on the status, so a read failure must not erase
+	// it — See doRequestOnce.
+	ReadErr error
 }
 
 func (e *UpstreamError) Error() string {
@@ -361,9 +366,6 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 	if resp.StatusCode != http.StatusOK {
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 		resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("upstream returned %d and body read failed: %w", resp.StatusCode, readErr)
-		}
 		// PR #4988: If a proxied request returns 403 FreeTierError, the proxy's
 		// egress IP has been flagged. Replay once on direct egress (unless
 		// strictProxy is set).
@@ -378,7 +380,10 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 				log.Warn("proxy", "direct replay after 403 failed, surfacing original 403", "url", url, "error", directErr)
 			}
 		}
-		return nil, &UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
+		// Keep the status even when the body could not be read in full. The
+		// status is the part callers act on: retryable-error classification,
+		// account failover and the free-tier refusal check all branch on it.
+		return nil, &UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header, ReadErr: readErr}
 	}
 	return resp, nil
 }
