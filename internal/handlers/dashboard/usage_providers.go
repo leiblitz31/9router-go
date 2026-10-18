@@ -1565,9 +1565,11 @@ var antigravityDashboardBaseURL = "https://cloudcode-pa.googleapis.com"
 // intentionally stays on PROD and is untouched.
 var antigravityDailyBaseURL = "https://daily-cloudcode-pa.googleapis.com"
 
-const antigravityDashboardUA = "antigravity/ide/2.11.0 darwin/arm64"
+const antigravityDashboardUA = providers.AntigravityCLIUserAgent
 
 var antigravityImportantModels = map[string]bool{
+	"gemini-4-argon-high": true, "gemini-4-argon-medium": true, "gemini-4-argon-low": true,
+	"gemini-4-argon":        true,
 	"gemini-3.8-flash-high": true, "gemini-3.8-flash-medium": true, "gemini-3.8-flash-low": true,
 	"gemini-3.7-flash-high": true, "gemini-3.7-flash-medium": true, "gemini-3.7-flash-low": true,
 	"gemini-3.6-flash-high": true, "gemini-3.6-flash-medium": true, "gemini-3.6-flash-low": true,
@@ -1586,7 +1588,7 @@ func antigravityDashboardHeaders(accessToken string) map[string]string {
 		"User-Agent":       antigravityDashboardUA,
 		"Content-Type":     "application/json",
 		"X-Client-Name":    "antigravity",
-		"X-Client-Version": "2.11.0",
+		"X-Client-Version": providers.AntigravityIDEVersion,
 	}
 }
 
@@ -1688,6 +1690,8 @@ func fetchAntigravityDashboardUsage(ctx context.Context, accessToken, projectID 
 		for key, wq := range weekly {
 			if key == "gemini_weekly" {
 				antigravityReconcileFamily(quotas, "gemini-", "image", wq)
+			} else if key == "argon_weekly" {
+				antigravityReconcileFamily(quotas, "gemini-4-argon", "", wq)
 			} else if key == "claude_gpt_weekly" {
 				antigravityReconcileFamily(quotas, "claude-", "", wq)
 			}
@@ -1757,6 +1761,11 @@ func fetchAntigravityDashboardWeekly(ctx context.Context, accessToken, projectID
 		session familyTarget
 	}
 	configs := []familyConfig{
+		{
+			pattern: "argon",
+			weekly:  familyTarget{"argon_weekly", "Gemini 4 Argon (Weekly)", "weekly"},
+			session: familyTarget{"argon_session", "Gemini 4 Argon (5h)", "5h"},
+		},
 		{
 			pattern: "gemini",
 			weekly:  familyTarget{"gemini_weekly", "Gemini (Weekly)", "weekly"},
