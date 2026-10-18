@@ -187,7 +187,7 @@ func TestHandleGetModelCaps_CustomModelsOnNode(t *testing.T) {
 		t.Fatalf("custom model missing from caps map: %s", rec.Body.String())
 	}
 	if !entry.Vision {
-	t.Error("saved vision cap not carried into the caps map")
+		t.Error("saved vision cap not carried into the caps map")
 	}
 	if entry.ContextWindow != 256000 || entry.MaxOutput != 16000 {
 		t.Errorf("limits = (%d, %d), want (256000, 16000)", entry.ContextWindow, entry.MaxOutput)
@@ -224,6 +224,27 @@ func TestHandleGetModelCaps_FreeTier(t *testing.T) {
 			}
 			if entry.Free != tt.wantFree {
 				t.Errorf("model %q Free = %v, want %v", tt.model, entry.Free, tt.wantFree)
+			}
+		})
+	}
+}
+
+func TestIsModelFree_ThinkingSuffix(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		modelID  string
+		want     bool
+	}{
+		{name: "thinking suffix on free model", provider: "opencode-zen", modelID: "nemotron-3-ultra-free(high)", want: true},
+		{name: "medium thinking suffix on free model", provider: "opencode", modelID: "deepseek-v4-flash-free(medium)", want: true},
+		{name: "thinking suffix on paid model", provider: "opencode-zen", modelID: "gpt-5.5(high)", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isModelFree(tt.provider, tt.modelID)
+			if got != tt.want {
+				t.Errorf("isModelFree(%q, %q) = %v, want %v", tt.provider, tt.modelID, got, tt.want)
 			}
 		})
 	}

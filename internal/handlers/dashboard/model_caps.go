@@ -17,11 +17,16 @@ import (
 // Suffix precedence: a model explicitly identified with :free, /free, or -free
 // in the catalog or registry is treated as free, even if the generic vendor table
 // lists a fallback rate for the unadorned model name (e.g. deepseek-v4-flash-free).
+// Suffixes encoding thinking levels (e.g. "(high)") are stripped before evaluation.
 func isModelFree(provider, modelID string) bool {
-	if providers.IsFreeTierModel(modelID) {
+	cleanID := modelID
+	if parenIdx := strings.IndexByte(cleanID, '('); parenIdx != -1 {
+		cleanID = strings.TrimSpace(cleanID[:parenIdx])
+	}
+	if providers.IsFreeTierModel(cleanID) {
 		return true
 	}
-	if p, ok := pricing.GetPricingForModel(provider, modelID); ok {
+	if p, ok := pricing.GetPricingForModel(provider, cleanID); ok {
 		if p.InputPer1M == 0 && p.OutputPer1M == 0 {
 			return true
 		}
