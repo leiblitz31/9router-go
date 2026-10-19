@@ -31,6 +31,7 @@
     CURRENCY_CATALOG,
     DEFAULT_RATES,
     describeRates,
+    describeRefreshRates,
     formatCost,
     normalizeDisplayCurrency,
     type DisplayCurrency
@@ -296,7 +297,14 @@
         codes: CURRENCY_CATALOG.map((option) => option.code),
       })
       applyCurrency(result.displayCurrency)
-      ratesMessage = `Refreshed ${result.ratesStored} rates from ${new URL(result.source).host}.`
+      // The server overlays the provider's rates on the manual table, so a code
+      // it did not publish kept its rate; say so instead of letting the count
+      // read as if those rates had been dropped.
+      ratesMessage = describeRefreshRates(
+        result.ratesStored,
+        result.ratesMissing,
+        new URL(result.source).host
+      )
       onRefresh?.()
     } catch (err) {
       ratesMessage = `Refresh failed, the rates below are unchanged: ${
