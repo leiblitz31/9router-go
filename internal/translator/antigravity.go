@@ -420,7 +420,6 @@ var antigravityUpstreamModelIDs = map[string]string{
 	"gemini-4-argon-low":    "gemini-4-argon-low",
 	// The 3.8 family serves one backend id per tier. The bare catalog id is
 	// the medium tier.
-	"gemini-4-argon-high":   "gemini-4-argon-high",
 	"gemini-3.8-flash":        "gemini-3.8-flash-medium",
 	"gemini-3.8-flash-high":   "gemini-3.8-flash-high",
 	"gemini-3.8-flash-medium": "gemini-3.8-flash-medium",
@@ -696,7 +695,7 @@ func fixAntigravityContents(req *GeminiRequest, model string) bool {
 		}
 		fixed[i] = GeminiContent{Role: role, Parts: filtered}
 	}
-	normalized := NormalizeGeminiContentsForModel(fixed, model)
+	normalized := NormalizeGeminiContents(fixed, model)
 	if changed || len(normalized) != len(req.Contents) {
 		req.Contents = normalized
 		return true

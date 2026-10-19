@@ -1061,7 +1061,7 @@ func NormalizeGeminiContents(contents []GeminiContent, model ...string) []Gemini
 			}
 		} else {
 			parts := validParts
-			if c.Role == "user" && isGemini4 {
+			if c.Role == "user" && frLast {
 				parts = moveFunctionResponsesLast(parts)
 			}
 			out = append(out, GeminiContent{

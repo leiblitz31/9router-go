@@ -46,7 +46,6 @@ func IsAlwaysProtectedPath(path string) bool {
 	switch path {
 	case "/api/shutdown",
 		"/api/settings/database",
-		"/api/settings/database/stats",
 		"/api/settings/database/prune",
 		"/api/settings/database/prune-usage",
 		"/api/settings/database/vacuum",

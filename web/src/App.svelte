@@ -335,7 +335,7 @@
     <div
       class="fixed inset-y-0 left-0 z-50 lg:static transition-transform duration-300 transform lg:transform-none {isMobileMenuOpen
         ? 'translate-x-0'
-        : '-translate-x-full lg:translate-x-0'}"
+        : '-translate-x-full lg:translate-x-0 pointer-events-none lg:pointer-events-auto'}"
     >
       <Sidebar
         bind:activeTab
@@ -386,7 +386,7 @@
             </div>
           {:else}
             {#if activeTab === 'endpoint'}
-              <EndpointView {apiKeys} {settings} onRefresh={loadData} />
+              <EndpointView {apiKeys} {settings} onRefresh={loadData} navigate={(tab) => navigate(tab)} />
             {:else if activeTab === 'connections'}
               <ConnectionsView
                 {connections}

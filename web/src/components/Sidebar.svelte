@@ -71,7 +71,7 @@
 
   function handleNav(tab: ActiveTab, e?: MouseEvent) {
     if (e) {
-      if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) return
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || (e.button !== undefined && e.button !== 0)) return
       e.preventDefault()
     }
     navigate(tab)

@@ -3,7 +3,8 @@ package providers
 import (
 	"slices"
 	"testing"
-<<<<<<< HEAD
+
+	"9router/proxy/internal/pricing"
 )
 
 // TestGemini4ArgonRegistry is the Go port of upstream's
@@ -58,10 +59,6 @@ func TestGemini3KeepsMinimalLevel(t *testing.T) {
 	if !slices.Contains(levels, "minimal") {
 		t.Errorf("gemini-3.8-flash levels = %v, want minimal included", levels)
 	}
-=======
-
-	"9router/proxy/internal/pricing"
-)
 
 // Gemini 4 Argon (2026-10): unified 1M window, tunable thinking low|medium|high
 // (no minimal), paid only, intro pricing $2/$10. Regression coverage for the
@@ -148,5 +145,4 @@ func TestGemini4ArgonWiring(t *testing.T) {
 			}
 		}
 	})
->>>>>>> 1f06430 (feat(providers): port Gemini 4 Argon capabilities, Antigravity 2.23.0 bump, and OpenCode Go Gemini wire (#382))
 }

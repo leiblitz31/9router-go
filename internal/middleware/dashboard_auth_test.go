@@ -78,6 +78,10 @@ func TestRequireDashboardAuth(t *testing.T) {
 	if rec := serve(httptest.NewRequest(http.MethodGet, "/api/connections", nil)); rec.Code != http.StatusOK {
 		t.Errorf("expected open dashboard when requireLogin=false, got %d", rec.Code)
 	}
+	// Database stats is a read-only stats endpoint and must be accessible when requireLogin=false.
+	if rec := serve(httptest.NewRequest(http.MethodGet, "/api/settings/database/stats", nil)); rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for database stats when requireLogin=false, got %d", rec.Code)
+	}
 	// Always-protected routes reject client API key even if key is valid.
 	apiDbReq := httptest.NewRequest(http.MethodGet, "/api/settings/database", nil)
 	apiDbReq.Header.Set("Authorization", "Bearer valid-token")
