@@ -569,12 +569,10 @@ func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 }
 
 // ForwardOpencode handles requests for opencode (free tier).
+// The free-tier gate is keyless: every request travels with the v2 CLI
+// fingerprint and "Bearer public" (stamped by proxy.BuildOpenCodeHeaders),
+// never with the caller's key.
 func ForwardOpencode(w http.ResponseWriter, req *Request) error {
-	apiKey := req.APIKey
-	if apiKey == "" {
-		apiKey = "public"
-	}
-
 	var reqObj struct {
 		Model string `json:"model"`
 	}
@@ -600,12 +598,18 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		// The free-tier gate fingerprints the lowercase tool quartet; capitalised
 		// variants from Claude Code CLI are renamed here and restored on the
 		// response (translator.ConcealFingerprintTools).
-		transformedBody, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(transformedBody, true, isOpenCodeAutoToolChoiceModel(cleanModel))
-		req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
-		w = NewToolNameRestoringWriter(w, toolNameMap)
+		preConceal := transformedBody
+		conceal := func(full bool) ([]byte, map[string]string) {
+			if full {
+				return translator.ConcealOpenCodeV2FullGateTools(preConceal, true, isOpenCodeAutoToolChoiceModel(cleanModel), cleanModel)
+			}
+			return translator.ConcealOpenCodeV2FingerprintTools(preConceal, true, isOpenCodeAutoToolChoiceModel(cleanModel))
+		}
+		firstBody, firstMap := conceal(false)
 
 		cfg := *req.Config
 		isRelay := cfg.StaticHeaders != nil && cfg.StaticHeaders["x-relay-target"] != ""
+		targetURL := ""
 		if isRelay {
 			// Relay mode: BaseURL is the relay host (e.g. vercel-relay.vercel.app).
 			// Target endpoint must be set in x-relay-path, NOT by appending /responses to BaseURL.
@@ -614,21 +618,32 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 				cfg.StaticHeaders[k] = v
 			}
 			cfg.StaticHeaders["x-relay-path"] = "/inference/v1/responses"
+			targetURL = strings.TrimRight(cfg.BaseURL, "/")
 		} else {
 			baseURL := strings.TrimRight(cfg.BaseURL, "/")
 			baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
-			cfg.BaseURL = opencodeInferenceBase(baseURL) + "/responses"
+			targetURL = opencodeInferenceBase(baseURL) + "/responses"
 		}
-		cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, req.SessionID, req.IsStream)
+		rawHeaders := cfg.StaticHeaders
 		ctx := req.Ctx
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, apiKey, transformedBody, req.IsStream)
+		// DoRequest (not ForwardOpenAI): the CLI sends Accept: */* even when
+		// streaming, and ForwardOpenAI would clobber it with
+		// text/event-stream. Headers carry Bearer public (NoAuth provider).
+		send := func(session string, body []byte) (*http.Response, error) {
+			headers := proxy.BuildOpenCodeHeaders(rawHeaders, session, req.IsStream)
+			return proxy.DoRequest(ctx, req.Client, "POST", targetURL, headers, body)
+		}
+		resp, toolNameMap, _, err := opencodeGateRequest(send, req.SessionID, firstBody, firstMap,
+			func() ([]byte, map[string]string) { return conceal(true) })
 		if err != nil {
 			return fmt.Errorf("ForwardOpencode (muse-spark responses): %w", err)
 		}
 		defer resp.Body.Close()
+		req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
+		w = NewToolNameRestoringWriter(w, toolNameMap)
 
 		if resp.StatusCode != http.StatusOK {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
@@ -644,10 +659,6 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	}
 
 	body := InjectReasoningContent(req.Body, "opencode")
-	// opencode Chat Completions path: same conceal + restore of tool names.
-	body, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
-	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
-	w = NewToolNameRestoringWriter(w, toolNameMap)
 
 	// Upstream OpenCode free tier strictly requires stream=true.
 	// Non-streaming calls are blocked with 403 FreeTierError.
@@ -665,19 +676,39 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		}
 	}
 
+	// opencode Chat Completions path: same conceal + restore of tool names.
+	preConceal := body
+	conceal := func(full bool) ([]byte, map[string]string) {
+		if full {
+			return translator.ConcealOpenCodeV2FullGateTools(preConceal, false, isOpenCodeAutoToolChoiceModel(cleanModel), cleanModel)
+		}
+		return translator.ConcealOpenCodeV2FingerprintTools(preConceal, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+	}
+	firstBody, firstMap := conceal(false)
+
 	cfg := *req.Config
-	cfg.BaseURL = opencodeChatURL(cfg.BaseURL)
-	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, req.SessionID, true)
+	targetURL := opencodeChatURL(cfg.BaseURL)
+	rawHeaders := cfg.StaticHeaders
 
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, apiKey, body, true)
+	// DoRequest (not ForwardOpenAI): the CLI sends Accept: */* even when
+	// streaming, and ForwardOpenAI would clobber it with
+	// text/event-stream. Headers carry Bearer public (NoAuth provider).
+	send := func(session string, b []byte) (*http.Response, error) {
+		headers := proxy.BuildOpenCodeHeaders(rawHeaders, session, true)
+		return proxy.DoRequest(ctx, req.Client, "POST", targetURL, headers, b)
+	}
+	resp, toolNameMap, _, err := opencodeGateRequest(send, req.SessionID, firstBody, firstMap,
+		func() ([]byte, map[string]string) { return conceal(true) })
 	if err != nil {
 		return fmt.Errorf("ForwardOpencode: %w", err)
 	}
 	defer resp.Body.Close()
+	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
+	w = NewToolNameRestoringWriter(w, toolNameMap)
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))

@@ -229,7 +229,8 @@ func TestConcealOpenCodeV2CanonicalizesHarnessShapes(t *testing.T) {
 		}
 	})
 
-	t.Run("an exact caller read definition is kept without aliasing", func(t *testing.T) {		tool, err := openCodeV2Tool("read", false)
+	t.Run("an exact caller read definition is kept without aliasing", func(t *testing.T) {
+		tool, err := openCodeV2Tool("read", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -394,5 +395,83 @@ func TestConcealOpenCodeV2CollidingNamesStillAppendExact(t *testing.T) {
 				t.Errorf("tool order = %v, want %v: %s", order, want, out)
 			}
 		})
+	}
+}
+
+func TestOpenCodeFullGateToolNames(t *testing.T) {
+	nonGPT := OpenCodeFullGateToolNames("mimo-v2.6-flash-free")
+	if len(nonGPT) != 13 {
+		t.Fatalf("expected 13 tools for non-GPT model, got %d (%v)", len(nonGPT), nonGPT)
+	}
+	set := make(map[string]bool, len(nonGPT))
+	for _, n := range nonGPT {
+		set[n] = true
+	}
+	for _, want := range []string{"read", "shell", "edit", "write", "glob", "grep", "webfetch"} {
+		if !set[want] {
+			t.Errorf("full gate set missing %q: %v", want, nonGPT)
+		}
+	}
+	if set["patch"] {
+		t.Errorf("non-GPT model must not carry patch: %v", nonGPT)
+	}
+
+	gpt := OpenCodeFullGateToolNames("gpt-5-free")
+	gset := make(map[string]bool, len(gpt))
+	for _, n := range gpt {
+		gset[n] = true
+	}
+	if !gset["patch"] {
+		t.Errorf("GPT model must carry patch instead of edit/write: %v", gpt)
+	}
+	if gset["edit"] || gset["write"] {
+		t.Errorf("GPT model must not carry edit/write: %v", gpt)
+	}
+	if !gset["read"] {
+		t.Errorf("gate anchor read must survive the swap: %v", gpt)
+	}
+}
+
+func TestConcealOpenCodeV2FullGateTools(t *testing.T) {
+	body := `{"model":"mimo-v2.6-flash-free","messages":[{"role":"user","content":"hi"}]}`
+	out, nameMap := ConcealOpenCodeV2FullGateTools([]byte(body), false, false, "mimo-v2.6-flash-free")
+	var req struct {
+		Tools []struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(req.Tools) != 13 {
+		t.Fatalf("expected 13 escalated tools, got %d", len(req.Tools))
+	}
+	names := make(map[string]bool, len(req.Tools))
+	for _, tl := range req.Tools {
+		names[tl.Function.Name] = true
+	}
+	for _, want := range OpenCodeFullGateToolNames("mimo-v2.6-flash-free") {
+		if !names[want] {
+			t.Errorf("escalated body missing tool %q", want)
+		}
+	}
+	if len(nameMap) != 0 {
+		t.Errorf("expected no aliases on a clean body, got %v", nameMap)
+	}
+	// The flat (Responses) lane carries the same name set.
+	flatOut, _ := ConcealOpenCodeV2FullGateTools([]byte(body), true, false, "mimo-v2.6-flash-free")
+	var flatReq struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(flatOut, &flatReq); err != nil {
+		t.Fatalf("unmarshal flat: %v", err)
+	}
+	if len(flatReq.Tools) != 13 {
+		t.Fatalf("expected 13 escalated tools on flat lane, got %d", len(flatReq.Tools))
 	}
 }

@@ -12,7 +12,9 @@ import (
 const (
 	// DefaultOpenCodeUA is the official OpenCode fingerprint User-Agent.
 	// OpenCode v2 fingerprint required by the free-tier /inference/v1 API.
-	DefaultOpenCodeUA = "opencode/latest/2.0.29/cli"
+	// Bumped to the current CLI release (azrinaldi/opencode-free-bridge
+	// derives this from the update API instead of hardcoding it).
+	DefaultOpenCodeUA = "opencode/latest/2.0.32/cli"
 
 	// DefaultOpenCodeV1UA is the pre-v2 identity kept by the keyed lanes
 	// (opencode-zen, opencode-go): upstream decolua/9router#4842 moves only
@@ -122,7 +124,26 @@ func HasValidOpenCodeV1Version(ua string) bool {
 
 var opencodeV1UARegex = regexp.MustCompile(`(?i)opencode/(\d+)\.(\d+)(?:\.(\d+))?`)
 
+// openCodeTraceHeaders mints a fresh W3C trace context shaped like the
+// OpenCode CLI's: random per request, one 128-bit trace with a 64-bit span,
+// b3 carrying the parent span id
+// (azrinaldi/opencode-free-bridge server.js buildTraceHeaders).
+func openCodeTraceHeaders() (b3, traceparent string) {
+	var traceID [16]byte
+	var spanID, parentID [8]byte
+	_, _ = rand.Read(traceID[:])
+	_, _ = rand.Read(spanID[:])
+	_, _ = rand.Read(parentID[:])
+	tid := hex.EncodeToString(traceID[:])
+	sid := hex.EncodeToString(spanID[:])
+	pid := hex.EncodeToString(parentID[:])
+	return tid + "-" + sid + "-1-" + pid, "00-" + tid + "-" + sid + "-01"
+}
+
 // BuildOpenCodeHeaders generates the official OpenCode fingerprint headers to prevent 403 FreeTierError.
+// isStream is accepted for signature compatibility; the CLI sends Accept: */*
+// on every request (it streams via the body, not the header), so the header
+// no longer varies with it.
 func BuildOpenCodeHeaders(rawHeaders map[string]string, sessionID string, isStream bool) map[string]string {
 	var session string
 	if sessionID != "" {
@@ -131,6 +152,7 @@ func BuildOpenCodeHeaders(rawHeaders map[string]string, sessionID string, isStre
 		session = GenerateOpenCodeSessionID()
 	}
 
+	b3, traceparent := openCodeTraceHeaders()
 	res := map[string]string{
 		"Content-Type":          "application/json",
 		"Authorization":         "Bearer public",
@@ -143,11 +165,11 @@ func BuildOpenCodeHeaders(rawHeaders map[string]string, sessionID string, isStre
 		// Upstream defaults the project to "global"
 		// (open-sse/executors/opencode.js buildHeaders).
 		"x-opencode-project": "global",
-	}
-	if isStream {
-		res["Accept"] = "text/event-stream"
-	} else {
-		res["Accept"] = "*/*"
+		// The CLI always streams via the body, never via the Accept header,
+		// so it sends */* even for streaming requests.
+		"Accept":      "*/*",
+		"b3":          b3,
+		"traceparent": traceparent,
 	}
 	for _, h := range []string{"x-relay-target", "x-relay-path"} {
 		if v, ok := rawHeaders[h]; ok {

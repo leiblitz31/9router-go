@@ -9,6 +9,49 @@ import (
 const openCodeReadDescription = "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files."
 const openCodeShellDescription = "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete. DO NOT poll for completion."
 
+// openCodeFullGatePluginNames is the full tool profile the real OpenCode CLI
+// sends, seeded from the release's tool plugin basenames
+// (azrinaldi/opencode-free-bridge identity.js knownPlugins). The free-tier
+// gate only checks tool *names*, so the reactive 403 self-heal escalates to
+// this set: a renamed/added upstream tool is covered without a new release.
+var openCodeFullGatePluginNames = []string{
+	"edit", "glob", "grep", "mcp-resource", "opencode", "question",
+	"read", "shell", "skill", "subagent", "webfetch", "websearch", "write",
+}
+
+// OpenCodeFullGateToolNames returns the full tool profile for the 403
+// self-heal escalation. GPT models swap edit+write for patch, like the CLI
+// (identity.js applyToolOverrides: patch.ts installs a session hook that
+// swaps the editing tools per model).
+func OpenCodeFullGateToolNames(modelID string) []string {
+	id := strings.ToLower(modelID)
+	if strings.Contains(id, "gpt") && !strings.Contains(id, "oss") && !strings.Contains(id, "gpt-4") {
+		out := []string{"patch"}
+		for _, n := range openCodeFullGatePluginNames {
+			if n != "edit" && n != "write" {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	out := make([]string, 0, len(openCodeFullGatePluginNames))
+	for _, n := range openCodeFullGatePluginNames {
+		if n != "patch" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// openCodeV2FabricatedToolDefinition builds a gate-satisfying placeholder for
+// a tool whose exact CLI definition was not ported. The gate checks the name,
+// not the schema (identity.js GATE_ANCHOR_TOOL_NAMES measurements), and the
+// concealment note tells the model not to call placeholders.
+func openCodeV2FabricatedToolDefinition(name string) (description string, parameters map[string]any) {
+	return "OpenCode CLI tool `" + name + "` (free-tier gate fingerprint placeholder; do not call).",
+		map[string]any{"type": "object", "properties": map[string]any{}}
+}
+
 // ConcealOpenCodeV2FingerprintTools ports the OpenCode v2 read/shell
 // fingerprint and canonicalizes the request so any caller body — a clean
 // direct API client or a harness sending Claude/OpenAI shapes with extra
@@ -32,9 +75,25 @@ const openCodeShellDescription = "Execute a shell command and return its output.
 //
 // flat is true for Responses API bodies and false for Chat Completions.
 func ConcealOpenCodeV2FingerprintTools(body []byte, flat bool, forceAutoChoice bool) ([]byte, map[string]string) {
+	return concealOpenCodeV2Tools(body, flat, forceAutoChoice, []string{"read", "shell"})
+}
+
+// ConcealOpenCodeV2FullGateTools is the escalation variant used by the
+// reactive 403 self-heal: instead of just the read/shell fingerprint it
+// sends the full CLI tool profile (OpenCodeFullGateToolNames), so the retry
+// matches the real CLI's wire shape as closely as possible.
+func ConcealOpenCodeV2FullGateTools(body []byte, flat bool, forceAutoChoice bool, modelID string) ([]byte, map[string]string) {
+	return concealOpenCodeV2Tools(body, flat, forceAutoChoice, OpenCodeFullGateToolNames(modelID))
+}
+
+func concealOpenCodeV2Tools(body []byte, flat bool, forceAutoChoice bool, fingerprintNames []string) ([]byte, map[string]string) {
 	var request map[string]any
 	if len(body) == 0 || json.Unmarshal(body, &request) != nil {
 		return body, map[string]string{}
+	}
+	fingerprint := make(map[string]bool, len(fingerprintNames))
+	for _, n := range fingerprintNames {
+		fingerprint[n] = true
 	}
 	tools, _ := request["tools"].([]any)
 	nameMap := make(map[string]string)
@@ -44,10 +103,10 @@ func ConcealOpenCodeV2FingerprintTools(body []byte, flat bool, forceAutoChoice b
 			taken[name] = true
 		}
 	}
-	kept := make([]any, 0, len(tools)+2)
+	kept := make([]any, 0, len(tools)+len(fingerprintNames))
 	for _, tool := range tools {
 		name := toolNameOf(tool)
-		if name != "read" && name != "shell" {
+		if !fingerprint[name] {
 			kept = append(kept, tool)
 			continue
 		}
@@ -55,24 +114,31 @@ func ConcealOpenCodeV2FingerprintTools(body []byte, flat bool, forceAutoChoice b
 			continue
 		}
 		seen[name] = true
-		if isExactOpenCodeV2Definition(tool, name) {
+		if name == "read" || name == "shell" {
+			if isExactOpenCodeV2Definition(tool, name) {
+				kept = append(kept, tool)
+				continue
+			}
+			// PR #4972: try in-place normalization before falling back to alias.
+			// If the caller's tool has compatible arguments, replace description +
+			// parameters with the fingerprint's and keep the caller's name.
+			if canNormalizeInPlace(tool, name) {
+				normalizeToolInPlace(tool, name, flat)
+				kept = append(kept, tool)
+				continue
+			}
+			alias := name + "_client"
+			for i := 2; taken[alias]; i++ {
+				alias = name + "_client" + strconv.Itoa(i)
+			}
+			taken[alias], nameMap[alias] = true, name
+			setToolName(tool, alias)
 			kept = append(kept, tool)
 			continue
 		}
-		// PR #4972: try in-place normalization before falling back to alias.
-		// If the caller's tool has compatible arguments, replace description +
-		// parameters with the fingerprint's and keep the caller's name.
-		if canNormalizeInPlace(tool, name) {
-			normalizeToolInPlace(tool, name, flat)
-			kept = append(kept, tool)
-			continue
-		}
-		alias := name + "_client"
-		for i := 2; taken[alias]; i++ {
-			alias = name + "_client" + strconv.Itoa(i)
-		}
-		taken[alias], nameMap[alias] = true, name
-		setToolName(tool, alias)
+		// Other profile tools are name-anchored only (the gate checks the
+		// name, not the schema), so the caller's own definition is kept
+		// verbatim and the name counts as present.
 		kept = append(kept, tool)
 	}
 	request["tools"] = kept
@@ -103,14 +169,14 @@ func ConcealOpenCodeV2FingerprintTools(body []byte, flat bool, forceAutoChoice b
 	// the exact definition is still appended. Checking the pre-alias `seen`
 	// set instead would send no exact fingerprint at all and the gate 403s.
 	current, _ := request["tools"].([]any)
-	present := make(map[string]bool, 2)
+	present := make(map[string]bool, len(fingerprintNames))
 	for _, tool := range current {
-		if name := toolNameOf(tool); name == "read" || name == "shell" {
+		if name := toolNameOf(tool); fingerprint[name] {
 			present[name] = true
 		}
 	}
 	var appended []string
-	for _, name := range []string{"read", "shell"} {
+	for _, name := range fingerprintNames {
 		if present[name] {
 			continue
 		}
@@ -409,14 +475,23 @@ func openCodeV2Parameters(name string) string {
 }
 
 func openCodeV2Tool(name string, flat bool) (map[string]any, error) {
-	parameters := openCodeV2Parameters(name)
+	var description string
 	var schema map[string]any
-	if err := json.Unmarshal([]byte(parameters), &schema); err != nil {
-		return nil, err
-	}
-	description := openCodeReadDescription
-	if name == "shell" {
-		description = openCodeShellDescription
+	switch name {
+	case "read", "shell":
+		description = openCodeReadDescription
+		if name == "shell" {
+			description = openCodeShellDescription
+		}
+		var s map[string]any
+		if err := json.Unmarshal([]byte(openCodeV2Parameters(name)), &s); err != nil {
+			return nil, err
+		}
+		schema = s
+	default:
+		// Escalation-set placeholder: the gate checks the name, not the
+		// schema, and the concealment note tells the model not to call it.
+		description, schema = openCodeV2FabricatedToolDefinition(name)
 	}
 	if flat {
 		// Upstream appends flat tools with strict:false and asserts it.
