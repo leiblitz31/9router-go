@@ -25,7 +25,14 @@
   import Input from '../lib/ui/Input.svelte'
   import { api, getAuthHeaders, responseErrorMessage, type DatabaseStats, type Settings } from '../api/client'
   import { isCompactUnitsEnabled, setCompactUnits } from '../lib/compactNumber'
-  import { isDetailsExpandedByDefault, setDetailsExpandedByDefault } from '../lib/displayPrefs'
+  import {
+    isComboFlowVisible,
+    isDetailsExpandedByDefault,
+    isUsageTrendVisible,
+    setComboFlowVisible,
+    setDetailsExpandedByDefault,
+    setUsageTrendVisible
+  } from '../lib/displayPrefs'
   import { TOGGLEABLE_NAV_ENTRIES, orderHiddenNav, setNavVisible } from '../lib/nav'
   import {
     CURRENCY_CATALOG,
@@ -77,6 +84,10 @@
   // Usage detail panels (Activity Heatmap, Node Health) start collapsed; the
   // switch below flips that default (detailsExpandedByDefault, localStorage).
   let detailsExpanded = $state(isDetailsExpandedByDefault())
+  // The two optional Overview panels are visible by default; these switches
+  // take them out of the section (showComboFlow / showUsageTrend, localStorage).
+  let comboFlow = $state(isComboFlowVisible())
+  let usageTrend = $state(isUsageTrendVisible())
   let stickyRoundRobinLimit = $state(3)
   let comboStrategy = $state('first-model')
   let forceFallback = $state(false)
@@ -649,6 +660,46 @@
             onChange={(val: boolean) => {
               setDetailsExpandedByDefault(val)
               detailsExpanded = isDetailsExpandedByDefault()
+            }}
+          />
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <p class="font-semibold text-text-main">Combo flow</p>
+          <p class="text-[11px] text-text-subtle">
+            Off: the Combo flow panel leaves the analytics Overview
+          </p>
+        </div>
+        <div data-save-hint="off">
+          <Toggle
+            checked={comboFlow}
+            size="sm"
+            label="Combo flow"
+            onChange={(val: boolean) => {
+              setComboFlowVisible(val)
+              comboFlow = isComboFlowVisible()
+            }}
+          />
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <p class="font-semibold text-text-main">Usage trend</p>
+          <p class="text-[11px] text-text-subtle">
+            Off: the Usage trend panel leaves the analytics Overview
+          </p>
+        </div>
+        <div data-save-hint="off">
+          <Toggle
+            checked={usageTrend}
+            size="sm"
+            label="Usage trend"
+            onChange={(val: boolean) => {
+              setUsageTrendVisible(val)
+              usageTrend = isUsageTrendVisible()
             }}
           />
         </div>

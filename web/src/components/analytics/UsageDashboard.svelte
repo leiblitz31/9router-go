@@ -55,7 +55,9 @@
       {
         label: 'Cache Hit Rate',
         value: l.cacheHitRate != null ? `${l.cacheHitRate}%` : '—',
-        sub: 'Only real valid data is counted',
+        // The rate reads the same trailing-7-day history as Most Used Model,
+        // so it is a window number, not a lifetime one.
+        sub: 'Last 7 days, real cache rows only',
         valueClass: 'text-success',
       },
       {

@@ -569,8 +569,6 @@ export interface UsageLifetime {
   longestStreak: number
   topModel: UsageTopModel | null
   cacheHitRate: number | null
-  cacheTokens: number
-  cacheRequests: number
 }
 export interface UsageNodeHealth {
   name?: string

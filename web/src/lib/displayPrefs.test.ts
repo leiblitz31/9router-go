@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { isDetailsExpandedByDefault, setDetailsExpandedByDefault } from './displayPrefs'
+import {
+  isComboFlowVisible,
+  isDetailsExpandedByDefault,
+  isUsageTrendVisible,
+  setComboFlowVisible,
+  setDetailsExpandedByDefault,
+  setUsageTrendVisible,
+} from './displayPrefs'
 
 // Bun has no DOM storage; displayPrefs guards on `typeof localStorage`, so a
 // stub is installed per test and the previous descriptor is restored after
@@ -51,5 +58,28 @@ describe('usage detail collapse preference', () => {
   it('treats a hand-edited value as collapsed', () => {
     localStorage.setItem('detailsExpandedByDefault', 'yes')
     expect(isDetailsExpandedByDefault()).toBe(false)
+  })
+})
+
+describe('Overview panel visibility preference', () => {
+  it('shows both panels on a browser that never touched the switches', () => {
+    expect(isComboFlowVisible()).toBe(true)
+    expect(isUsageTrendVisible()).toBe(true)
+  })
+
+  it('round-trips each switch independently', () => {
+    setComboFlowVisible(false)
+    expect(isComboFlowVisible()).toBe(false)
+    expect(isUsageTrendVisible()).toBe(true)
+    setUsageTrendVisible(false)
+    expect(isUsageTrendVisible()).toBe(false)
+    setUsageTrendVisible(true)
+    expect(isUsageTrendVisible()).toBe(true)
+    expect(isComboFlowVisible()).toBe(false)
+  })
+
+  it('treats a hand-edited value as visible', () => {
+    localStorage.setItem('showComboFlow', 'yes')
+    expect(isComboFlowVisible()).toBe(true)
   })
 })

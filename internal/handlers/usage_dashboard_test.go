@@ -54,8 +54,8 @@ func TestComputeScore(t *testing.T) {
 	}
 }
 
-func TestDashboardCacheHitRate(t *testing.T) {
-	rows := []db.CacheUsageRow{
+func TestWindowCacheHitRate(t *testing.T) {
+	rows := []db.UsageHistoryRow{
 		// Cache-inclusive canonical row: 1000 input of which 400 cached.
 		{PromptTokens: 1000, Tokens: `{"prompt_tokens":1000,"cached_tokens":400,"cache_creation_input_tokens":100}`},
 		// Cache-exclusive raw row: prompt 8 next to a huge cache read.
@@ -63,15 +63,9 @@ func TestDashboardCacheHitRate(t *testing.T) {
 		// Uncached row stays out of the denominator entirely.
 		{PromptTokens: 500, Tokens: `{"prompt_tokens":500}`},
 	}
-	rate, cacheTokens, requests := dashboardCacheHitRate(rows)
+	rate := windowCacheHitRate(rows)
 	if rate == nil {
 		t.Fatal("expected a rate for rows with cache data")
-	}
-	if requests != 2 {
-		t.Errorf("requests = %d, want 2 (uncached rows excluded)", requests)
-	}
-	if cacheTokens != 400+263296 {
-		t.Errorf("cacheTokens = %d, want %d", cacheTokens, 400+263296)
 	}
 	// hit = 400 + 263296; total = max(1000, 500) + max(8, 263296) = 1000 + 263296.
 	want := round1(float64(400+263296) / float64(1000+263296) * 100)
@@ -80,15 +74,44 @@ func TestDashboardCacheHitRate(t *testing.T) {
 	}
 }
 
-func TestDashboardCacheHitRateAllUncached(t *testing.T) {
-	rate, _, requests := dashboardCacheHitRate([]db.CacheUsageRow{
+func TestWindowCacheHitRateAllUncached(t *testing.T) {
+	if rate := windowCacheHitRate([]db.UsageHistoryRow{
 		{PromptTokens: 10, Tokens: `{"prompt_tokens":10}`},
-	})
-	if rate != nil {
+	}); rate != nil {
 		t.Errorf("rate = %v, want nil when no request has a cache", *rate)
 	}
-	if requests != 0 {
-		t.Errorf("requests = %d, want 0", requests)
+}
+
+func TestWindowCacheHitRateCacheOnlyInputExcluded(t *testing.T) {
+	// cached == prompt with no writes is a distorted import: cache-only input
+	// would report a 100% hit rate the provider never served.
+	if rate := windowCacheHitRate([]db.UsageHistoryRow{
+		{PromptTokens: 500, Tokens: `{"cached_tokens":500}`},
+	}); rate != nil {
+		t.Errorf("rate = %v, want nil when every row is cache-only input", *rate)
+	}
+	// The same shape with a real write is a genuine cache hit and counts.
+	rate := windowCacheHitRate([]db.UsageHistoryRow{
+		{PromptTokens: 500, Tokens: `{"cached_tokens":500,"cache_creation_input_tokens":500}`},
+	})
+	if rate == nil {
+		t.Fatal("expected a rate when the cache-only row carries a write")
+	}
+	if want := round1(500.0 / 1000 * 100); *rate != want {
+		t.Errorf("rate = %v, want %v", *rate, want)
+	}
+}
+
+func TestWindowCacheHitRateFallsBackToRowAndTokensPrompt(t *testing.T) {
+	// The row's own column wins; a zero column defers to the tokens JSON.
+	rate := windowCacheHitRate([]db.UsageHistoryRow{
+		{PromptTokens: 0, Tokens: `{"prompt_tokens":1000,"cached_tokens":400}`},
+	})
+	if rate == nil {
+		t.Fatal("expected a rate when the row column is zero and the JSON carries prompt_tokens")
+	}
+	if want := round1(400.0 / 1000 * 100); *rate != want {
+		t.Errorf("rate = %v, want %v", *rate, want)
 	}
 }
 
@@ -195,8 +218,10 @@ func TestHandleUsageDashboard(t *testing.T) {
 	if payload.Lifetime.TopModel == nil || payload.Lifetime.TopModel.Model != "deepseek-chat" {
 		t.Errorf("topModel = %+v, want deepseek-chat", payload.Lifetime.TopModel)
 	}
-	if payload.Lifetime.CacheHitRate == nil {
-		t.Errorf("cacheHitRate must be computed from cached rows")
+	// Every seeded row is 1000 prompt tokens of which 300 are cached, so the
+	// window-derived rate is 300/1000 = 30%.
+	if payload.Lifetime.CacheHitRate == nil || *payload.Lifetime.CacheHitRate != 30 {
+		t.Errorf("cacheHitRate = %v, want 30 from the trailing-7-day rows", payload.Lifetime.CacheHitRate)
 	}
 	if len(payload.Nodes) != 1 {
 		t.Fatalf("len(nodes) = %d, want the one provider above 50 requests", len(payload.Nodes))

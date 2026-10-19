@@ -234,37 +234,6 @@ func (r *Repo) GetUsageGroupByModelSince(since string) ([]UsageGroupRow, error) 
 	return scanUsageGroupRows(rows, "model")
 }
 
-// CacheUsageRow carries the raw fields needed to compute the cache hit rate:
-// the row's input count and its token JSON (cached/creation live inside it).
-type CacheUsageRow struct {
-	PromptTokens int
-	Tokens       string
-}
-
-// GetCacheUsageRows returns every history row whose token payload mentions a
-// cache field. The lifetime cache-hit rate is unbounded by design (it judges
-// the whole ledger), and the LIKE prefilter keeps the JSON decode off rows
-// that can never contribute.
-func (r *Repo) GetCacheUsageRows() ([]CacheUsageRow, error) {
-	rows, err := r.db.Query(`SELECT promptTokens, tokens FROM usageHistory WHERE tokens LIKE '%cache%'`) //nolint:noctx
-	if err != nil {
-		return nil, fmt.Errorf("query cache usage rows: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var res []CacheUsageRow
-	for rows.Next() {
-		var row CacheUsageRow
-		if err := rows.Scan(&row.PromptTokens, &row.Tokens); err != nil {
-			return nil, fmt.Errorf("scan cache usage row: %w", err)
-		}
-		res = append(res, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate cache usage rows: %w", err)
-	}
-	return res, nil
-}
-
 // RequestDetailPerfRow is one latency observation from the requestDetails ring.
 type RequestDetailPerfRow struct {
 	Provider string
