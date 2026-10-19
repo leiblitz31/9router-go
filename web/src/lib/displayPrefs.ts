@@ -29,6 +29,9 @@ export function isComboFlowVisible(): boolean {
 export function setComboFlowVisible(on: boolean): void {
   if (typeof localStorage === 'undefined') return
   localStorage.setItem(COMBO_FLOW_KEY, on ? '1' : '0')
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('display-prefs-changed'))
+  }
 }
 
 export function isUsageTrendVisible(): boolean {
@@ -39,4 +42,7 @@ export function isUsageTrendVisible(): boolean {
 export function setUsageTrendVisible(on: boolean): void {
   if (typeof localStorage === 'undefined') return
   localStorage.setItem(USAGE_TREND_KEY, on ? '1' : '0')
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('display-prefs-changed'))
+  }
 }

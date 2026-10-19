@@ -55,8 +55,25 @@
   // subject. Settings > Display hides each one outright instead.
   let comboFlowOpen = $state(false)
   let usageTrendOpen = $state(false)
-  const showComboFlow = isComboFlowVisible()
-  const showUsageTrend = isUsageTrendVisible()
+  let showComboFlow = $state(isComboFlowVisible())
+  let showUsageTrend = $state(isUsageTrendVisible())
+
+  $effect(() => {
+    const onPrefsChange = () => {
+      showComboFlow = isComboFlowVisible()
+      showUsageTrend = isUsageTrendVisible()
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('display-prefs-changed', onPrefsChange)
+      window.addEventListener('storage', onPrefsChange)
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('display-prefs-changed', onPrefsChange)
+        window.removeEventListener('storage', onPrefsChange)
+      }
+    }
+  })
 
   // Choosing a section has to move the URL when that section owns one, or the
   // next reload silently drops back to Overview.
@@ -179,7 +196,12 @@
   })
 
   // Loaded once: editing a combo is rare, and a reload picks up the change.
+  // Skipped entirely when Combo flow is disabled in Settings > Display.
   $effect(() => {
+    if (!showComboFlow) {
+      comboDefs = []
+      return
+    }
     let cancelled = false
     api
       .getCombos()

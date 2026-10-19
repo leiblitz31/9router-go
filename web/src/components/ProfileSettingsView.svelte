@@ -669,7 +669,7 @@
         <div class="min-w-0">
           <p class="font-semibold text-text-main">Combo flow</p>
           <p class="text-[11px] text-text-subtle">
-            Off: the Combo flow panel leaves the analytics Overview
+            Off: removes the Combo flow panel from Overview and stops background combo queries
           </p>
         </div>
         <div data-save-hint="off">
@@ -689,7 +689,7 @@
         <div class="min-w-0">
           <p class="font-semibold text-text-main">Usage trend</p>
           <p class="text-[11px] text-text-subtle">
-            Off: the Usage trend panel leaves the analytics Overview
+            Off: removes the Usage trend chart from Overview and skips chart queries
           </p>
         </div>
         <div data-save-hint="off">
