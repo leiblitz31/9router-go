@@ -2,6 +2,7 @@ package providers
 
 import (
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"unique"
@@ -28,7 +29,19 @@ func InvalidateCapabilitiesCache() {
 }
 
 // SetCustomModelCaps registers caps for a custom model (provider/model).
+//
+// A model id the provider's static registry catalog already owns is refused
+// here: the catalog is what the gateway advertises for a known model (context
+// window, max output, modality flags), and a custom row saved under the same id
+// must not replace those numbers. The refusal lives at this one writer so that
+// every publisher obeys it — GET /v1/models and /api/models/caps both call this
+// — instead of each route remembering to filter its own input first. The map is
+// process-wide, so publishing on the wrong route used to change every later
+// capability read for the lifetime of the process.
 func SetCustomModelCaps(provider, model string, caps Capabilities) {
+	if staticCatalogOwnsModel(provider, model) {
+		return
+	}
 	key := provider + "||" + model
 	customCapsMu.Lock()
 	customCaps[key] = caps
@@ -43,6 +56,23 @@ func SetCustomModelCaps(provider, model string, caps Capabilities) {
 	customCapsMu.Unlock()
 	// Invalidate cache so new caps are picked up
 	InvalidateCapabilitiesCache()
+}
+
+// staticCatalogOwnsModel reports whether the static registry catalog for
+// provider already lists model. GetProviderModels resolves provider aliases
+// itself ("ocz" finds the opencode-zen catalog), and a provider-qualified id
+// ("ocz/mimo-v2.6-flash-free") is matched by its bare id as well, mirroring the
+// two keys SetCustomModelCaps writes. A provider node prefix has no static
+// catalog, so nothing published under one is refused.
+func staticCatalogOwnsModel(provider, model string) bool {
+	ids := GetProviderModels(provider)
+	if len(ids) == 0 {
+		return false
+	}
+	if _, base, ok := strings.CutLast(model, "/"); ok {
+		return slices.Contains(ids, model) || slices.Contains(ids, base)
+	}
+	return slices.Contains(ids, model)
 }
 
 // GetCustomModelCaps returns custom caps if present.
