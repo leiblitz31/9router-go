@@ -903,7 +903,7 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 	// 4. messages & system
 	if msgs, ok := reqMap["messages"].([]any); ok && len(msgs) > 0 {
 		extractedSys, claudeMsgs := convertOpenAIMessagesToClaude(msgs)
-		reqMap["messages"] = claudeMsgs
+		reqMap["messages"] = cleanupConvertedClaudeMessages(body, claudeMsgs)
 		if extractedSys != "" {
 			if existingSys, ok := reqMap["system"].(string); ok && existingSys != "" {
 				reqMap["system"] = existingSys + "\n\n" + extractedSys
@@ -1102,6 +1102,34 @@ func sanitizeToolUseID(id string, mapping map[string]string) string {
 	newID := "toolu_" + hex.EncodeToString(sum[:])[:24]
 	mapping[id] = newID
 	return newID
+}
+
+// cleanupConvertedClaudeMessages applies the Messages-API content rule to a
+// conversation this package built itself.
+//
+// The OpenAI to Claude conversion passes the client content arrays through
+// unchanged, so a turn the client left empty — or a turn that only held parts
+// this conversion drops — reaches a Claude-shaped lane as an empty content
+// array, and the provider 400s the whole request. The Claude-client path never
+// had that hole: SanitizeClaudePassthrough drops those turns. This calls the
+// same rule from the same place (translator.DropNonContentfulClaudeMessages)
+// instead of restating it, so the two paths cannot drift apart.
+//
+// intentionalPrefill is read from the body the client sent: an OpenAI caller
+// that ends on an assistant turn asked for a prefill, and the trailing-turn
+// repair must not overwrite it (translator.ClaudeIntentionalPrefill).
+//
+// A conversation the filter empties completely keeps its turns. Dropping the
+// last one would trade an invalid empty-content turn for an equally invalid
+// empty messages array, and neither shape can be answered — this way the
+// caller that emptied the turn still gets the reason the provider gives.
+func cleanupConvertedClaudeMessages(clientBody []byte, claudeMsgs []any) []any {
+	cleaned, dropped := translator.DropNonContentfulClaudeMessages(
+		claudeMsgs, translator.ClaudeIntentionalPrefill(clientBody))
+	if !dropped || len(cleaned) == 0 {
+		return claudeMsgs
+	}
+	return cleaned
 }
 
 func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMessages []any) {
