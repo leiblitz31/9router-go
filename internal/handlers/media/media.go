@@ -12,13 +12,16 @@ import (
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/usagetracker"
 	"bytes"
+	"context"
 	"encoding/base64"
 	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -589,13 +592,82 @@ func (h *MediaHandler) HandleScrape(w http.ResponseWriter, r *http.Request) {
 
 // HandleWebFetch handles /v1/web/fetch.
 func (h *MediaHandler) HandleWebFetch(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
 	defer r.Body.Close()
-	h.forwardMediaRequest(w, r, body, "gpt-4o", "/v1/web/fetch")
+
+	var req struct {
+		URL      string `json:"url"`
+		Model    string `json:"model"`
+		Provider string `json:"provider"`
+		Format   string `json:"format"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.URL) == "" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing or invalid url")
+		return
+	}
+
+	parsedURL, err := url.Parse(req.URL)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid url format")
+		return
+	}
+	if targetPrivate(r.Context(), parsedURL.Hostname()) {
+		handlerutil.WriteJSON(w, http.StatusForbidden, map[string]any{
+			"error": map[string]string{"message": "private IP blocked by SSRF protection", "type": "permission_denied", "code": "address_forbidden"},
+		})
+		return
+	}
+
+	// A provider named without a model is the model: /v1/web/fetch carries the
+	// extractor in `model`, and a caller that sent only `provider` was being
+	// dispatched to the default instead of the one it named.
+	if req.Model == "" && req.Provider != "" {
+		var rawMap map[string]any
+		if err := json.Unmarshal(body, &rawMap); err == nil && rawMap != nil {
+			rawMap["model"] = req.Provider
+			if rebuilt, mErr := json.Marshal(rawMap); mErr == nil {
+				body = rebuilt
+			}
+		}
+	}
+	h.forwardMediaRequest(w, r, body, "jina-reader", "/v1/web/fetch")
+}
+
+// targetPrivate reports whether host names an address the gateway must not
+// fetch on a caller's behalf. A literal IP is judged directly; a name is
+// resolved once, before dispatch.
+//
+// This check is a refusal the caller can see, not the boundary itself: the
+// dialer's socket-level guard is what actually stops the connection, and it
+// also covers the rebind between this lookup and the dial. Checking here means
+// the common case answers 403 with a reason instead of surfacing as a transport
+// error from a provider several layers down.
+func targetPrivate(ctx context.Context, host string) bool {
+	if host == "" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return proxy.IsPrivateIP(ip)
+	}
+	if proxy.IsPrivateNetworkingAllowed() {
+		return false
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		// Unresolvable is not this check's call to make: let the dispatch
+		// produce the transport error, which names the real problem.
+		return false
+	}
+	for _, ip := range ips {
+		if proxy.IsPrivateIP(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Request, body []byte, defaultModel, endpoint string) {
