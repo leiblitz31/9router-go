@@ -21,6 +21,12 @@ const (
 	// limits is not surprised by a different ceiling.
 	maxOverrideHeaders         = 20
 	maxOverrideHeaderValueSize = 8192
+
+	// MaxOverrideHeaders and MaxOverrideHeaderValueSize are the exported form
+	// of the same limits, for callers that report them rather than enforce
+	// them — the migration dry run warns instead of rejecting.
+	MaxOverrideHeaders         = maxOverrideHeaders
+	MaxOverrideHeaderValueSize = maxOverrideHeaderValueSize
 )
 
 // blockedOverrideHeaders are the request-structure and credential headers an
