@@ -80,10 +80,40 @@ func TestHandleWebFetch_RejectsMissingURL(t *testing.T) {
 }
 
 // ALLOW_PRIVATE_NETWORKING is the operator's own switch; when it is on, the
-// pre-flight check must not override it.
+// pre-flight check must not override it. The two host shapes — a literal IP and
+// a name that resolves to the same address — must answer alike, which is what
+// the loopback row checks twice.
 func TestTargetPrivate_RespectsAllowPrivateNetworking(t *testing.T) {
-	t.Setenv("ALLOW_PRIVATE_NETWORKING", "true")
-	if targetPrivate(context.Background(), "example.com") {
-		t.Error("expected private networking allowed")
+	tests := []struct {
+		name  string
+		allow string
+		host  string
+		want  bool
+	}{
+		{"allowed: public name", "true", "example.com", false},
+		{"allowed: public literal", "true", "8.8.8.8", false},
+		{"allowed: loopback literal", "true", "127.0.0.1", false},
+		{"allowed: private literal", "true", "10.0.0.5", false},
+		{"allowed: ipv6 loopback literal", "true", "::1", false},
+		{"allowed: metadata literal", "true", "169.254.169.254", false},
+		{"allowed: loopback name", "true", "localhost", false},
+
+		{"blocked: public name", "false", "example.com", false},
+		{"blocked: public literal", "false", "8.8.8.8", false},
+		{"blocked: loopback literal", "false", "127.0.0.1", true},
+		{"blocked: private literal", "false", "10.0.0.5", true},
+		{"blocked: ipv6 loopback literal", "false", "::1", true},
+		{"blocked: metadata literal", "false", "169.254.169.254", true},
+		{"blocked: loopback name", "false", "localhost", true},
+		{"blocked: empty host", "false", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ALLOW_PRIVATE_NETWORKING", tt.allow)
+			if got := targetPrivate(context.Background(), tt.host); got != tt.want {
+				t.Errorf("targetPrivate(%q) with ALLOW_PRIVATE_NETWORKING=%s = %v, want %v",
+					tt.host, tt.allow, got, tt.want)
+			}
+		})
 	}
 }

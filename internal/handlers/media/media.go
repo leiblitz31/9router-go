@@ -649,7 +649,9 @@ func (h *MediaHandler) HandleWebFetch(w http.ResponseWriter, r *http.Request) {
 
 // targetPrivate reports whether host names an address the gateway must not
 // fetch on a caller's behalf. A literal IP is judged directly; a name is
-// resolved once, before dispatch.
+// resolved once, before dispatch. ALLOW_PRIVATE_NETWORKING is the operator's
+// own switch and is answered first, so both branches agree: a literal IP and a
+// name that resolves to the same address get the same verdict.
 //
 // This check is a refusal the caller can see, not the boundary itself: the
 // dialer's socket-level guard is what actually stops the connection, and it
@@ -660,11 +662,11 @@ func targetPrivate(ctx context.Context, host string) bool {
 	if host == "" {
 		return true
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return proxy.IsPrivateIP(ip)
-	}
 	if proxy.IsPrivateNetworkingAllowed() {
 		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return proxy.IsPrivateIP(ip)
 	}
 	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
