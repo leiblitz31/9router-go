@@ -585,7 +585,7 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 
 		// Streaming with Claude translation (/v1/messages)
 		flusher := proxy.WriteSSEHeaders(hw)
-		sessionKey := fmt.Sprintf("stream-%d", time.Now().UnixNano())
+		sessionKey := translator.NewSessionKey("stream")
 		defer translator.ClearStreamState(sessionKey)
 
 		doneSeen := false
