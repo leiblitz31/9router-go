@@ -152,7 +152,7 @@ func (h *ChatHandler) handleStreamResponse(ctx context.Context, w http.ResponseW
 		return nil
 	}
 
-	sessionKey := fmt.Sprintf("stream-%d", time.Now().UnixNano())
+	sessionKey := translator.NewSessionKey("stream")
 	// Seed with requested model so message_start echoes client's model (decolua/9router#3693)
 	if reqModel := translator.RequestedModelFromContext(ctx); reqModel != "" {
 		translator.SeedStreamState(sessionKey, reqModel)

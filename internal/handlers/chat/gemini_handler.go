@@ -505,7 +505,7 @@ func (h *ChatHandler) handleGeminiStream(ctx context.Context, w http.ResponseWri
 	}
 	// One session per stream so the OpenAI→Claude translation state cannot
 	// collide across concurrent requests; always cleared on exit.
-	sessionKey := fmt.Sprintf("gemini-stream-%d", time.Now().UnixNano())
+	sessionKey := translator.NewSessionKey("gemini-stream")
 	defer func() {
 		if translateResponse {
 			if endChunk := translator.EnsureStreamClosed(sessionKey); len(endChunk) > 0 {
