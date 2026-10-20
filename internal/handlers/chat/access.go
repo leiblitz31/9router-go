@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/middleware"
@@ -10,6 +11,24 @@ import (
 	"net/http"
 	"strings"
 )
+
+// SentinelDenyAll aliases db.SentinelDenyAll.
+const SentinelDenyAll = db.SentinelDenyAll
+
+// ErrPolicyUnavailable is the typed 503 indicating policy storage or repo failure.
+type ErrPolicyUnavailable struct {
+	Message string
+}
+
+func (e *ErrPolicyUnavailable) Error() string {
+	return e.Message
+}
+
+// IsPolicyUnavailable reports whether err is ErrPolicyUnavailable.
+func IsPolicyUnavailable(err error) bool {
+	var target *ErrPolicyUnavailable
+	return errors.As(err, &target)
+}
 
 // Per-API-key model access control (F-7).
 //
@@ -55,17 +74,20 @@ func IsModelNotAllowed(err error) bool {
 // (F-3). An empty result means "no allowlist configured" and allows every
 // model, which is what keeps every key minted before this feature behaving
 // exactly as it did. A nil key (no API-key middleware on the route) also
-// returns empty. A storage failure degrades the same way rather than turning
-// into a 500: a broken policy read must not take down traffic the key has
-// always been allowed to send.
+// returns empty. A storage failure degrades fail-closed with ErrPolicyUnavailable
+// (503) rather than failing open.
 func (h *ChatHandler) effectiveAllowedModels(key *models.APIKey) ([]string, error) {
-	if h == nil || key == nil || key.ID == "" || h.Repo == nil {
+	if h == nil || key == nil || key.ID == "" {
 		return nil, nil
+	}
+	if h.Repo == nil {
+		log.Error("chat", "nil repo, fail-closed", "apiKeyId", key.ID)
+		return nil, &ErrPolicyUnavailable{Message: "Policy service temporarily unavailable"}
 	}
 	patterns, err := h.Repo.GetAllowedModels(key.ID)
 	if err != nil {
-		log.Warn("chat", "model allowlist read failed, allowing all", "error", err, "apiKeyId", key.ID)
-		return nil, nil
+		log.Error("chat", "allowlist read failed, fail-closed", "error", err, "apiKeyId", key.ID)
+		return nil, &ErrPolicyUnavailable{Message: "Policy service temporarily unavailable"}
 	}
 	return h.withPlanPatterns(key.ID, key.PlanID, patterns), nil
 }
@@ -73,15 +95,20 @@ func (h *ChatHandler) effectiveAllowedModels(key *models.APIKey) ([]string, erro
 // allowedModelPatterns is the same loader for callers that hold a key id
 // rather than the key itself — the capacity-adapter pool filter runs deep in
 // dispatch, long after the request context is gone. It returns nil for an
-// empty id, which modelAllowed reads as "no allowlist".
+// empty id, which modelAllowed reads as "no allowlist". When keyID is non-empty,
+// any repo or storage failure fails closed by returning SentinelDenyAll ("!*").
 func (h *ChatHandler) allowedModelPatterns(keyID string) []string {
-	if h == nil || keyID == "" || h.Repo == nil {
+	if h == nil || keyID == "" {
 		return nil
+	}
+	if h.Repo == nil {
+		log.Error("chat", "nil repo, fail-closed", "apiKeyId", keyID)
+		return []string{SentinelDenyAll}
 	}
 	patterns, err := h.Repo.GetAllowedModels(keyID)
 	if err != nil {
-		log.Warn("chat", "model allowlist read failed, allowing all", "error", err, "apiKeyId", keyID)
-		return nil
+		log.Error("chat", "allowlist read failed, fail-closed", "error", err, "apiKeyId", keyID)
+		return []string{SentinelDenyAll}
 	}
 	return h.withPlanPatterns(keyID, nil, patterns)
 }
@@ -255,11 +282,27 @@ func (h *ChatHandler) checkModelAccess(key *models.APIKey, modelID string) error
 	return &ErrModelNotAllowed{Model: modelID}
 }
 
-// writeModelAccessError maps a gate error onto the wire: a typed denial is 403,
-// anything else is a 400.
+// writeModelAccessError maps a gate error onto the wire: a policy failure is 503,
+// a typed denial is 403, anything else is a 400.
 func writeModelAccessError(w http.ResponseWriter, err error) {
+	if IsPolicyUnavailable(err) {
+		handlerutil.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": map[string]string{
+				"message": "Policy service temporarily unavailable",
+				"type":    "api_error",
+				"code":    "policy_unavailable",
+			},
+		})
+		return
+	}
 	if IsModelNotAllowed(err) {
-		handlerutil.WriteJSONError(w, http.StatusForbidden, err.Error())
+		handlerutil.WriteJSON(w, http.StatusForbidden, map[string]any{
+			"error": map[string]string{
+				"message": "Model not allowed for this API key",
+				"type":    "permission_denied",
+				"code":    "model_not_allowed",
+			},
+		})
 		return
 	}
 	handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())

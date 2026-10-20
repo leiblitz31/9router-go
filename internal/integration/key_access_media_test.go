@@ -65,7 +65,10 @@ func TestRestrictedKeyDeniedOnEveryMediaEndpoint(t *testing.T) {
 			if res.Status != http.StatusForbidden {
 				t.Fatalf("POST %s = %d, want 403 (body: %s)", ep.path, res.Status, truncate(res.Body))
 			}
-			if msg := res.ErrorMessage(t); !strings.Contains(msg, "not permitted") {
+			// The wire contract is the structured access denial, not the
+			// typed error's own sentence: writeModelAccessError emits one
+			// envelope shape for every endpoint that shares the gate.
+			if msg := res.ErrorMessage(t); !strings.Contains(msg, "Model not allowed") {
 				t.Errorf("error = %q, want it to name the access denial", msg)
 			}
 		})
