@@ -144,6 +144,9 @@ func TestGetModelFormats_DeepseekV41FlashFree(t *testing.T) {
 	}
 	if !got.SupportsFormat(FormatOpenAIResponses) {
 		t.Errorf("expected %q among supported formats %v", FormatOpenAIResponses, got.SupportedFormats)
+	}
+}
+
 func TestGetModelFormats_OpenCodeGoLanes(t *testing.T) {
 	tests := []struct {
 		name          string

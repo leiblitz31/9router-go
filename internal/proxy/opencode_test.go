@@ -1,7 +1,7 @@
 package proxy_test
 
 import (
-	"regexp"
+	"strings"
 	"testing"
 
 	"9router/proxy/internal/proxy"
@@ -152,29 +152,6 @@ func TestHasValidOpenCodeVersion(t *testing.T) {
 	}
 }
 
-func TestBuildOpenCodeHeaders_TraceHeaders(t *testing.T) {
-	// The CLI emits W3C trace context on every request, random per request
-	// (azrinaldi/opencode-free-bridge server.js buildTraceHeaders).
-	b3re := regexp.MustCompile(`^[0-9a-f]{32}-[0-9a-f]{16}-1-[0-9a-f]{16}$`)
-	tpre := regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`)
-	h1 := proxy.BuildOpenCodeHeaders(nil, "", true)
-	h2 := proxy.BuildOpenCodeHeaders(nil, "", true)
-	for _, h := range []map[string]string{h1, h2} {
-		if !b3re.MatchString(h["b3"]) {
-			t.Errorf("b3 = %q, want {32hex}-{16hex}-1-{16hex}", h["b3"])
-		}
-		if !tpre.MatchString(h["traceparent"]) {
-			t.Errorf("traceparent = %q, want 00-{32hex}-{16hex}-01", h["traceparent"])
-		}
-	}
-	if h1["b3"] == h2["b3"] || h1["traceparent"] == h2["traceparent"] {
-		t.Errorf("trace headers must be random per request, got identical values")
-	}
-	// b3 and traceparent describe the same trace/span.
-	if h1["b3"][:32] != h1["traceparent"][3:35] || h1["b3"][33:49] != h1["traceparent"][36:52] {
-		t.Errorf("b3 and traceparent describe different traces: %q vs %q", h1["b3"], h1["traceparent"])
-	}
-}
 
 func TestDefaultOpenCodeUA_Current(t *testing.T) {
 	// Pinned to the current CLI release so gate drift is caught by tests,

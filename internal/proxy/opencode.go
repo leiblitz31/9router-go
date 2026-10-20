@@ -3,7 +3,6 @@ package proxy
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -170,9 +169,7 @@ func BuildOpenCodeHeaders(rawHeaders map[string]string, sessionID string, isStre
 		"x-opencode-project": "global",
 		// The CLI always streams via the body, never via the Accept header,
 		// so it sends */* even for streaming requests.
-		"Accept":      "*/*",
-		"b3":          b3,
-		"traceparent": traceparent,
+		"Accept": "*/*",
 	}
 	for _, h := range []string{"x-relay-target", "x-relay-path"} {
 		if v, ok := rawHeaders[h]; ok {

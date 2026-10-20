@@ -100,7 +100,7 @@ func TestNormalizeGeminiContents_FunctionResponseLast(t *testing.T) {
 		},
 	}
 
-	normalized := NormalizeGeminiContentsForModel(contents, "gemini-4-argon")
+	normalized := NormalizeGeminiContents(contents, "gemini-4-argon")
 	if len(normalized) == 0 {
 		t.Fatalf("expected normalized contents")
 	}
@@ -134,7 +134,7 @@ func TestNormalizeGeminiContents_FunctionResponseLast(t *testing.T) {
 			},
 		},
 	}
-	normalizedNon4 := NormalizeGeminiContentsForModel(contentsNonGemini4, "gemini-3.8-flash")
+	normalizedNon4 := NormalizeGeminiContents(contentsNonGemini4, "gemini-3.8-flash")
 	if len(normalizedNon4) > 0 && len(normalizedNon4[0].Parts) >= 2 {
 		if normalizedNon4[0].Parts[0].FunctionResponse == nil {
 			t.Errorf("expected non-Gemini-4 model to keep FunctionResponse first when specified")

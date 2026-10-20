@@ -6,6 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/bogdanfinn/fhttp v0.6.9
 	github.com/bogdanfinn/tls-client v1.16.0
+	github.com/bogdanfinn/utls v1.7.8-barnius
 	github.com/chromedp/cdproto v0.158.2
 	github.com/chromedp/chromedp v0.21.0
 	github.com/emersion/go-imap v1.2.1
@@ -49,7 +50,6 @@ require (
 	github.com/bdandy/go-socks4 v1.2.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bogdanfinn/quic-go-utls v1.0.10-utls // indirect
-	github.com/bogdanfinn/utls v1.7.8-barnius // indirect
 	github.com/bogdanfinn/websocket v1.5.6-barnius // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudflare/circl v1.6.2 // indirect

@@ -59,6 +59,7 @@ func TestGemini3KeepsMinimalLevel(t *testing.T) {
 	if !slices.Contains(levels, "minimal") {
 		t.Errorf("gemini-3.8-flash levels = %v, want minimal included", levels)
 	}
+}
 
 // Gemini 4 Argon (2026-10): unified 1M window, tunable thinking low|medium|high
 // (no minimal), paid only, intro pricing $2/$10. Regression coverage for the
