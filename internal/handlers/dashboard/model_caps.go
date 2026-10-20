@@ -66,7 +66,6 @@ func (h *DashboardHandler) HandleGetModelCaps(w http.ResponseWriter, r *http.Req
 
 	resolved := providers.ResolveAlias(provider)
 	models := providers.GetProviderModels(resolved)
-
 	caps := make(map[string]modelCaps, len(models))
 	for _, model := range models {
 		detail := providers.GetCapabilitiesDetailForModel(resolved, model)
@@ -83,12 +82,13 @@ func (h *DashboardHandler) HandleGetModelCaps(w http.ResponseWriter, r *http.Req
 		}
 		caps[model] = entry
 	}
-	// Custom models are merged on top of the static catalog: a provider with
-	// static models can still carry custom rows (e.g. oc/deepseek-v4.1-flash-free
-	// registered via kv.customModels), and without the merge those rows never
-	// reach the dashboard's thinking-level picker.
-	for id, entry := range h.customModelCaps(provider, resolved) {
-		caps[id] = entry
+
+	if custom := h.customModelCaps(provider, resolved, models); len(custom) > 0 {
+		for id, cEntry := range custom {
+			if _, exists := caps[id]; !exists {
+				caps[id] = cEntry
+			}
+		}
 	}
 
 	if len(caps) == 0 {
@@ -123,7 +123,7 @@ func (h *DashboardHandler) HandleGetModelCaps(w http.ResponseWriter, r *http.Req
 // catalog at all, so before this the endpoint answered caps: {} and the
 // dashboard never saw the models it had just been given — nor the limits they
 // declare.
-func (h *DashboardHandler) customModelCaps(provider, resolved string) map[string]modelCaps {
+func (h *DashboardHandler) customModelCaps(provider, resolved string, staticModels []string) map[string]modelCaps {
 	if h.Repo == nil {
 		return nil
 	}
@@ -144,6 +144,10 @@ func (h *DashboardHandler) customModelCaps(provider, resolved string) map[string
 	caps := map[string]modelCaps{}
 	for _, cm := range customs {
 		if cm == nil || !isLLMCustomModelType(cm.Type) || !slices.Contains(aliases, cm.ProviderAlias) {
+			continue
+		}
+		// Skip custom models whose ID is already owned by the static catalog
+		if slices.Contains(staticModels, cm.ID) {
 			continue
 		}
 		// The same publication /v1/models does. Without it the row's saved

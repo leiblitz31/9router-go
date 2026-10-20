@@ -546,7 +546,7 @@ func (u *toolCallIDUniquifier) next(id string) string {
 // readability and the call's index for uniqueness — two parts in one chunk are
 // emitted inside a single clock tick, so UnixNano alone collides and the client
 // cannot match a result to its call.
-// Parity with `functionCall.id || \`${name}-${Date.now()}-${index}\`` in
+// Parity with `functionCall.id || \`${name}-${Date.now()}-${index}\“ in
 // open-sse/translator/response/gemini-to-openai.js.
 func geminiToolCallID(geminiID, name string, index int) string {
 	if geminiID != "" {
@@ -1089,6 +1089,15 @@ func NormalizeGeminiContents(contents []GeminiContent, model ...string) []Gemini
 // geminiTerminalUserParts answers a terminal model turn: one functionResponse
 // per unanswered functionCall, carrying the call's id so Gemini can match it,
 // or a plain nudge when the model was talking rather than calling a tool.
+// NormalizeGeminiContentsForModel is the explicit-model spelling kept for
+// callers ported from upstream (decolua/9router-go), where the one-argument
+// NormalizeGeminiContents delegates here. Locally the variadic
+// NormalizeGeminiContents is the implementation; this wrapper forwards to it
+// so both spellings share one merge implementation.
+func NormalizeGeminiContentsForModel(contents []GeminiContent, model string) []GeminiContent {
+	return NormalizeGeminiContents(contents, model)
+}
+
 func geminiTerminalUserParts(modelParts []GeminiPart) []GeminiPart {
 	var calls []*GeminiFunctionCall
 	for _, p := range modelParts {

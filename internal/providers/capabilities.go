@@ -271,8 +271,8 @@ var modelCapabilities = map[string]Capabilities{
 	"muse-spark-1.2-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
 	"muse-spark-1.3-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
 	"nemotron-3-ultra-free":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
-	"nemotron-3.5-lightning-free":      {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
-	"nemotron-3.5-super-vl-free":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144},
+	"nemotron-3.5-lightning-free":     {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
+	"nemotron-3.5-super-vl-free":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144},
 
 	// OpenCode Free ids that models.dev reports reasoning-capable and that no
 	// table or pattern covers. Without an entry they fall through to
@@ -589,7 +589,7 @@ var patternCapabilities = []patternCapability{
 	// thinkingBudget, and thinking cannot be disabled. The bridge publishes
 	// the bare id "gemini-argon" as well as the "gemini-4-argon" alias, so
 	// both spellings have to hit a row (upstream PATTERN_CAPABILITIES).
-	{pattern: "*gemini*argon*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
+	{pattern: "*gemini*argon*", caps: Capabilities{Vision: true, PDF: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-4*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false), ContextWindow: 1048576, MaxOutput: 65536}},
 	{pattern: "*gemini-3.8*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-3.7*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},

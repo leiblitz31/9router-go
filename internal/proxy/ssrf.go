@@ -78,7 +78,16 @@ func NewSafeDialer() *net.Dialer {
 // The socket-level guard exists to stop a *request* from reaching an internal
 // address. A request routed through an outbound proxy never dials the target at
 // all — the proxy does — so applying the guard to the proxy's own address
-// protects nothing and breaks the operator's egress path instead.
+// protects nothing and breaks the operator's egress path instead. That is the
+// reported failure: an operator running the proxy on loopback (a local CONNECT
+// proxy for DNS, a sandbox sidecar, the common Termux setup) had every upstream
+// call answered with
+//
+//	proxyconnect tcp: dial tcp 127.0.0.1:8888: request to private/reserved IP
+//	blocked by SSRF protection ... (strictProxy=true)
+//
+// The set is bounded because a connection pool can rotate endpoints; past the
+// bound the first entries stay (they are the ones a pool reuses).
 type proxyAllowlist struct {
 	mu    sync.RWMutex
 	hosts map[string]struct{}
@@ -97,6 +106,15 @@ func newProxyAllowlist(hosts ...string) *proxyAllowlist {
 
 // allow records hostPort ("127.0.0.1:8888", "proxy.example") as a permitted
 // dial target.
+//
+// Matching happens in allows, on the dial address Go hands ControlContext —
+// which is a resolved "ip:port", never a name. A literal address therefore
+// matches exactly, and a proxy URL written without a port exempts its host on
+// any port (the operator named that host as their proxy; the port is implied by
+// the scheme). A proxy named by *hostname* cannot be compared there without a
+// DNS lookup in the dial path, and is not matched — the reported case, and every
+// local proxy, is written as a literal address, while a hostname proxy that
+// resolves to a public IP is never blocked to begin with.
 func (a *proxyAllowlist) allow(hostPort string) {
 	if a == nil || hostPort == "" {
 		return
@@ -116,7 +134,8 @@ func (a *proxyAllowlist) allow(hostPort string) {
 }
 
 // allows reports whether address matches a remembered proxy endpoint. address is
-// the dial target as the ControlContext receives it ("host:port").
+// the dial target as the ControlContext receives it ("host:port"); a proxy URL
+// without an explicit port is remembered bare, so the bare host is tried too.
 func (a *proxyAllowlist) allows(address, host string) bool {
 	if a == nil {
 		return false
@@ -133,22 +152,19 @@ func (a *proxyAllowlist) allows(address, host string) bool {
 	return ok
 }
 
-// ambientProxyAllowlist permits the environment's own proxy endpoint.
-func ambientProxyAllowlist() *proxyAllowlist {
-	if u := ambientProxyURL(); u != nil {
-		return newProxyAllowlist(u.Host)
-	}
-	return nil
-}
-
 // proxyFromEnvironment is http.ProxyFromEnvironment, indirect so a test can
 // supply a proxy without mutating the process environment: the stdlib caches
 // the environment on first use for the life of the process, which would make an
 // env-driven test depend on whether an earlier call had already frozen it.
+// The transports themselves keep using the stdlib function directly — see
+// proxyFuncIsAssigned, which tells an assigned proxy from an ambient one by that
+// function's identity.
 var proxyFromEnvironment = http.ProxyFromEnvironment
 
 // ambientProxyURL reports the proxy the environment installs for outbound
-// requests, or nil when the environment asks for a direct dial.
+// requests, or nil when the environment asks for a direct dial. no_proxy is
+// resolved for a public host: an environment that only excludes internal
+// targets still proxies this one.
 func ambientProxyURL() *url.URL {
 	req := &http.Request{URL: &url.URL{Scheme: "https", Host: "proxy-target.invalid"}}
 	u, err := proxyFromEnvironment(req)
@@ -156,6 +172,14 @@ func ambientProxyURL() *url.URL {
 		return nil
 	}
 	return u
+}
+
+// ambientProxyAllowlist permits the environment's own proxy endpoint.
+func ambientProxyAllowlist() *proxyAllowlist {
+	if u := ambientProxyURL(); u != nil {
+		return newProxyAllowlist(u.Host)
+	}
+	return nil
 }
 
 // newSafeDialerForProxy returns NewSafeDialer's dialer with the given proxy
@@ -192,7 +216,6 @@ func newSafeDialerForProxy(allow *proxyAllowlist) *net.Dialer {
 		},
 	}
 }
-
 
 // NewSafeTransport returns an *http.Transport configured with production pool
 // defaults, an active SSRF-filtering DialContext, and a uTLS-spoofed TLS
@@ -248,4 +271,19 @@ func NewSafeTransportWithProxy(proxyURL string, insecure bool) *http.Transport {
 		&utlsDialer{explicitProxyURL: proxyURL, insecureSkipVerify: insecure},
 		proxyKindExplicit, proxyURL,
 	)
+}
+
+// NewSafeTransportForProxy is the upstream (decolua/9router-go) spelling of
+// NewSafeTransportWithProxy kept for callers ported from upstream: an empty
+// proxyURL returns the ambient-environment transport, a non-empty one returns
+// a transport pinned to that proxy with certificate verification enabled.
+// The local implementation routes through the uTLS dialer and records the
+// choice in the transport proxy registry (see utls_dialer.go), so
+// proxiesViaAssignment/proxyURLFor introspection behaves exactly as it does
+// for transports built by NewSafeTransportWithProxy.
+func NewSafeTransportForProxy(proxyURL string) *http.Transport {
+	if proxyURL == "" {
+		return NewSafeTransport()
+	}
+	return NewSafeTransportWithProxy(proxyURL, false)
 }

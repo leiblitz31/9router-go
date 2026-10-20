@@ -382,7 +382,9 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 		}
 		// Keep the status even when the body could not be read in full. The
 		// status is the part callers act on: retryable-error classification,
-		// account failover and the free-tier refusal check all branch on it.
+		// account failover and the free-tier refusal check all branch on it. A
+		// plain fmt.Errorf here discarded the code, so a truncated error body
+		// turned a 403 into an opaque 502 that no retry could recognise.
 		return nil, &UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header, ReadErr: readErr}
 	}
 	return resp, nil

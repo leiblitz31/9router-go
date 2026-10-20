@@ -3782,6 +3782,9 @@
                   {#if tStatus && compatibleTestLatency[row.id] !== undefined}
                     <span class="text-xs text-text-muted font-mono">{compatibleTestLatency[row.id]} ms</span>
                   {/if}
+                  {#if tStatus && compatibleTestLatency[row.id] !== undefined}
+                    <span class="text-xs text-text-muted font-mono">{compatibleTestLatency[row.id]} ms</span>
+                  {/if}
                 </div>
                 {#if tError}
                   <div class="mt-2 flex items-start gap-1.5 text-xs text-red-500 bg-red-500/10 px-2.5 py-1.5 rounded-md border border-red-500/20">

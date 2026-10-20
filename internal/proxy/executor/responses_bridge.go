@@ -289,10 +289,12 @@ func passthroughResponses(w http.ResponseWriter, req *Request, upstream io.Reade
 	if err != nil {
 		return fmt.Errorf("read responses body: %w", err)
 	}
-	// The native endpoint relays the body byte for byte, so this is the only
-	// place a blank 200 or an error envelope on a /v1/responses upstream can
-	// still be caught before the client reads it as a completed turn.
-	if err := proxy.EmptyUpstreamError(body); err != nil {
+	if armed, canFallback := proxy.ZeroContentProbe(req.Ctx); armed && proxy.IsZeroContentResponse(body) {
+		if canFallback {
+			return &proxy.ZeroContentError{Body: body}
+		}
+		// The last member of a combo serves its zero-content response normally (FR3).
+	} else if err := proxy.EmptyUpstreamError(body); err != nil {
 		return err
 	}
 	if len(req.ToolNameMap) > 0 {

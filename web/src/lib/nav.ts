@@ -94,6 +94,7 @@ export const NAV_GROUPS: NavGroup[] = [
         ],
       },
       { kind: 'link', id: 'proxy-pools', label: 'Proxy Pools', icon: 'lan' },
+      { kind: 'link', id: 'petani-proxy', label: 'Petani Proxy', icon: 'agriculture' },
       { kind: 'link', id: 'skills', label: 'Skills', icon: 'extension' },
       { kind: 'link', id: 'console-log', label: 'Console Log', icon: 'terminal' },
       { kind: 'link', id: 'settings', label: 'Settings', icon: 'settings' },

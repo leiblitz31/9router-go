@@ -792,10 +792,13 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	}
 
 	status := "error"
+	var zc *internalproxy.ZeroContentError
 	if completed {
 		status = strconv.Itoa(http.StatusOK)
 	} else if isClientCanceled(ctx, fwdErr) {
 		status = strconv.Itoa(StatusClientClosedRequest)
+	} else if errors.As(fwdErr, &zc) {
+		status = strconv.Itoa(http.StatusOK)
 	} else if ue, ok := fwdErr.(*upstreamError); ok && ue.StatusCode > 0 {
 		status = strconv.Itoa(ue.StatusCode)
 	}
@@ -891,6 +894,8 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	statusCode := 0
 	if errors.As(fwdErr, &ue) {
 		statusCode = ue.StatusCode
+	} else if errors.As(fwdErr, &zc) {
+		statusCode = http.StatusOK
 	}
 	identity := h.connIdentityKVOr(f, connectionID)
 	// Every failure line below carries the egress: a 401/429 from a provider
@@ -947,6 +952,11 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		log.Debug("fallback", "upstream skipped (cached no-project)", append([]any{
 			"provider", provider, "model", model, "error", fwdErr,
 		}, identity...)...)
+	} else if errors.As(fwdErr, &zc) {
+		log.Warn("fallback", "upstream returned zero usable content", append([]any{
+			"provider", provider, "model", model,
+			"status", statusCode,
+		}, identity...)...)
 	} else {
 		log.Warn("fallback", "upstream failed", append([]any{
 			"provider", provider, "model", model,
@@ -954,7 +964,9 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		}, identity...)...)
 	}
 
-	observ.IncUpstreamError(provider, model, statusCode)
+	if !errors.As(fwdErr, &zc) {
+		observ.IncUpstreamError(provider, model, statusCode)
+	}
 	// A client that hung up is not an upstream failure. Returning the raw error
 	// here made every abort surface as a bare 502 at the write sites in chat.go:
 	// the caller saw "upstream error: context canceled" and the request log

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
@@ -246,4 +247,186 @@ func describeBodyKind(trimmed []byte) string {
 		return "an HTML error page"
 	}
 	return "a non-JSON body"
+}
+
+// ZeroContentError is returned by the response path when a 2xx JSON body
+// carries zero usable content while the zero-content probe is armed.
+type ZeroContentError struct {
+	Body []byte
+}
+
+func (e *ZeroContentError) Error() string {
+	return "upstream returned HTTP 200 with zero usable content"
+}
+
+type zeroContentProbeKey struct{}
+
+// WithZeroContentProbe marks ctx with whether the zero-content detector should
+// fall back to the next combo member. When canFallback is false (e.g. the last
+// member of a combo), a zero-content response is served normally rather than
+// intercepted as an error.
+func WithZeroContentProbe(ctx context.Context, canFallback bool) context.Context {
+	return context.WithValue(ctx, zeroContentProbeKey{}, canFallback)
+}
+
+// ZeroContentProbe reports whether the probe is armed, and whether fallback is
+// requested.
+func ZeroContentProbe(ctx context.Context) (armed bool, canFallback bool) {
+	if ctx == nil {
+		return false, false
+	}
+	v, ok := ctx.Value(zeroContentProbeKey{}).(bool)
+	if !ok {
+		return false, false
+	}
+	return true, v
+}
+
+// HasZeroContentProbe reports whether ctx has the zero-content probe armed and
+// can fall back.
+func HasZeroContentProbe(ctx context.Context) bool {
+	armed, canFallback := ZeroContentProbe(ctx)
+	return armed && canFallback
+}
+
+// IsZeroContentResponse reports whether a 2xx JSON body carries no usable
+// content: no text, no tool call, no reasoning, and a finish that is not a
+// normal completion.
+func IsZeroContentResponse(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' || LooksLikeSSE(trimmed) {
+		return false
+	}
+
+	var probe struct {
+		Choices    jsontext.Value `json:"choices"`
+		Content    jsontext.Value `json:"content"`
+		StopReason string         `json:"stop_reason"`
+	}
+	if err := json.Unmarshal(trimmed, &probe, handlerutil.UpstreamBody); err != nil {
+		return false
+	}
+
+	// OpenAI chat format
+	if probe.Choices != nil {
+		t := bytes.TrimSpace(probe.Choices)
+		if len(t) > 0 && t[0] == '[' {
+			var choices []struct {
+				Message      jsontext.Value `json:"message"`
+				Delta        jsontext.Value `json:"delta"`
+				FinishReason jsontext.Value `json:"finish_reason"`
+			}
+			if err := json.Unmarshal(t, &choices, handlerutil.UpstreamBody); err == nil {
+				if len(choices) == 0 {
+					return true
+				}
+				c := choices[0]
+				// upstream reads message only when present (Boolean(choice.message) in JS);
+				// only falls back to delta when message is absent/null.
+				msgRaw := c.Message
+				trimmedMsg := bytes.TrimSpace(msgRaw)
+				if len(trimmedMsg) == 0 || bytes.Equal(trimmedMsg, []byte("null")) {
+					msgRaw = c.Delta
+				}
+
+				var msg struct {
+					Content          jsontext.Value `json:"content"`
+					ToolCalls        jsontext.Value `json:"tool_calls"`
+					FunctionCall     jsontext.Value `json:"function_call"`
+					ReasoningContent jsontext.Value `json:"reasoning_content"`
+				}
+				if len(bytes.TrimSpace(msgRaw)) > 0 {
+					_ = json.Unmarshal(msgRaw, &msg, handlerutil.UpstreamBody)
+				}
+
+				hasContent := probeHasContent(msg.Content)
+				hasToolCalls := probeHasToolCalls(msg.ToolCalls, msg.FunctionCall)
+				hasReasoning := probeHasReasoning(msg.ReasoningContent)
+
+				var finish string
+				trimmedFR := bytes.TrimSpace(c.FinishReason)
+				if len(trimmedFR) > 0 && trimmedFR[0] == '"' {
+					_ = json.Unmarshal(trimmedFR, &finish, handlerutil.UpstreamBody)
+				}
+				isNormalFinish := finish == "stop" || finish == "length" || finish == "tool_calls" || finish == "function_call"
+
+				if !hasContent && !hasToolCalls && !hasReasoning && (!isNormalFinish || finish == "in_progress" || finish == "incomplete") {
+					return true
+				}
+			}
+		}
+	}
+
+	// Anthropic messages format
+	if probe.Content != nil {
+		t := bytes.TrimSpace(probe.Content)
+		if len(t) > 0 && t[0] == '[' {
+			var blocks []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(t, &blocks, handlerutil.UpstreamBody); err == nil {
+				hasContent := false
+				for _, b := range blocks {
+					if (b.Type == "text" && strings.TrimSpace(b.Text) != "") || b.Type == "tool_use" {
+						hasContent = true
+						break
+					}
+				}
+				stopReason := probe.StopReason
+				if !hasContent && (stopReason == "" || stopReason == "in_progress" || stopReason == "incomplete") {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func probeHasReasoning(raw jsontext.Value) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s, handlerutil.UpstreamBody); err == nil {
+		return strings.TrimSpace(s) != ""
+	}
+	return false
+}
+
+func probeHasContent(raw jsontext.Value) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(trimmed, &s, handlerutil.UpstreamBody); err == nil {
+			return strings.TrimSpace(s) != ""
+		}
+	case '[':
+		var items []jsontext.Value
+		if err := json.Unmarshal(trimmed, &items, handlerutil.UpstreamBody); err == nil {
+			return len(items) > 0
+		}
+	}
+	return false
+}
+
+func probeHasToolCalls(toolCalls, functionCall jsontext.Value) bool {
+	trimmedTC := bytes.TrimSpace(toolCalls)
+	if len(trimmedTC) > 0 && trimmedTC[0] == '[' {
+		var items []jsontext.Value
+		if err := json.Unmarshal(trimmedTC, &items, handlerutil.UpstreamBody); err == nil && len(items) > 0 {
+			return true
+		}
+	}
+	trimmedFC := bytes.TrimSpace(functionCall)
+	if len(trimmedFC) > 0 && !bytes.Equal(trimmedFC, []byte("null")) {
+		return true
+	}
+	return false
 }

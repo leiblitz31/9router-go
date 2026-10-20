@@ -646,3 +646,89 @@ func TestWrapForAntigravity_StripsThinkingFields(t *testing.T) {
 		}
 	}
 }
+
+func TestStripCompetitivePrompts_PreservesProviderIdentifiers(t *testing.T) {
+	tests := []struct {
+		name              string
+		systemInstruction string
+		userTurn          string
+		assistantTurn     string
+	}{
+		{
+			name:              "preserves literal provider identifiers across slots",
+			systemInstruction: "You are a Claude agent, built on Anthropic's Claude Agent SDK. Running opencode, opencode-zen, opencode-go at C:\\Users\\adima\\.config\\opencode\\AGENTS.md",
+			userTurn:          "Please check Anthropic's Claude Agent SDK and opencode, opencode-zen, opencode-go configuration at C:\\Users\\adima\\.config\\opencode\\AGENTS.md",
+			assistantTurn:     "Acknowledged opencode, opencode-zen, opencode-go and C:\\Users\\adima\\.config\\opencode\\AGENTS.md",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &translator.GeminiRequest{
+				SystemInstruction: &translator.GeminiContent{
+					Parts: []translator.GeminiPart{{Text: tt.systemInstruction}},
+				},
+				Contents: []translator.GeminiContent{
+					{
+						Role:  "user",
+						Parts: []translator.GeminiPart{{Text: tt.userTurn}},
+					},
+					{
+						Role:  "model",
+						Parts: []translator.GeminiPart{{Text: tt.assistantTurn}},
+					},
+				},
+			}
+
+			res := translator.StripCompetitivePrompts(req)
+			if res == nil {
+				t.Fatal("StripCompetitivePrompts returned nil")
+			}
+
+			// Verify system instruction
+			if res.SystemInstruction == nil || len(res.SystemInstruction.Parts) == 0 {
+				t.Fatal("System instruction lost")
+			}
+			sysText := res.SystemInstruction.Parts[0].Text
+
+			// Control: Claude Agent SDK phrase must be stripped from system instruction and user turn
+			if strings.Contains(sysText, "Claude Agent SDK") {
+				t.Errorf("Claude Agent SDK phrase not stripped from system instruction: %q", sysText)
+			}
+			// Verify provider identifiers and path are preserved byte-for-byte
+			for _, lit := range []string{"opencode", "opencode-zen", "opencode-go", `C:\Users\adima\.config\opencode\AGENTS.md`} {
+				if !strings.Contains(sysText, lit) {
+					t.Errorf("System instruction lost literal %q: %q", lit, sysText)
+				}
+			}
+			if strings.Contains(sysText, "antigravity") {
+				t.Errorf("System instruction incorrectly contains antigravity: %q", sysText)
+			}
+
+			// Verify user turn
+			userText := res.Contents[0].Parts[0].Text
+			if strings.Contains(userText, "Claude Agent SDK") {
+				t.Errorf("Claude Agent SDK phrase not stripped from user turn: %q", userText)
+			}
+			for _, lit := range []string{"opencode", "opencode-zen", "opencode-go", `C:\Users\adima\.config\opencode\AGENTS.md`} {
+				if !strings.Contains(userText, lit) {
+					t.Errorf("User turn lost literal %q: %q", lit, userText)
+				}
+			}
+			if strings.Contains(userText, "antigravity") {
+				t.Errorf("User turn incorrectly contains antigravity: %q", userText)
+			}
+
+			// Verify assistant turn
+			asstText := res.Contents[1].Parts[0].Text
+			for _, lit := range []string{"opencode", "opencode-zen", "opencode-go", `C:\Users\adima\.config\opencode\AGENTS.md`} {
+				if !strings.Contains(asstText, lit) {
+					t.Errorf("Assistant turn lost literal %q: %q", lit, asstText)
+				}
+			}
+			if strings.Contains(asstText, "antigravity") {
+				t.Errorf("Assistant turn incorrectly contains antigravity: %q", asstText)
+			}
+		})
+	}
+}
