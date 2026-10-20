@@ -434,3 +434,130 @@ func TestAntigravityQuota_ArgonIsolation(t *testing.T) {
 		t.Errorf("gemini-3.8-flash-high should NOT be blocked by argon_weekly")
 	}
 }
+
+func TestParseWeeklyQuotaSummary_PointerDecode(t *testing.T) {
+	// 1. Comprehensive multi-group fixture verifying pointer decoding and window independence
+	raw := []byte(`{
+		"groups": [
+			{
+				"displayName": "Claude & GPT Models",
+				"buckets": [
+					{
+						"bucketId": "claude-weekly-1",
+						"displayName": "Claude & GPT Weekly Limit",
+						"window": "weekly",
+						"disabled": false,
+						"remainingFraction": 0.85,
+						"resetTime": "2026-10-25T00:00:00Z"
+					},
+					{
+						"bucketId": "claude-session-1",
+						"displayName": "Claude & GPT 5h Limit",
+						"window": "5h",
+						"disabled": true,
+						"remainingFraction": 0.0,
+						"resetTime": "2026-10-19T18:00:00Z"
+					}
+				]
+			},
+			{
+				"displayName": "Gemini Models",
+				"buckets": [
+					{
+						"bucketId": "gemini-weekly-disabled",
+						"displayName": "Gemini Weekly Limit",
+						"window": "weekly",
+						"disabled": true,
+						"remainingFraction": 0.50
+					},
+					{
+						"bucketId": "gemini-weekly-null",
+						"displayName": "Gemini Weekly Limit",
+						"window": "weekly",
+						"disabled": false,
+						"remainingFraction": null
+					},
+					{
+						"bucketId": "gemini-weekly-missing",
+						"displayName": "Gemini Weekly Limit",
+						"window": "weekly",
+						"disabled": false
+					}
+				]
+			}
+		]
+	}`)
+
+	parsed := ParseWeeklyQuotaSummary(raw)
+
+	// claude_gpt_weekly: 0.85 -> 85.0%
+	cw, ok := parsed["claude_gpt_weekly"]
+	if !ok {
+		t.Fatalf("expected claude_gpt_weekly in parsed map")
+	}
+	if cw.RemainingPercentage != 85.0 {
+		t.Errorf("expected claude_gpt_weekly 85%%, got %v", cw.RemainingPercentage)
+	}
+	if cw.Used != 150 || cw.Total != 1000 {
+		t.Errorf("expected claude_gpt_weekly Used=150 Total=1000, got Used=%d Total=%d", cw.Used, cw.Total)
+	}
+
+	// claude_gpt_session: disabled session -> 0.0%
+	cs, ok := parsed["claude_gpt_session"]
+	if !ok {
+		t.Fatalf("expected claude_gpt_session in parsed map")
+	}
+	if cs.RemainingPercentage != 0.0 {
+		t.Errorf("expected claude_gpt_session 0%%, got %v", cs.RemainingPercentage)
+	}
+	if cs.Used != 1000 || cs.Total != 1000 {
+		t.Errorf("expected claude_gpt_session Used=1000 Total=1000, got Used=%d Total=%d", cs.Used, cs.Total)
+	}
+
+	// Window independence: session 5h exhausted (0%) does not alter weekly (85%)
+	if cw.RemainingPercentage != 85.0 || cs.RemainingPercentage != 0.0 {
+		t.Errorf("window independence violated: weekly=%v, session=%v", cw.RemainingPercentage, cs.RemainingPercentage)
+	}
+
+	// Gemini buckets were all disabled, null, or missing -> gemini_weekly must NOT exist
+	if gw, exists := parsed["gemini_weekly"]; exists {
+		t.Errorf("expected gemini_weekly to be omitted due to disabled/null/missing, got %+v", gw)
+	}
+
+	// 2. Isolated subtests verifying each unknown / disabled condition independently
+	t.Run("DisabledWeekly_Omitted", func(t *testing.T) {
+		data := []byte(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"g-w","window":"weekly","disabled":true,"remainingFraction":0.9}]}]}`)
+		res := ParseWeeklyQuotaSummary(data)
+		if _, exists := res["gemini_weekly"]; exists {
+			t.Errorf("disabled weekly bucket must be omitted from result map")
+		}
+	})
+
+	t.Run("NullRemainingFraction_Omitted", func(t *testing.T) {
+		data := []byte(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"g-w","window":"weekly","disabled":false,"remainingFraction":null}]}]}`)
+		res := ParseWeeklyQuotaSummary(data)
+		if _, exists := res["gemini_weekly"]; exists {
+			t.Errorf("bucket with null remainingFraction must be omitted from result map")
+		}
+	})
+
+	t.Run("MissingRemainingFractionKey_Omitted", func(t *testing.T) {
+		data := []byte(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"g-w","window":"weekly","disabled":false}]}]}`)
+		res := ParseWeeklyQuotaSummary(data)
+		if _, exists := res["gemini_weekly"]; exists {
+			t.Errorf("bucket with missing remainingFraction key must be omitted from result map")
+		}
+	})
+
+	t.Run("QuotaSummaryNested_PointerDecode", func(t *testing.T) {
+		data := []byte(`{"quotaSummary":{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"g-w","window":"weekly","disabled":false,"remainingFraction":0.42}]}]}}`)
+		res := ParseWeeklyQuotaSummary(data)
+		gw, ok := res["gemini_weekly"]
+		if !ok {
+			t.Fatalf("expected gemini_weekly from quotaSummary.groups")
+		}
+		if gw.RemainingPercentage != 42.0 {
+			t.Errorf("expected 42%%, got %v", gw.RemainingPercentage)
+		}
+	})
+}
