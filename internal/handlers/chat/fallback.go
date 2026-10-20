@@ -983,14 +983,11 @@ func isClientCanceled(ctx context.Context, err error) bool {
 	if ctx != nil && ctx.Err() != nil {
 		return true
 	}
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) {
+	var ue *upstreamError
+	if errors.As(err, &ue) && ue.StatusCode == StatusClientClosedRequest {
 		return true
 	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "client closed")
+	return false
 }
 
 // applyTokenSavers runs RTK compression and prompt injection on the request body.
