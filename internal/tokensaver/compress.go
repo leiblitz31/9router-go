@@ -3,6 +3,7 @@ package tokensaver
 import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,6 +19,74 @@ const (
 	GrepPerFileMax  = 10
 	TreeMaxLines    = 200
 )
+
+var protectedTools = map[string]bool{
+	"Read":   true,
+	"Grep":   true,
+	"Edit":   true,
+	"Write":  true,
+	"patch":  true,
+	"anchor": true,
+}
+
+func isProtectedTool(name string) bool {
+	return protectedTools[strings.TrimSpace(name)]
+}
+
+func isErrorToolResult(m map[string]any) bool {
+	if m == nil {
+		return false
+	}
+	if b, ok := m["is_error"].(bool); ok && b {
+		return true
+	}
+	if b, ok := m["isError"].(bool); ok && b {
+		return true
+	}
+	return strings.EqualFold(fmt.Sprintf("%v", m["status"]), "error")
+}
+
+func buildToolCallMap(items []map[string]any) map[string]string {
+	toolMap := make(map[string]string)
+	for _, item := range items {
+		// Chat assistant tool_calls
+		if tcList, ok := item["tool_calls"].([]any); ok {
+			for _, tc := range tcList {
+				if tcMap, ok := tc.(map[string]any); ok {
+					id, _ := tcMap["id"].(string)
+					if fn, ok := tcMap["function"].(map[string]any); ok {
+						if name, ok := fn["name"].(string); ok && id != "" {
+							toolMap[id] = name
+						}
+					}
+				}
+			}
+		}
+		// Responses function_call
+		if t, ok := item["type"].(string); ok && t == "function_call" {
+			callID, _ := item["call_id"].(string)
+			name, _ := item["name"].(string)
+			if callID != "" && name != "" {
+				toolMap[callID] = name
+			}
+		}
+		// Claude tool_use in content array
+		if contentArr, ok := item["content"].([]any); ok {
+			for _, part := range contentArr {
+				if block, ok := part.(map[string]any); ok {
+					if bt, ok := block["type"].(string); ok && bt == "tool_use" {
+						id, _ := block["id"].(string)
+						name, _ := block["name"].(string)
+						if id != "" && name != "" {
+							toolMap[id] = name
+						}
+					}
+				}
+			}
+		}
+	}
+	return toolMap
+}
 
 // CompressMessages compresses tool_result content in LLM request bodies in-place.
 // Returns modified body and true if any compression was applied.
@@ -54,22 +123,63 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 		return body, false
 	}
 
+	toolMap := buildToolCallMap(items)
 	compressed := false
 	for _, msg := range items {
 		// OpenAI Responses: function_call_output
 		if msg["type"] == "function_call_output" {
+			name, _ := msg["name"].(string)
+			if name == "" {
+				if callID, ok := msg["call_id"].(string); ok {
+					name = toolMap[callID]
+				}
+			}
+			if isErrorToolResult(msg) || isProtectedTool(name) {
+				continue
+			}
 			if output, ok := msg["output"].(string); ok && len(output) > MinCompressSize {
 				msg["output"] = CompressTextWithConfig(output, cfg)
 				compressed = true
+			} else if outputArr, ok := msg["output"].([]any); ok {
+				for _, part := range outputArr {
+					if partMap, ok := part.(map[string]any); ok {
+						if t, ok := partMap["type"].(string); ok && (t == "input_text" || t == "text") {
+							if text, ok := partMap["text"].(string); ok && len(text) > MinCompressSize {
+								partMap["text"] = CompressTextWithConfig(text, cfg)
+								compressed = true
+							}
+						}
+					}
+				}
 			}
 			continue
 		}
 
 		// OpenAI tool message
 		if msg["role"] == "tool" {
+			name, _ := msg["name"].(string)
+			if name == "" {
+				if callID, ok := msg["tool_call_id"].(string); ok {
+					name = toolMap[callID]
+				}
+			}
+			if isErrorToolResult(msg) || isProtectedTool(name) {
+				continue
+			}
 			if content, ok := msg["content"].(string); ok && len(content) > MinCompressSize {
 				msg["content"] = CompressTextWithConfig(content, cfg)
 				compressed = true
+			} else if contentArr, ok := msg["content"].([]any); ok {
+				for _, part := range contentArr {
+					if partMap, ok := part.(map[string]any); ok {
+						if t, ok := partMap["type"].(string); ok && t == "text" {
+							if text, ok := partMap["text"].(string); ok && len(text) > MinCompressSize {
+								partMap["text"] = CompressTextWithConfig(text, cfg)
+								compressed = true
+							}
+						}
+					}
+				}
 			}
 			continue
 		}
@@ -85,9 +195,34 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 				continue
 			}
 			if block["type"] == "tool_result" {
+				name, _ := block["name"].(string)
+				if name == "" {
+					if toolUseID, ok := block["tool_use_id"].(string); ok {
+						name = toolMap[toolUseID]
+					}
+				}
+				if isErrorToolResult(block) || isProtectedTool(name) {
+					continue
+				}
+
 				if text, ok := block["text"].(string); ok && len(text) > MinCompressSize {
 					block["text"] = CompressTextWithConfig(text, cfg)
 					compressed = true
+				}
+				if content, ok := block["content"].(string); ok && len(content) > MinCompressSize {
+					block["content"] = CompressTextWithConfig(content, cfg)
+					compressed = true
+				} else if innerArr, ok := block["content"].([]any); ok {
+					for _, innerPart := range innerArr {
+						if innerBlock, ok := innerPart.(map[string]any); ok {
+							if innerBlock["type"] == "text" {
+								if text, ok := innerBlock["text"].(string); ok && len(text) > MinCompressSize {
+									innerBlock["text"] = CompressTextWithConfig(text, cfg)
+									compressed = true
+								}
+							}
+						}
+					}
 				}
 			}
 			if block["type"] == "text" {
