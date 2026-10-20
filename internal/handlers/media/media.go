@@ -135,6 +135,15 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 			req.Header.Set(k, v)
 		}
 	}
+	// GitHub Copilot hands out a short-lived token alongside the OAuth
+	// credential, and the embeddings endpoint is authenticated by that token
+	// rather than by the stored one. It is set after the static-header loop
+	// because it replaces the Authorization header on purpose.
+	if connData != nil {
+		if copilotToken, ok := connData.ProviderSpecificData["copilotToken"].(string); ok && copilotToken != "" {
+			req.Header.Set("Authorization", "Bearer "+copilotToken)
+		}
+	}
 
 	start := time.Now()
 	resp, err := h.Client.Do(req)
@@ -294,11 +303,12 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 	resp, err := client.Do(req)
-	if err != nil && mayRetryDirect(client) {
+	if err != nil && r.Context().Err() == nil && mayRetryDirect(client) {
 		// Transport-level failure only (proxy block, DNS, reset): retry once
 		// direct before failing. A real upstream status (e.g. 403 account
 		// verification) must surface — retrying direct against the same
-		// target would mask it.
+		// target would mask it. A canceled request is neither: the caller is
+		// gone, so the retry would make a fresh connection for nobody.
 		directReq, err2 := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(finalBody))
 		if err2 == nil {
 			directReq.Header = req.Header.Clone()
@@ -840,6 +850,13 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			resp, err := client.Do(req)
 			if err != nil {
 				log.Warn("media", "upstream combo request failed", "endpoint", endpoint, "provider", subInfo.Provider, "model", subInfo.Model, "conn", conn.ID[:min(8, len(conn.ID))], "error", err)
+				// A cancelled caller is not a failed model. Trying the next
+				// member of the combo would make a fresh upstream connection
+				// for a client that has already gone.
+				if r.Context().Err() != nil {
+					handlerutil.WriteJSONError(w, 499, "client closed request")
+					return
+				}
 				lastErr = err.Error()
 				continue
 			}
