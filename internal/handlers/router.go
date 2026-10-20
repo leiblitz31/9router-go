@@ -170,6 +170,10 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	dashH := dashboard.NewDashboardHandler(repo, ts)
 	if chatH != nil {
 		dashH.SemanticCache = chatH.SemanticCache
+		// The engine's handler holds the limiter the data plane meters provider
+		// windows with, so the dashboard reports the same numbers the gate
+		// enforces instead of its own private view of them.
+		dashH.Limiter = chatH.RateLimiter
 	}
 	ssoH := sso.NewHandler(repo)
 
@@ -216,6 +220,12 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Put("/api/provider-nodes/{id}", dashH.HandleUpdateProviderNode)
 	r.Delete("/api/provider-nodes/{id}", dashH.HandleDeleteProviderNode)
 	r.Post("/api/provider-nodes/validate", dashH.HandleValidateProviderNode)
+	// Per-node capacity limits (docs/provider-limits-plan.md). These live here as
+	// well as in dashboard.RegisterRoutes because that table is mounted by tests
+	// only: a route added there alone is reachable in a unit test and 404s on the
+	// real server, which is how this pair was nearly shipped.
+	r.Put("/api/provider-nodes/{id}/limits", dashH.HandleUpdateProviderNodeLimits)
+	r.Post("/api/provider-nodes/{id}/quota/reset", dashH.HandleResetProviderNodeQuota)
 	r.Get("/api/providers/{id}/models", dashH.HandleGetConnectionModels)
 	r.Get("/api/providers/{id}/overrides", dashH.HandleGetProviderOverrides)
 	r.Put("/api/providers/{id}/overrides", dashH.HandleSaveProviderOverrides)
@@ -543,6 +553,12 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 		r.Use(guardrails.Inbound(guardrailStore, guardrailAudit(repo), guardrailSwitch))
 		engineChatH = SetupRoutes(r, repo, ts)
 	})
+
+	// The provider gate (docs/provider-limits-plan.md) reads the same limiter
+	// for its per-node buckets, which the per-key middleware never touches.
+	// Without this call the gate is inert on a real boot: its unit tests set
+	// the field by hand, so only a booted router can tell the difference.
+	engineChatH.SetRateLimiter(rateLimiter)
 
 	// Dashboard management API: login-gated when requireLogin is on, but still
 	// reachable with a valid API key or the local CLI token (upstream parity).

@@ -498,8 +498,63 @@ export interface ProviderNode {
   urlSuffixGenerated?: boolean
   createdAt?: string
   updatedAt?: string
+  /**
+   * The node's capacity policy plus what it has spent against it. Filled by the
+   * list endpoint, so the dashboard never has to make a second call to discover
+   * what a node is currently allowed.
+   */
+  limits?: ProviderNodeLimits
 }
 
+/**
+ * ProviderNodeLimits mirrors the Go side (ProviderNodeLimitsResponse). Live
+ * figures (`rpmUsedWindow`, `activeConcurrency`) come from the gateway's own
+ * limiter and read 0 when nothing has been metered yet.
+ */
+export interface ProviderNodeLimits {
+  rpm: number
+  tpm: number
+  concurrency: number
+  tokenQuota: number
+  queueTimeoutMs: number
+  quotaResetId: number
+  contractExpiresAt?: string
+  usedTokens: number
+  expired: boolean
+  rpmUsedWindow: number
+  activeConcurrency: number
+}
+
+/**
+ * ProviderNodeLimitsPatch is the write side. Every field is optional and an
+ * omitted field keeps its stored value — sending `0` is what clears one, and the
+ * distinction is the whole reason this is a separate call from updateProviderNode.
+ */
+export interface ProviderNodeLimitsPatch {
+  rpm?: number
+  tpm?: number
+  concurrency?: number
+  tokenQuota?: number
+  queueTimeoutMs?: number
+  /** RFC3339 or a date (YYYY-MM-DD); "" clears the expiry. */
+  contractExpiresAt?: string
+}
+
+/**
+ * CustomModelBatchEntry is one line of a bulk save. Capabilities travel per entry
+ * even though the dashboard sends them uniformly for the whole paste (D10): the
+ * endpoint stays general, and a caller that already holds per-entry values is not
+ * forced to collapse them into one set.
+ */
+export interface CustomModelBatchEntry {
+  id: string
+  name?: string
+  type?: string
+  vision?: boolean
+  reasoning?: boolean
+  contextWindow?: number
+  maxOutput?: number
+}
 
 export interface SystemVersionInfo {
   currentVersion: string
@@ -1184,6 +1239,26 @@ export const api = {
     request<{ success: boolean }>(`/api/provider-nodes/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }),
+  /**
+   * Save one node's capacity limits. Separate from updateProviderNode because
+   * that call requires name and prefix on every request: routing a limits edit
+   * through it would mean an empty field in the UI becomes a 400 for the whole
+   * save, and a limits save should never be able to rename a node.
+   */
+  setProviderNodeLimits: (id: string, patch: ProviderNodeLimitsPatch) =>
+    request<{ status: string; id: string; limits: ProviderNodeLimits }>(
+      `/api/provider-nodes/${encodeURIComponent(id)}/limits`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      }
+    ),
+  /** Move a node's quota mark to the end of its history. History is kept. */
+  resetProviderNodeQuota: (id: string) =>
+    request<{ status: string; id: string; quotaResetId: number; limits: ProviderNodeLimits }>(
+      `/api/provider-nodes/${encodeURIComponent(id)}/quota/reset`,
+      { method: 'POST' }
+    ),
   /** List models from a connection's upstream (compatible nodes; upstream GET /api/providers/[id]/models). */
   getConnectionModels: (connectionId: string) =>
     request<{ provider: string; connectionId: string; models: Array<{ id?: string; name?: string; model?: string } | string> }>(
@@ -1345,6 +1420,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ key, value }),
     }),
+  /**
+   * Save a whole pasted list of model ids in one request (D9). The response names
+   * every id it stored and every id it did not, so a partial save is visible
+   * instead of implied by a count that never came back.
+   */
+  saveCustomModelsBulk: (payload: {
+    providerAlias: string
+    type?: string
+    models: CustomModelBatchEntry[]
+  }) =>
+    request<{ status: string; added: string[]; skipped: Array<{ id: string; reason: string; code: string }> }>(
+      '/api/models/custom',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
   deleteCustomModel: (key: string) =>
     request<{ success: boolean }>(`/api/models/custom/${encodeURIComponent(key)}`, {
       method: 'DELETE',

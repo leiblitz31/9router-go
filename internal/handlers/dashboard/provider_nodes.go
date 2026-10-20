@@ -37,11 +37,29 @@ type ProviderNodeResponse struct {
 	URLSuffixGenerated bool   `json:"urlSuffixGenerated"`
 	CreatedAt          string `json:"createdAt"`
 	UpdatedAt          string `json:"updatedAt"`
+	// Limits is the node's capacity policy plus the usage it is measured against
+	// (PR4). The list fills it for every node so the editor never has to make a
+	// second call to discover what a node is currently allowed.
+	Limits *ProviderNodeLimitsResponse `json:"limits,omitempty"`
 }
 
 // HandleGetProviderNodes handles GET /api/provider-nodes.
 func (h *DashboardHandler) HandleGetProviderNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := h.Repo.GetProviderNodes()
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// One query for every policy and one for every usage, rather than a read per
+	// node: the list is the dashboard's node page, and a per-node read there
+	// would be N+1 on every load.
+	policies, err := h.Repo.ListProviderLimits(r.Context())
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	usage, err := h.Repo.ProviderTokenUsageByNode(r.Context())
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -70,6 +88,8 @@ func (h *DashboardHandler) HandleGetProviderNodes(w http.ResponseWriter, r *http
 		// after the type literal — so the list derives it the same way the
 		// create/update handlers composed it.
 		item.URLSuffix, item.URLSuffixGenerated = providerNodeSuffixOf(n.ID)
+		limits := h.providerNodeLimitsFrom(n.ID, policies[n.ID], usage[n.ID])
+		item.Limits = &limits
 
 		if n.Data != "" {
 			var dataObj struct {

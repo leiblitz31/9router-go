@@ -5,6 +5,7 @@ import (
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlers/shared"
+	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/observ"
 	"9router/proxy/internal/semanticcache"
 	"github.com/go-chi/chi/v5"
@@ -23,6 +24,11 @@ type DashboardHandler struct {
 	SecondaryProbeURL string
 	TokenSaver        *shared.TokenSaverConfig
 	SemanticCache     *semanticcache.Cache
+	// Limiter is the process-wide rate limiter, shared with the data plane so the
+	// dashboard reports the same provider windows the dispatch gate enforces. It
+	// is optional: a handler built outside a boot (tests, tooling) has none, and
+	// the live usage fields then read zero rather than being invented.
+	Limiter *middleware.RateLimiter
 }
 
 // NewDashboardHandler initializes a DashboardHandler with the provided Repo.
@@ -69,6 +75,11 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Put("/provider-nodes/{id}", h.HandleUpdateProviderNode)
 		r.Post("/provider-nodes/validate", h.HandleValidateProviderNode)
 		r.Delete("/provider-nodes/{id}", h.HandleDeleteProviderNode)
+		// Per-node capacity limits (docs/provider-limits-plan.md). The GET list
+		// above carries them too; these two write the policy and lift a spent
+		// token quota without touching the history the analytics reads.
+		r.Put("/provider-nodes/{id}/limits", h.HandleUpdateProviderNodeLimits)
+		r.Post("/provider-nodes/{id}/quota/reset", h.HandleResetProviderNodeQuota)
 
 		// Combos
 		r.Get("/combos", h.HandleGetCombos)

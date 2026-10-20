@@ -29,6 +29,7 @@
   } from '../../lib/oauth-handoff'
   import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
   import { copyToClipboard } from '../../lib/clipboard'
+  import { parseModelIds } from '../../lib/bulk-models'
   import {
     importCustomModelsBestEffort,
     notifyCustomModelsChanged,
@@ -72,6 +73,9 @@
   import EditConnectionModal, { type ConnectionUpdate } from './EditConnectionModal.svelte'
   import AddConnectionModal from './AddConnectionModal.svelte'
   import AddCustomModelModal from './AddCustomModelModal.svelte'
+  import { hasAnyNodeLimitPatch, nodeLimitsDraftOf, nodeLimitsSummary, nodeLimitsUsageSummary } from '../../lib/node-limits'
+  import type { ProviderNodeLimitsPatch } from '../../api/client'
+  import Badge from '../../lib/ui/Badge.svelte'
   import ProviderHeaderOverridesModal from './ProviderHeaderOverridesModal.svelte'
   import EditCompatibleNodeModal from './EditCompatibleNodeModal.svelte'
   import FreebuffSessionBanner from './FreebuffSessionBanner.svelte'
@@ -2290,6 +2294,21 @@
     }
   }
 
+  /**
+   * A bulk paste writes rows the panel's own list has to show, so the reload is
+   * the same one a single add does — the modal cannot do it, because the model
+   * list belongs to this view.
+   */
+  async function handleBulkModelsSaved() {
+    try {
+      const modelsData = await fetchProviderModelsData(providerId, storageAlias)
+      customModels = modelsData.customModels
+      notifyCustomModelsChanged()
+    } catch (err) {
+      alert(`Models were saved but the list could not be reloaded: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   async function handleAddKeyConnection(payload: CreateConnectionPayload) {
     addConnectionError = ''
     try {
@@ -2333,19 +2352,38 @@
     apiType?: string
     baseUrl: string
     urlSuffix: string
+    limits: ProviderNodeLimitsPatch
   }) {
     if (!selectedNode) return
+    const previousId = selectedNode.id
     try {
-      const res = await api.updateProviderNode(selectedNode.id, {
+      const res = await api.updateProviderNode(previousId, {
         name: data.name,
         prefix: data.prefix,
         ...(selectedNode.type === 'openai-compatible' && data.apiType ? { apiType: data.apiType } : {}),
         baseUrl: data.baseUrl,
         urlSuffix: data.urlSuffix || undefined
       })
+      // The id the server answered with, which differs from the one we sent when the
+      // URL suffix changed. The policy is written against that id: the limits columns
+      // live on the node's own row, so an edited suffix moves them, and a write aimed
+      // at the old id would leave the node looking unlimited.
+      const savedId = res?.node?.id || previousId
+      if (hasAnyNodeLimitPatch(data.limits)) {
+        try {
+          const saved = await api.setProviderNodeLimits(savedId, data.limits)
+          selectedNode = { ...selectedNode, id: savedId, limits: saved.limits }
+        } catch (err) {
+          alert(
+            `Provider node saved, but its capacity limits did not: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+      } else {
+        selectedNode = { ...selectedNode, id: savedId }
+      }
       showEditNodeModal = false
-      if (res?.node?.id && res.node.id !== selectedNode.id) {
-        onSelectProvider?.(res.node.id)
+      if (savedId !== previousId) {
+        onSelectProvider?.(savedId)
       }
       onRefresh()
     } catch (err) {
@@ -2371,9 +2409,46 @@
     }
   }
 
+  // The Model ID field above is where an operator actually pastes a provider's model
+  // list, so it takes one id or a whole list. Splitting happens on the same separators
+  // the Add Model dialog uses (spaces, commas, semicolons, newlines), because "paste
+  // three ids and get one model whose id contains the spaces" is what this field did
+  // before — a row nothing can address without reproducing them exactly.
+  let newCompatibleModelsPlan = $derived(parseModelIds(newCompatibleModel, storageAlias))
+
   async function handleAddCompatibleModel() {
-    const modelId = newCompatibleModel.trim()
-    if (!modelId || isAddingCompatibleModel) return
+    const plan = parseModelIds(newCompatibleModel.trim(), storageAlias)
+    if (plan.ids.length === 0 || isAddingCompatibleModel) return
+    if (plan.ids.length === 1) {
+      await addOneCompatibleModel(plan.ids[0])
+      return
+    }
+    isAddingCompatibleModel = true
+    try {
+      // One request for the list, so a refused line cannot stop the ones after it, and
+      // the response says which lines landed instead of leaving it to the refresh.
+      const out = await api.saveCustomModelsBulk({
+        providerAlias: storageAlias,
+        models: plan.ids.map((id) => ({ id, type: 'llm' })),
+      })
+      newCompatibleModel = ''
+      await refreshCompatibleModels()
+      notifyCustomModelsChanged()
+      if (out.skipped.length > 0) {
+        alert(
+          `Added ${out.added.length} of ${plan.ids.length}.\n\nNot added:\n` +
+            out.skipped.map((skip) => `${skip.id} — ${skip.reason}`).join('\n'),
+        )
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to add models')
+      console.error('Error adding models:', err)
+    } finally {
+      isAddingCompatibleModel = false
+    }
+  }
+
+  async function addOneCompatibleModel(modelId: string) {
     if (compatibleRows.some((r) => r.id === modelId)) {
       alert('Model already exists for this provider.')
       return
@@ -2389,8 +2464,8 @@
       await refreshCompatibleModels()
       notifyCustomModelsChanged()
     } catch (err) {
-      // A refusal (the id already addresses a combo or a model alias) has to
-      // reach the user, like the other import paths on this page.
+      // A refusal (the id cannot be an address, or it already means something else) has
+      // to reach the user, like the other import paths on this page.
       alert(err instanceof Error ? err.message : 'Failed to add model')
       console.error('Error adding model:', err)
     } finally {
@@ -2955,6 +3030,22 @@
             Delete
           </button>
         </div>
+      </div>
+      <!-- Status only: the policy is edited in the node's dialog (the same fields as
+           Name and Base URL there), so this line answers "what is this node allowed"
+           without turning the page into a form. -->
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-muted">
+        <span class="font-medium text-text-main">Capacity</span>
+        <span class="font-mono">{nodeLimitsSummary(nodeLimitsDraftOf(selectedNode.limits ?? null))}</span>
+        {#if selectedNode.limits}
+          <span class="text-text-subtle">·</span>
+          <span class="font-mono">{nodeLimitsUsageSummary(selectedNode.limits)}</span>
+          {#if selectedNode.limits.expired}
+            <Badge tone="error">Contract ended</Badge>
+          {:else if selectedNode.limits.tokenQuota > 0 && selectedNode.limits.usedTokens >= selectedNode.limits.tokenQuota}
+            <Badge tone="error">Quota spent</Badge>
+          {/if}
+        {/if}
       </div>
     </div>
   {/if}
@@ -3693,9 +3784,20 @@
             type="text"
             bind:value={newCompatibleModel}
             onkeydown={(e) => { if (e.key === 'Enter') handleAddCompatibleModel() }}
-            placeholder={isAnthropicCompatibleNode ? 'claude-3-opus-20240229' : 'gpt-4o'}
+            placeholder={isAnthropicCompatibleNode ? 'claude-3-opus-20240229' : 'gpt-4o — paste a list for several'}
             class="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
           />
+          {#if newCompatibleModelsPlan.ids.length > 1 || newCompatibleModelsPlan.invalid.length > 0}
+            <p class="text-xs text-text-muted mt-1">
+              {newCompatibleModelsPlan.ids.length} id{newCompatibleModelsPlan.ids.length === 1 ? '' : 's'} to add
+              {#if newCompatibleModelsPlan.duplicates.length > 0}
+                · {newCompatibleModelsPlan.duplicates.length} repeated
+              {/if}
+              {#if newCompatibleModelsPlan.invalid.length > 0}
+                · {newCompatibleModelsPlan.invalid.length} rejected (no slash, pipe or quotes in an id)
+              {/if}
+            </p>
+          {/if}
         </div>
         <button
           type="button"
@@ -4672,6 +4774,7 @@
   providerAlias={storageAlias}
   onClose={() => (showAddCustomModelModal = false)}
   onSave={submitAddCustomModel}
+  onBulkSaved={handleBulkModelsSaved}
 />
 {/if}
 
@@ -4689,6 +4792,9 @@
   isAnthropic={isAnthropicCompatibleNode}
   onClose={() => (showEditNodeModal = false)}
   onSave={handleSaveEditedNode}
+  onLimitsSaved={(limits) => {
+    selectedNode = selectedNode ? { ...selectedNode, limits } : selectedNode
+  }}
 />
 
 <!-- 6. Add Key Connection Modal (for non-oauth providers) -->

@@ -423,6 +423,44 @@ func (r *Repo) SetKV(scope, key, value string) error {
 	return nil
 }
 
+// KVEntry is one key-value pair written by SetKVMany.
+type KVEntry struct {
+	Key   string
+	Value string
+}
+
+// SetKVMany writes every entry of one scope in a single transaction.
+//
+// The bulk custom-model save is one request by design
+// (docs/provider-limits-plan.md D9), and a response that reports "8 added" must
+// not leave three of them written because the process stopped halfway: either the
+// batch lands or none of it does. The per-line reasons in that response explain
+// the lines the caller dropped before the write, which is where a genuinely
+// rejected line belongs — not in a half-applied table.
+func (r *Repo) SetKVMany(ctx context.Context, scope string, entries []KVEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set kv batch [%s]: %w", scope, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, entry := range entries {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO kv (scope, key, value) VALUES (?, ?, ?) ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value`,
+			scope, entry.Key, entry.Value,
+		); err != nil {
+			return fmt.Errorf("set kv batch [%s] %s: %w", scope, entry.Key, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set kv batch [%s]: %w", scope, err)
+	}
+	return nil
+}
+
 // DeleteKV removes a key-value pair for a given scope.
 func (r *Repo) DeleteKV(scope, key string) error {
 	_, err := r.db.Exec(`DELETE FROM kv WHERE scope = ? AND key = ?`, scope, key)

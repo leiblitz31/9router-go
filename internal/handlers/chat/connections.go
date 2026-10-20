@@ -384,6 +384,19 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 			return nil, nil, fmt.Errorf("no connection for provider %s has model %s enabled", provider, model)
 		}
 
+		// Node state before rotation: a node whose contract has ended, or whose
+		// lifetime token quota is spent, must not receive the request at all — and
+		// the verdict comes from the same helper the dispatch path asks, so a node
+		// skipped here cannot be admitted there (docs/provider-limits-plan.md D7).
+		// Only custom providers carry those two fields, so a registry provider
+		// passes through untouched.
+		nodeState := providerLimitStateFrom(ctx)
+		if refusal, blocked := h.providerNodeBlocked(ctx, nodeState, provider, h.providerLimitsFor(ctx, nodeState, provider)); blocked {
+			log.Warn("connections", "provider node unusable",
+				"provider", provider, "model", model, "axis", refusal.Axis)
+			return nil, nil, h.providerLimitError(ctx, provider, refusal)
+		}
+
 		// Rotate only connections eligible for the requested model.
 		if len(connections) > 1 && settingsErr == nil && settings != nil {
 			strat := connRotationStrategy(settings, provider)

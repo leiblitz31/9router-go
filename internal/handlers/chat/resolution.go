@@ -415,6 +415,20 @@ func (h *ChatHandler) resolvePrefixProvider(prefix string, model string) *ModelI
 
 	conn, _, err := h.getBestConnection(node.ID, "", nil, model)
 	if err != nil || conn == nil {
+		// A provider refusal is the one failure this must not swallow into a
+		// bare-prefix lookup: the prefix is not a provider any connection is
+		// registered under, so the client would read "no active connections for
+		// provider: <prefix>" and never see the reason the node gave — an expired
+		// contract, a spent lifetime quota, or a node at its own capacity.
+		// Pinning the node lets the dispatch path answer with its own typed
+		// refusal, which is what it does for every other caller.
+		//
+		// Every other failure keeps the previous behaviour: resolution falls
+		// through to the bare prefix and the connection error surfaces from the
+		// path that owns it.
+		if _, refused := providerLimitRefusal(err); refused {
+			return &ModelInfo{Provider: node.ID, Model: model}
+		}
 		return nil
 	}
 

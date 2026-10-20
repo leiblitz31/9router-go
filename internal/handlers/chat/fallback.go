@@ -173,6 +173,19 @@ func (h *ChatHandler) handleAccountFallback(
 			lastErr = err
 			observ.IncFallback(provider, model, observ.FallbackReasonUpstreamError)
 		}
+		// A node-state refusal (contract ended, lifetime quota spent) answers 403, which
+		// is a retryable status, so without this it would fall into the generic branch
+		// below and park the connection for two minutes on the model *and* on the
+		// account — for a fact about the node, not about the credential. The combo loops
+		// already intercept it before their writers; the single-provider path arrives
+		// here, through a pinned connection that skipped the selection-time check.
+		if _, refused := providerLimitRefusal(lastErr); refused {
+			log.Info("fallback", "provider node state, not locking the account",
+				"provider", provider, "model", model, "conn", connObj.ID)
+			excludeIDs = append(excludeIDs, connObj.ID)
+			continue
+		}
+
 		var ue *upstreamError
 		if errors.As(lastErr, &ue) && providers.IsModelDeprecation(ue.StatusCode, ue.Body) {
 			// A retired model fails on every account of this provider, so the
@@ -662,21 +675,45 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		defer gtap.Close()
 	}
 
-	// Hand the usage meter a way to reconcile the limiter's TPM reservation
-	// against what the turn actually cost.
+	// Provider-scope capacity limits (docs/provider-limits-plan.md, PR 2). A custom
+	// provider is one upstream endpoint shared by every connection under it, so its
+	// RPM/TPM/concurrency are enforced here — once per attempt, against the body
+	// about to be sent — rather than in a middleware: the provider is only known
+	// after model resolution, and a refusal must fail over to the next candidate
+	// instead of ending the request.
 	//
-	// The reservation is read back off the context rather than recomputed: the
-	// limiter estimated from the body it had already read, and estimating twice
-	// from a body that may have been rewritten since would settle the charge
-	// against a number that was never charged.
-	if reserved, ok := middleware.ReservedTokensFromContext(ctx); ok && h.RateLimiter != nil {
-		if clientKey := requestKeyFromContext(ctx); clientKey != nil {
-			ctx = middleware.WithTokenSettler(ctx, func(actual int) {
+	// The slot is released when this attempt ends, on every path including
+	// failover. Holding it for the rest of the request would let one pass lock the
+	// node out of the concurrency it was granted (D6).
+	providerSlot, providerRefusal := h.acquireProviderAttempt(ctx, provider, model, connectionID, pipedBody)
+	if providerRefusal != nil {
+		return providerRefusal
+	}
+	if providerSlot != nil {
+		defer providerSlot.Release()
+	}
+
+	// Hand the usage meter a way to reconcile the limiter's TPM reservations —
+	// the caller's own and this provider's — against what the turn actually cost.
+	//
+	// Both are read back off the context rather than recomputed: the limiter
+	// estimated from the body it had already read, and estimating twice from a
+	// body that may have been rewritten since would settle the charge against a
+	// number that was never charged.
+	reserved, keyReserved := middleware.ReservedTokensFromContext(ctx)
+	if (keyReserved || providerSlot != nil) && h.RateLimiter != nil {
+		clientKey := requestKeyFromContext(ctx)
+		ctx = middleware.WithTokenSettler(ctx, func(actual int) {
+			if keyReserved && clientKey != nil {
 				if limit := h.RateLimiter.EffectiveTPM(h.rateLimitDefaults(), clientKey); limit > 0 {
 					h.RateLimiter.SettleTokenUsage(clientKey.ID, limit, reserved, actual)
 				}
-			})
-		}
+			}
+			// The provider's TPM is charged prompt-side and settled with the
+			// turn's prompt+completion total, which is the accounting the plan
+			// chose (D7, decision 3).
+			providerSlot.Settle(actual)
+		})
 	}
 
 	if exec := executor.Get(provider); exec != nil {

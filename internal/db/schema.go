@@ -313,6 +313,19 @@ var goOnlyColumns = [][3]string{
 	{"usageHistory", "clientKey", "TEXT DEFAULT ''"},
 	// F-3 Plans: reusable policy template
 	{"apiKeys", "planId", "TEXT DEFAULT ''"},
+	// Per-custom-provider capacity limits (docs/provider-limits-plan.md). These
+	// bound what one upstream endpoint tolerates, which is a different axis from
+	// the apiKeys limits above (what one caller may spend): a custom provider is
+	// one providerNodes row whatever it calls, so the policy hangs off the node
+	// every one of its connections shares. 0 means unlimited and "" means no
+	// expiry, the same convention rateLimitRPM and expiresAt already use.
+	{"providerNodes", "rpmLimit", "INTEGER DEFAULT 0"},
+	{"providerNodes", "tpmLimit", "INTEGER DEFAULT 0"},
+	{"providerNodes", "concurrencyLimit", "INTEGER DEFAULT 0"},
+	{"providerNodes", "tokenQuota", "INTEGER DEFAULT 0"},
+	{"providerNodes", "queueTimeoutMs", "INTEGER DEFAULT 0"},
+	{"providerNodes", "quotaResetId", "INTEGER DEFAULT 0"},
+	{"providerNodes", "contractExpiresAt", "TEXT DEFAULT ''"},
 }
 
 // keiRouterTables are Go-only tables for KeiRouter port features.
@@ -405,11 +418,26 @@ var keiRouterTables = []tableDef{
 // per-family split, the analytics scans, the topology map — each of which would
 // then need its own filter, and any one of them forgetting it reports spend that
 // never happened.
+//
+// providerLedgerCarryover is the same mechanism for a custom provider's token
+// quota: usageHistory.provider holds the node id for every request routed
+// through it (resolution.go returns node.ID), so a node's spend is one indexed
+// equality — and therefore one more budget a prune could silently refund if the
+// tokens it deletes were not carried somewhere. One row per node, read by
+// ProviderTokenUsage.
 var usageLedgerTables = []tableDef{
 	{
 		name: "usageLedgerCarryover",
 		columns: [][2]string{
 			{"keyId", "TEXT PRIMARY KEY"},
+			{"tokens", "INTEGER NOT NULL DEFAULT 0"},
+			{"updatedAt", "TEXT NOT NULL"},
+		},
+	},
+	{
+		name: "providerLedgerCarryover",
+		columns: [][2]string{
+			{"providerId", "TEXT PRIMARY KEY"},
 			{"tokens", "INTEGER NOT NULL DEFAULT 0"},
 			{"updatedAt", "TEXT NOT NULL"},
 		},
