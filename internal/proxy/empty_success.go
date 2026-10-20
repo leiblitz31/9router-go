@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"9router/proxy/internal/handlerutil"
@@ -390,27 +392,49 @@ func IsZeroContentResponse(body []byte) bool {
 // false, 0 and "" are falsy and let delta through. An object (including
 // `{}`), an array (including `[]`), a non-empty string and a non-zero
 // number are truthy, so upstream reads them as the message and never the
-// delta — that is why `[]` is not treated as absent here.
+// delta — that is why `[]` is not treated as absent here: in JS every
+// object and every array is truthy, even an empty one.
+//
+// The classification is done on the raw text, not on a decoded value.
+// Decoding the whole message into `any` costs an allocation of the entire
+// value on every probe, for a question its first byte already answers.
+// It is also wrong: a number outside float64 range (`1e400`) is a value Go
+// refuses to decode, and treating the failed decode as "absent" would drop
+// to delta where upstream reads `Infinity` — a truthy value — as the
+// message. Reading the text keeps both halves of upstream's behaviour.
 func probeMessageFallsThroughToDelta(raw jsontext.Value) bool {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return true
 	}
-	var v any
-	if err := json.Unmarshal(trimmed, &v, handlerutil.UpstreamBody); err != nil {
+	switch trimmed[0] {
+	case 'n': // null
 		return true
-	}
-	switch t := v.(type) {
-	case nil:
+	case 'f': // false
 		return true
-	case bool:
-		return !t
-	case float64:
-		return t == 0
-	case string:
-		return t == ""
+	case 't': // true
+		return false
+	case '"':
+		// Only the empty string literal is falsy; "0" and "false" are
+		// truthy strings upstream.
+		return bytes.Equal(trimmed, []byte(`""`))
+	case '{', '[':
+		// Objects and arrays are truthy in JS, empty ones included.
+		return false
+	default:
+		// A number. Zero is falsy, -0 and 0.0 included, and so is a value
+		// that underflows to zero (upstream's JSON.parse("1e-400") is 0).
+		// A value that overflows to Infinity stays truthy, which is why an
+		// out-of-range parse must not be read as an absent value.
+		num, err := strconv.ParseFloat(string(trimmed), 64)
+		if err != nil && !errors.Is(err, strconv.ErrRange) {
+			// Not a number JSON allows; upstream's JSON.parse would have
+			// rejected the body as well, so keep the value rather than
+			// dropping to delta.
+			return false
+		}
+		return num == 0
 	}
-	return false
 }
 
 func probeHasReasoning(raw jsontext.Value) bool {

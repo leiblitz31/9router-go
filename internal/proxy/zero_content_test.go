@@ -180,6 +180,55 @@ func TestIsZeroContentResponse(t *testing.T) {
 			body: `{"choices":[{"message":1,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
 			want: true,
 		},
+		// Numbers outside float64 range still have a truth value upstream:
+		// JSON.parse("1e400") is Infinity, which is truthy, and
+		// JSON.parse("1e-400") is 0, which is falsy. Deciding truthiness by
+		// whether the value could be decoded would read both as absent.
+		{
+			name: "number overflowing to infinity is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":1e400,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "negative number overflowing to infinity is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":-1e400,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "number overflowing past the float64 ceiling is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":1e309,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "number underflowing to zero falls through to delta",
+			body: `{"choices":[{"message":1e-400,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "integer too large for float64 is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":123456789012345678901234567890,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "zero written as a decimal is falsy and falls through to delta",
+			body: `{"choices":[{"message":0.0,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "empty-object message is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":{},"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "object message with an out-of-range number is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":{"tokens":1e400},"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "object message with content and an out-of-range number carries content (not zero content)",
+			body: `{"choices":[{"message":{"content":"x","t":1e400},"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
 		{
 			name: "a non-JSON body",
 			body: `upstream error 500`,
