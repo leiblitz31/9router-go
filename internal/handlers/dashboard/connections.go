@@ -138,7 +138,7 @@ const (
 // (registry features.usage).
 var usageSupportedProviders = []string{
 	"antigravity", "claude", "codebuddy-cn", "codebuddy-intl", "codex",
-	"commandcode", "deepseek", "gemini-cli", "github", "glm", "glm-cn",
+	"commandcode", "deepseek", "gemini-cli", "gemini-web", "github", "glm", "glm-cn",
 	"grok-cli", "groq", "kimi", "kiro", "minimax", "minimax-cn", "minimax-code",
 	"minimax-code-global", "ollama",
 	"opencode-go", "opencode-zen", "qoder", "qoder-cn", "trae",
@@ -148,7 +148,7 @@ var usageSupportedProviders = []string{
 // usageApikeyProviders mirrors upstream USAGE_APIKEY_PROVIDERS
 // (registry features.usageApikey).
 var usageApikeyProviders = []string{
-	"codebuddy-cn", "codebuddy-intl", "commandcode", "deepseek", "glm",
+	"codebuddy-cn", "codebuddy-intl", "commandcode", "deepseek", "gemini-web", "glm",
 	"glm-cn", "groq", "kimi", "kiro", "minimax", "minimax-cn", "ollama",
 	"opencode-go", "opencode-zen", "qoder", "qoder-cn", "vercel-ai-gateway",
 	"xiaomi-mimo",

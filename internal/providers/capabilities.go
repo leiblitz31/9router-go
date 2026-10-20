@@ -476,25 +476,36 @@ func init() {
 	// gemini-web overrides the generic `*gemini-3*` pattern row. The web surface
 	// and the API surface both answer `gemini-3*` requests, but they are not the
 	// same product, and the pattern row was written for the API. What the site's
-	// own composer offers is text and three thinking levels: no image input, no
-	// audio, no video, and no search toggle the executor can set. Declaring them
+	// own composer offers is text, images and three thinking levels: no audio,
+	// no video, and no search toggle the executor can set. Declaring them
 	// would advertise controls that silently do nothing.
+	//
+	// Vision is set because the site's own composer accepts an image: the
+	// bytes go to Google's content-push service and the path it returns
+	// travels with the turn. That is the same attachment mechanism the
+	// reference bridge uses, and it was verified live against
+	// gemini.google.com on 2026-10-20.
 	//
 	// "gemini-level" is the site's own enum (low/medium/high) and it cannot be
 	// turned off: level 1 is thinking's own floor.
 	//
 	// Every catalogued name is listed, not only the versioned ones: a name that
 	// falls through to the generic `*gemini-3*` pattern row would advertise the
-	// API surface's vision and search flags, which is the outcome this override
+	// API surface's search flag, which is the outcome this override exists to
+	// prevent.
+	geminiWebCaps := Capabilities{Vision: true, Tools: true, Reasoning: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}
+	// The Lite models do not think: the site's registry publishes no
+	// reasoning level for them, and their own names say so. Advertising a
+	// thinking level for a model that has none is the outcome the override
 	// exists to prevent.
-	geminiWebCaps := Capabilities{Tools: true, Reasoning: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}
+	geminiWebLiteCaps := Capabilities{Vision: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}
 	providerCapabilities["gemini-web"] = map[string]Capabilities{
 		"gemini-3.1-pro":        geminiWebCaps,
 		"gemini-3.7-flash":      geminiWebCaps,
-		"gemini-3.1-flash-lite": geminiWebCaps,
+		"gemini-3.1-flash-lite": geminiWebLiteCaps,
 		"gemini-pro":            geminiWebCaps,
 		"gemini-flash":          geminiWebCaps,
-		"gemini-flash-lite":     geminiWebCaps,
+		"gemini-flash-lite":     geminiWebLiteCaps,
 		"gemini-argon":          geminiWebCaps,
 		"gemini-3-pro":          geminiWebCaps,
 		"gemini-4-argon":        geminiWebCaps,

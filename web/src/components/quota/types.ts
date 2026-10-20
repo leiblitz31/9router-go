@@ -893,6 +893,36 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
         }
         break
 
+      case 'gemini-web':
+        // The site publishes two windows: a rolling five-hour one and a
+        // weekly pool. The order is fixed here because the gateway's map has
+        // no order of its own, and a table whose rows move between refreshes
+        // reads as a bug.
+        if (d.quotas) {
+          const GEMINI_WEB_QUOTA_ORDER = ['5h', 'weekly']
+          const entries = Object.entries(d.quotas).sort(([a], [b]) => {
+            const ia = GEMINI_WEB_QUOTA_ORDER.indexOf(a)
+            const ib = GEMINI_WEB_QUOTA_ORDER.indexOf(b)
+            return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
+          })
+          entries.forEach(([name, quota]) => {
+            const row: NormalizedQuota = {
+              name: (quota.displayName as string) || name,
+              modelKey: name,
+              used: Number(quota.used) || 0,
+              total: Number(quota.total) || 0,
+              resetAt: (quota.resetAt as string) || null,
+            }
+            if (quota.remaining !== undefined) row.remaining = Number(quota.remaining)
+            if (quota.remainingPercentage !== undefined) {
+              row.remainingPercentage = Number(quota.remainingPercentage)
+            }
+            if (quota.unlimited !== undefined) row.unlimited = Boolean(quota.unlimited)
+            normalizedQuotas.push(row)
+          })
+        }
+        break
+
       default:
         if (d.message && !d.quotas) {
           normalizedQuotas.push({

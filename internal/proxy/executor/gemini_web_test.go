@@ -58,6 +58,11 @@ type geminiWebFakeUpstream struct {
 	// bootstrap page — the shape a live site uses to hand the session a fresh
 	// value for a cookie the caller already presented.
 	rotateCookieTS string
+	// uploadPath is what the content-push service answers with. Empty makes
+	// the upload fail, which is how a site that refuses the image is tested.
+	uploadPath string
+	// uploadStatus overrides the HTTP status the upload answers with.
+	uploadStatus int
 }
 
 func newGeminiWebFakeUpstream(t *testing.T) *geminiWebFakeUpstream {
@@ -125,6 +130,17 @@ func (f *geminiWebFakeUpstream) body(path string) string {
 func (f *geminiWebFakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.record(r)
 	switch {
+	case r.URL.Path == geminiWebUploadPath:
+		// The content-push service answers with the path the site resolves
+		// the attachment by.
+		status := f.uploadStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		if f.uploadPath != "" {
+			w.Write([]byte(f.uploadPath))
+		}
 	case strings.Contains(r.URL.Path, "batchexecute"):
 		w.WriteHeader(f.registryStatus)
 		w.Write([]byte(")]}'\n\n" + f.registryBody + "\n"))
@@ -1363,7 +1379,7 @@ func TestGeminiWebArgonCarriesItsThinkingLevel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.effort, func(t *testing.T) {
 			body := geminiWebRequestEnvelope{Model: "gemini-4-argon", ReasoningEffort: tt.effort}
-			if got := geminiWebThinkingLevel(body); got != tt.want {
+			if got := geminiWebThinkingLevel(body, nil); got != tt.want {
 				t.Errorf("effort %q mapped to %d, want %d", tt.effort, got, tt.want)
 			}
 		})

@@ -33,6 +33,10 @@ var (
 	// why it is read opportunistically rather than required — see
 	// geminiWebTokens for what its absence means.
 	geminiWebAtRe = regexp.MustCompile(`"SNlM0e":"([^"]+)"`)
+	// geminiWebPushIDRe is the feed id the page carries. It ties an uploaded
+	// image to the session that uploaded it, so it is read alongside the other
+	// page tokens.
+	geminiWebPushIDRe = regexp.MustCompile(`"(?:qKIAYe|q2k)":"(feeds/[a-z0-9]+)"`)
 )
 
 // Gemini Web answers an anonymous visitor: `gemini.google.com/app` issues the
@@ -69,6 +73,11 @@ type geminiWebEndpoints struct {
 	app    string
 	batch  string
 	stream string
+	// upload is the content-push service an image is uploaded to. It is a
+	// different host from the site — the site's own composer uploads
+	// cross-site to it — so it is not derived from the origin. A test points
+	// it at its own server through geminiWebUploadEndpointOverride.
+	upload string
 }
 
 // geminiWebEndpointsFor resolves the endpoints for one connection.
@@ -79,11 +88,19 @@ func geminiWebEndpointsFor(cfg *providers.ProviderConfig) geminiWebEndpoints {
 			origin = parsed
 		}
 	}
+	upload := geminiWebUploadEndpoint
+	if origin != geminiWebOrigin {
+		// A mirror (or a test) is one server, so the upload goes there too:
+		// the public content-push host is reachable from a public origin and
+		// from nowhere else.
+		upload = origin + geminiWebUploadPath
+	}
 	return geminiWebEndpoints{
 		origin: origin,
 		app:    origin + "/app",
 		batch:  origin + geminiWebBatchPath,
 		stream: origin + geminiWebStreamPath,
+		upload: upload,
 	}
 }
 
@@ -169,6 +186,10 @@ type geminiWebTokens struct {
 	// cookie bought nothing, which is worth reporting rather than silently
 	// sending anonymous-shaped requests.
 	at string
+	// pushID is the feed the page belongs to. It travels with an image
+	// upload, and a page that carries none falls back to the site's own
+	// default — see geminiWebUploadDefaultPush.
+	pushID string
 }
 
 // tokens returns the cached page tokens, fetching them when they are absent or
@@ -216,6 +237,9 @@ func (s *geminiWebSession) refreshTokens(ctx context.Context) (geminiWebTokens, 
 	tokens := geminiWebTokens{bl: bl[1], fSid: fSid[1]}
 	if at := geminiWebAtRe.FindStringSubmatch(html); len(at) >= 2 {
 		tokens.at = at[1]
+	}
+	if pushID := geminiWebPushIDRe.FindStringSubmatch(html); len(pushID) >= 2 {
+		tokens.pushID = pushID[1]
 	}
 	s.page, s.fetched = tokens, time.Now()
 	return tokens, nil
@@ -275,6 +299,7 @@ func (s *geminiWebSession) streamTurn(
 	prompt string,
 	thinkingLevel int,
 	model *geminiWebModel,
+	attachments []geminiWebAttachment,
 	onLine func(*geminiWebLine) error,
 ) error {
 	tokens, err := s.tokens(ctx)
@@ -290,7 +315,11 @@ func (s *geminiWebSession) streamTurn(
 		log.Warn("gemini-web", "the configured cookie produced no SNlM0e token; the site served an anonymous page",
 			"hint", "the cookie is likely stale or missing __Secure-1PSID")
 	}
-	inner := geminiWebBuildInner(prompt, thinkingLevel)
+	modelNumber := 1
+	if model != nil {
+		modelNumber = model.Number
+	}
+	inner := geminiWebBuildInner(prompt, thinkingLevel, modelNumber, attachments)
 	uuid := geminiWebRequestUUID()
 	inner[geminiWebSlotRequestUUID] = uuid
 	innerJSON, err := json.Marshal(inner)
