@@ -110,6 +110,76 @@ func TestIsZeroContentResponse(t *testing.T) {
 			body: `{"choices":[{"message":{"content":""},"delta":{"content":"text in delta"},"finish_reason":"in_progress"}]}`,
 			want: true,
 		},
+		// upstream: const msg = choice.message || choice.delta;
+		// `||` tests truthiness, so a present-but-falsy message must still let
+		// delta through rather than being taken as the message.
+		{
+			name: "falsy empty-string message falls through to delta",
+			body: `{"choices":[{"message":"","delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "falsy false message falls through to delta",
+			body: `{"choices":[{"message":false,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "falsy zero message falls through to delta",
+			body: `{"choices":[{"message":0,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "falsy negative-zero message falls through to delta",
+			body: `{"choices":[{"message":-0,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "falsy message falls through to a delta that carries tool_calls",
+			body: `{"choices":[{"message":0,"delta":{"tool_calls":[{"id":"call_1","function":{"name":"search"}}]},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "absent message falls through to delta",
+			body: `{"choices":[{"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "null message falls through to delta",
+			body: `{"choices":[{"message":null,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: false,
+		},
+		{
+			name: "falsy message with no delta is still zero content",
+			body: `{"choices":[{"message":"","finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "falsy message with a normal finish and no delta is not zero content",
+			body: `{"choices":[{"message":false,"finish_reason":"stop"}]}`,
+			want: false,
+		},
+		// Objects, arrays, non-empty strings and non-zero numbers are truthy in
+		// JS, so upstream reads them as the message and never reaches delta.
+		{
+			name: "empty-array message is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":[],"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "non-empty string message is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":"0","delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "true message is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":true,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
+		{
+			name: "non-zero number message is truthy and hides the delta (zero content)",
+			body: `{"choices":[{"message":1,"delta":{"content":"d"},"finish_reason":"in_progress"}]}`,
+			want: true,
+		},
 		{
 			name: "a non-JSON body",
 			body: `upstream error 500`,

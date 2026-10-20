@@ -321,11 +321,11 @@ func IsZeroContentResponse(body []byte) bool {
 					return true
 				}
 				c := choices[0]
-				// upstream reads message only when present (Boolean(choice.message) in JS);
-				// only falls back to delta when message is absent/null.
+				// upstream: const msg = choice.message || choice.delta;
+				// `||` tests truthiness, not presence, so a present-but-falsy
+				// message ("", false, 0) reads delta too.
 				msgRaw := c.Message
-				trimmedMsg := bytes.TrimSpace(msgRaw)
-				if len(trimmedMsg) == 0 || bytes.Equal(trimmedMsg, []byte("null")) {
+				if probeMessageFallsThroughToDelta(msgRaw) {
 					msgRaw = c.Delta
 				}
 
@@ -381,6 +381,35 @@ func IsZeroContentResponse(body []byte) bool {
 		}
 	}
 
+	return false
+}
+
+// probeMessageFallsThroughToDelta reports whether upstream's
+// `choice.message || choice.delta` reads delta for this message value.
+// JavaScript's `||` tests truthiness rather than presence: absent, null,
+// false, 0 and "" are falsy and let delta through. An object (including
+// `{}`), an array (including `[]`), a non-empty string and a non-zero
+// number are truthy, so upstream reads them as the message and never the
+// delta — that is why `[]` is not treated as absent here.
+func probeMessageFallsThroughToDelta(raw jsontext.Value) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return true
+	}
+	var v any
+	if err := json.Unmarshal(trimmed, &v, handlerutil.UpstreamBody); err != nil {
+		return true
+	}
+	switch t := v.(type) {
+	case nil:
+		return true
+	case bool:
+		return !t
+	case float64:
+		return t == 0
+	case string:
+		return t == ""
+	}
 	return false
 }
 
