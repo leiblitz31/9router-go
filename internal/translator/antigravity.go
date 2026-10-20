@@ -235,7 +235,24 @@ var (
 	harnessBrandOMP             = regexp.MustCompile(`(?i)Oh My Pi`)
 	harnessBrandOMPLive         = regexp.MustCompile(`(?i)omp Live`)
 	claudeBillingHeaderRegex    = regexp.MustCompile(`(?im)^x-anthropic-billing-header:[^\n]*(?:\r?\n)*`)
-	hermesIdentityRegex         = regexp.MustCompile(`(?i)You are Hermes Agent,\s*(an intelligent AI assistant)(?: created by Nous Research)?\.`)
+	// antigravityOpenCodeRegex matches the literal `opencode` provider
+	// identifier upstream rewrites in the system instruction. Upstream's rule
+	// is unbounded and case-insensitive, so `opencode-zen` and
+	// `.config/opencode/` are rewritten too (parity with decolua/9router
+	// open-sse/config/appConstants.js:194).
+	antigravityOpenCodeRegex = regexp.MustCompile(`(?i)opencode`)
+	// hermesIdentityRegex matches every Hermes identity variant upstream
+	// rewrites, and the whole match is replaced by a neutral sentence. The
+	// legacy rule only matched one exact phrasing, so the other variants
+	// reached the Antigravity backend with the fingerprint intact and could
+	// trigger a fake 429 RESOURCE_EXHAUSTED (parity with decolua/9router
+	// commit a61fc6a0).
+	//
+	// The upstream expression is transliterated exactly, including the
+	// literal single space in "Nous Research" — upstream does not accept
+	// other whitespace between the two words, and a port that accepted more
+	// would rewrite phrasings upstream leaves alone.
+	hermesIdentityRegex = regexp.MustCompile(`(?i)You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\.`)
 )
 
 // normalizeHarnessMarkers neutralizes harness fingerprint tags in system text.
@@ -254,6 +271,24 @@ func rewriteCompetingBranding(text string) string {
 	return rewriteBrandingText(text, true)
 }
 
+// rewriteAntigravityBrand rewrites the literal `opencode` provider
+// identifier to `antigravity`, matching upstream's fourth row of
+// ANTIGRAVITY_PROMPT_REWRITES (decolua/9router
+// open-sse/config/appConstants.js:194). Upstream's replacement preserves the
+// three capitalisations it names and lowercases everything else.
+func rewriteAntigravityBrand(text string) string {
+	return antigravityOpenCodeRegex.ReplaceAllStringFunc(text, func(m string) string {
+		switch m {
+		case "OpenCode":
+			return "Antigravity"
+		case "OPENCODE":
+			return "ANTIGRAVITY"
+		default:
+			return "antigravity"
+		}
+	})
+}
+
 // rewriteBrandingText applies competitive-prompt rewrites. Harness markers
 // (tags + branding) are fingerprints of system-instruction text only;
 // user/model messages, tool definitions, arguments, and results keep the
@@ -263,9 +298,14 @@ func rewriteBrandingText(text string, isSystemInstruction bool) string {
 		text = strings.ReplaceAll(text, phrase, "")
 	}
 	text = claudeBillingHeaderRegex.ReplaceAllString(text, "")
-	text = hermesIdentityRegex.ReplaceAllString(text, "You are Hermes Agent. You are ${1}.")
+	text = hermesIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
 	if isSystemInstruction {
 		text = normalizeHarnessMarkers(text)
+		// Upstream applies this row to the system instruction only: the
+		// caller brands its own client there, and the backend flags
+		// competing-client branding with a fake 429 Quota Exhausted. The
+		// conversation keeps the caller's vocabulary.
+		text = rewriteAntigravityBrand(text)
 	}
 	return strings.TrimSpace(text)
 }

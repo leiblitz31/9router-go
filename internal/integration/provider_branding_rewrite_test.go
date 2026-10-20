@@ -85,30 +85,50 @@ func TestProviderBrandingRewrite(t *testing.T) {
 	// Assert prompt texts (or the request body generally) contain NO occurrence of the decoded renamed form.
 	// Note: model names or userAgent headers might contain renamed, but the prompt content must not.
 	// Let's check system_instruction and contents specifically.
+	//
+	// The Cloud Code envelope nests the Gemini payload under "request", so the
+	// prompt fields live at request.system_instruction / request.contents — not
+	// at the top level of the body. Parsing the wrong level yields empty part
+	// lists and silently skips every assertion below, so the level is asserted
+	// first and the parsed parts are required to be non-empty.
 	var parsed struct {
-		SystemInstruction struct {
-			Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"system_instruction"`
-		Contents []struct {
-			Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"contents"`
+		Request struct {
+			SystemInstruction struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"system_instruction"`
+			Contents []struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"contents"`
+		} `json:"request"`
 	}
 	if err := json.Unmarshal([]byte(sent), &parsed); err != nil {
 		t.Fatalf("failed to unmarshal upstream body: %v", err)
 	}
-	for _, part := range parsed.SystemInstruction.Parts {
-		if strings.Contains(part.Text, renamedForm) {
-			t.Errorf("system instruction text incorrectly contains renamed form %q: %q", renamedForm, part.Text)
+	if len(parsed.Request.SystemInstruction.Parts) == 0 {
+		t.Fatalf("parsed envelope has no system_instruction parts; the Cloud Code body layout changed and the checks below would not run\nbody: %s", truncate([]byte(sent)))
+	}
+	if len(parsed.Request.Contents) == 0 {
+		t.Fatalf("parsed envelope has no contents; the Cloud Code body layout changed and the checks below would not run\nbody: %s", truncate([]byte(sent)))
+	}
+	for _, part := range parsed.Request.SystemInstruction.Parts {
+		if !strings.Contains(part.Text, renamedForm) {
+			t.Errorf("system instruction text missing rewritten branding %q: %q", renamedForm, part.Text)
+		}
+		if strings.Contains(part.Text, providerToken) {
+			t.Errorf("system instruction text still contains the competing branding %q: %q", providerToken, part.Text)
 		}
 	}
-	for _, content := range parsed.Contents {
+	for _, content := range parsed.Request.Contents {
 		for _, part := range content.Parts {
 			if strings.Contains(part.Text, renamedForm) {
 				t.Errorf("content part text incorrectly contains renamed form %q: %q", renamedForm, part.Text)
+			}
+			if !strings.Contains(part.Text, providerToken) {
+				t.Errorf("content part text lost the caller's literal %q: %q", providerToken, part.Text)
 			}
 		}
 	}

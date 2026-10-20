@@ -438,8 +438,111 @@ func TestStripCompetitivePrompts_HermesAndBillingHeader(t *testing.T) {
 	if strings.Contains(sys, "created by Nous Research") {
 		t.Errorf("expected Nous Research stripped from Hermes identity, got %q", sys)
 	}
-	if !strings.Contains(sys, "You are Hermes Agent. You are an intelligent AI assistant.") {
+	if !strings.Contains(sys, "You are an AI assistant.") {
 		t.Errorf("expected sanitized Hermes identity, got %q", sys)
+	}
+	if strings.Contains(sys, "Hermes") {
+		t.Errorf("expected Hermes fingerprint removed, got %q", sys)
+	}
+}
+
+// TestStripCompetitivePrompts_HermesIdentityVariants covers every identity
+// variant upstream decolua/9router rewrites (commit a61fc6a0,
+// open-sse/config/appConstants.js:189). The old rule only matched the exact
+// legacy sentence, so every other variant reached the Antigravity backend
+// with the Hermes fingerprint intact and could trigger the fake 429
+// RESOURCE_EXHAUSTED.
+func TestStripCompetitivePrompts_HermesIdentityVariants(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "legacy sentence",
+			input: "You are Hermes Agent, an intelligent AI assistant.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			name:  "bare name",
+			input: "You are Hermes.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			name:  "assistant with comma created by",
+			input: "You are Hermes Agent, an intelligent AI assistant, created by Nous Research.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			name:  "agent built by",
+			input: "You are Hermes Agent, built by Nous Research.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			name:  "ai assistant variant",
+			input: "You are Hermes, an AI assistant.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			name:  "ai agent variant",
+			input: "You are Hermes, an AI agent.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			name:  "assistant created by without comma",
+			input: "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			// Upstream's expression has a literal single space in "Nous
+			// Research" (open-sse/config/appConstants.js:189), so other
+			// whitespace is not a match and is left alone.
+			name:  "double space before Research is left alone",
+			input: "You are Hermes Agent, built by Nous  Research.",
+			want:  "You are Hermes Agent, built by Nous  Research.",
+		},
+		{
+			name:  "tab before Research is left alone",
+			input: "You are Hermes Agent, built by Nous\tResearch.",
+			want:  "You are Hermes Agent, built by Nous\tResearch.",
+		},
+		{
+			name:  "lowercase",
+			input: "you are hermes agent, an AI agent.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			name:  "uppercase",
+			input: "YOU ARE HERMES.",
+			want:  "You are an AI assistant.",
+		},
+		{
+			name:  "without trailing period is left alone",
+			input: "You are Hermes",
+			want:  "You are Hermes",
+		},
+		{
+			name:  "embedded in surrounding text",
+			input: "Hello. You are Hermes, an AI agent. Goodbye.",
+			want:  "Hello. You are an AI assistant. Goodbye.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &translator.GeminiRequest{
+				SystemInstruction: &translator.GeminiContent{
+					Role:  "user",
+					Parts: []translator.GeminiPart{{Text: tt.input}},
+				},
+			}
+
+			stripped := translator.StripCompetitivePrompts(req)
+			got := stripped.SystemInstruction.Parts[0].Text
+			if got != tt.want {
+				t.Errorf("StripCompetitivePrompts() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -695,14 +798,16 @@ func TestStripCompetitivePrompts_PreservesProviderIdentifiers(t *testing.T) {
 			if strings.Contains(sysText, "Claude Agent SDK") {
 				t.Errorf("Claude Agent SDK phrase not stripped from system instruction: %q", sysText)
 			}
-			// Verify provider identifiers and path are preserved byte-for-byte
-			for _, lit := range []string{"opencode", "opencode-zen", "opencode-go", `C:\Users\adima\.config\opencode\AGENTS.md`} {
+			// Upstream applies the opencode row to the system instruction
+			// (ANTIGRAVITY_PROMPT_REWRITES, appConstants.js:194), so the
+			// branding is rewritten there and nowhere else.
+			for _, lit := range []string{"antigravity", "antigravity-zen", "antigravity-go", `C:\Users\adima\.config\antigravity\AGENTS.md`} {
 				if !strings.Contains(sysText, lit) {
-					t.Errorf("System instruction lost literal %q: %q", lit, sysText)
+					t.Errorf("System instruction lost rewritten literal %q: %q", lit, sysText)
 				}
 			}
-			if strings.Contains(sysText, "antigravity") {
-				t.Errorf("System instruction incorrectly contains antigravity: %q", sysText)
+			if strings.Contains(sysText, "opencode") {
+				t.Errorf("System instruction still contains opencode branding: %q", sysText)
 			}
 
 			// Verify user turn
@@ -728,6 +833,81 @@ func TestStripCompetitivePrompts_PreservesProviderIdentifiers(t *testing.T) {
 			}
 			if strings.Contains(asstText, "antigravity") {
 				t.Errorf("Assistant turn incorrectly contains antigravity: %q", asstText)
+			}
+		})
+	}
+}
+
+// TestStripCompetitivePrompts_RewritesOpenCodeBrandInSystemInstruction pins
+// upstream's fourth rewrite row: the literal `opencode` provider identifier
+// is rewritten in the system instruction only, with upstream's exact
+// capitalisation mapping. Upstream's own rule is unbounded and
+// case-insensitive (decolua/9router open-sse/config/appConstants.js:194), so
+// `opencode-zen` and `.config/opencode/` are rewritten too.
+func TestStripCompetitivePrompts_RewritesOpenCodeBrandInSystemInstruction(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "lowercase identifier",
+			in:   "Running opencode at work.",
+			want: "Running antigravity at work.",
+		},
+		{
+			name: "title case identifier",
+			in:   "You are OpenCode, a coding agent.",
+			want: "You are Antigravity, a coding agent.",
+		},
+		{
+			name: "upper case identifier",
+			in:   "YOU ARE OPENCODE.",
+			want: "YOU ARE ANTIGRAVITY.",
+		},
+		{
+			name: "mixed case falls to the lowercase branch",
+			in:   "Opencode is fine.",
+			want: "antigravity is fine.",
+		},
+		{
+			name: "upstream's rule is unbounded",
+			in:   "myopencode",
+			want: "myantigravity",
+		},
+		{
+			name: "identifier inside a larger token",
+			in:   "Running opencode, opencode-zen, opencode-go at C:\\Users\\adima\\.config\\opencode\\AGENTS.md",
+			want: "Running antigravity, antigravity-zen, antigravity-go at C:\\Users\\adima\\.config\\antigravity\\AGENTS.md",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &translator.GeminiRequest{
+				SystemInstruction: &translator.GeminiContent{
+					Parts: []translator.GeminiPart{{Text: tt.in}},
+				},
+				Contents: []translator.GeminiContent{
+					{Role: "user", Parts: []translator.GeminiPart{{Text: tt.in}}},
+				},
+			}
+
+			res := translator.StripCompetitivePrompts(req)
+			if res == nil {
+				t.Fatal("StripCompetitivePrompts returned nil")
+			}
+
+			sysText := res.SystemInstruction.Parts[0].Text
+			if sysText != tt.want {
+				t.Errorf("system instruction = %q, want %q", sysText, tt.want)
+			}
+
+			// The conversation is not upstream's scope for this row: the
+			// caller's own vocabulary reaches the upstream unchanged.
+			userText := res.Contents[0].Parts[0].Text
+			if userText != tt.in {
+				t.Errorf("user turn = %q, want it unchanged (%q)", userText, tt.in)
 			}
 		})
 	}
