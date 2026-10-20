@@ -98,6 +98,7 @@ func SetupRoutes(r interface {
 	r.Get("/videos/{id}", mediaH.HandleVideoGet)
 	r.Post("/search", mediaH.HandleSearch)
 	r.Post("/scrape", mediaH.HandleScrape)
+	r.Post("/web/fetch", mediaH.HandleWebFetch)
 	r.Post("/systemone", mediaH.HandleSystemone)
 
 	// The relay-deploy endpoints live in the dashboard group below, mounted
