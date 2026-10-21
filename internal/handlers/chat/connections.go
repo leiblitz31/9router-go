@@ -70,10 +70,42 @@ func (h *ChatHandler) ResolveProviderProxyPoolIDWithExclusions(provider string, 
 	}
 	// A pinned single pool that was excluded must not be used (upstream #4998:
 	// `else if (pickedId && (excludeSet.has(`proxy:${pickedId}`) || ...)) return null`).
+	// Upstream #5046 narrows that return for no-auth providers: a pinned pool
+	// excluded after a fallbackable error fails over to the next healthy active
+	// pool instead of failing the request outright — one blocked relay IP must
+	// not hard-fail the provider while other configured pools are healthy. The
+	// pin stays the first choice while it is healthy, the failover target is
+	// always another proxy (never direct egress), and "" is returned only once
+	// every active pool is excluded. Keyed providers keep the #4998 behaviour:
+	// pool exclusions are a no-auth mechanism (see the rotation gate above).
 	if singleID != "" && isExcludedProxyPool(singleID, excludeIDs) {
+		if providers.IsNoAuthProvider(provider) {
+			if id := h.nextActiveProxyPoolWithExclusions(excludeIDs); id != "" {
+				log.Warn("connections", "pinned proxy pool excluded, failing over",
+					"provider", provider, "pinnedPool", singleID, "failoverPool", id)
+				return id
+			}
+		}
 		return ""
 	}
 	return singleID
+}
+
+// nextActiveProxyPoolWithExclusions returns the first active pool (in
+// ActivePoolIDs order: active pools carrying a URL, creation order) that is
+// not in excludeIDs, or "" when every active pool is excluded. Upstream
+// #5046: the exclusion set is per-request and grows with each failed attempt,
+// so a chain of dead pools walks the list with no extra state.
+func (h *ChatHandler) nextActiveProxyPoolWithExclusions(excludeIDs []string) string {
+	if h.Repo == nil {
+		return ""
+	}
+	for _, id := range h.Repo.ActivePoolIDs() {
+		if !isExcludedProxyPool(id, excludeIDs) {
+			return id
+		}
+	}
+	return ""
 }
 
 // isExcludedProxyPool reports whether a pool ID is in the exclusion set,

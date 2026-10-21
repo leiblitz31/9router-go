@@ -1,0 +1,5 @@
+### Pinned proxy pool fails over on fallbackable errors (upstream decolua/9router#5046 parity)
+
+- A no-auth provider with a pinned proxy pool (`proxyPoolId`, `rotateStrategy: "none"`) no longer fails the request outright when the pinned pool is excluded after a fallbackable error (403/429/5xx). The resolver now fails over to the next healthy active pool, so one blocked relay egress IP cannot hard-fail the provider while other configured pools are healthy.
+- The pinned pool stays the first choice while it is healthy; the failover target is always another active pool carrying a URL, never direct egress. `""` (no pool) is returned only once every active pool is excluded. Keyed providers keep the #4998 behaviour, since pool exclusions are a no-auth mechanism.
+- Verified by `TestResolveProviderProxyPoolIDWithExclusions_PinnedPoolFailover` (port of upstream `tests/unit/noauth-pinned-pool-failover.test.js`): pin used while healthy, failover on exclusion, walks past a second excluded pool, empty only when all pools are excluded, URL-less pools skipped.

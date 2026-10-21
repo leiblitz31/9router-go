@@ -369,3 +369,93 @@ func TestGetBestConnection_NoAuth_ExcludedPoolReturnsEmpty(t *testing.T) {
 		t.Errorf("expected empty ProxyPoolID, got %q", connData.ProxyPoolID)
 	}
 }
+
+// Port of upstream decolua/9router#5046 tests/unit/noauth-pinned-pool-failover.test.js.
+// A pinned pool excluded after a fallbackable error (403/429/5xx) fails over to
+// the next healthy active pool instead of failing the request; the pin stays
+// first choice while healthy and "" is returned only when every active pool
+// with a URL is excluded.
+func TestResolveProviderProxyPoolIDWithExclusions_PinnedPoolFailover(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS proxyPools (
+		id TEXT PRIMARY KEY,
+		isActive INTEGER DEFAULT 1,
+		testStatus TEXT,
+		data TEXT NOT NULL,
+		createdAt TEXT NOT NULL,
+		updatedAt TEXT NOT NULL
+	);`); err != nil {
+		t.Fatalf("failed to create proxyPools table: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+
+	pool1, err := repo.InsertProxyPool(db.ProxyPoolData{
+		Name:     "pinned-pool",
+		ProxyURL: "http://proxy1.example.com:8080",
+		Type:     "http",
+	})
+	if err != nil {
+		t.Fatalf("insert pool1: %v", err)
+	}
+	pool1ID := pool1["id"].(string)
+
+	pool2, err := repo.InsertProxyPool(db.ProxyPoolData{
+		Name:     "failover-pool",
+		ProxyURL: "http://proxy2.example.com:8080",
+		Type:     "http",
+	})
+	if err != nil {
+		t.Fatalf("insert pool2: %v", err)
+	}
+	pool2ID := pool2["id"].(string)
+
+	// Pool without a URL: ActivePoolIDs must skip it, so it can never be a
+	// failover target.
+	if _, err := database.Exec(`INSERT INTO proxyPools (id, isActive, data, createdAt, updatedAt)
+		VALUES ('pool-no-url', 1, '{"name":"pool-no-url"}', '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z')`); err != nil {
+		t.Fatalf("insert URL-less pool: %v", err)
+	}
+
+	if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, data TEXT);`); err != nil {
+		t.Fatalf("create settings table: %v", err)
+	}
+
+	// Pinned single pool, no rotation (dashboard "None (single pool)").
+	settingsJSON := `{
+		"providerStrategies": {
+			"opencode": {
+				"proxyPoolId": "` + pool1ID + `",
+				"rotateStrategy": "none"
+			}
+		}
+	}`
+	if _, err := database.Exec(`INSERT INTO settings (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`, settingsJSON); err != nil {
+		t.Fatalf("insert settings: %v", err)
+	}
+
+	h := NewChatHandler(repo)
+
+	// Pin is used while healthy.
+	if id := h.ResolveProviderProxyPoolIDWithExclusions("opencode", nil); id != pool1ID {
+		t.Errorf("expected pinned pool %q while healthy, got %q", pool1ID, id)
+	}
+
+	// Pinned pool excluded (tagged form) -> fail over to the other active pool.
+	if id := h.ResolveProviderProxyPoolIDWithExclusions("opencode", []string{"proxy:" + pool1ID}); id != pool2ID {
+		t.Errorf("expected failover to pool %q after pinned exclusion, got %q", pool2ID, id)
+	}
+
+	// Pinned pool excluded (bare form) -> same failover.
+	if id := h.ResolveProviderProxyPoolIDWithExclusions("opencode", []string{pool1ID}); id != pool2ID {
+		t.Errorf("expected failover to pool %q after pinned exclusion (bare), got %q", pool2ID, id)
+	}
+
+	// Every URL-carrying pool excluded -> "" (no leak to direct, URL-less pool
+	// is not a candidate).
+	if id := h.ResolveProviderProxyPoolIDWithExclusions("opencode", []string{"proxy:" + pool1ID, "proxy:" + pool2ID}); id != "" {
+		t.Errorf("expected empty after excluding all URL-carrying pools, got %q", id)
+	}
+}
