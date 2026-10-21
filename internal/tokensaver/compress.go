@@ -360,6 +360,9 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 				}
 			}
 			if block["type"] == "text" {
+				// A plain text block is the assistant's own prose, not the
+				// output of a command, so there is no originating command to
+				// select a filter by. The content-scoped filters still apply.
 				if text, ok := block["text"].(string); ok && len(text) > MinCompressSize {
 					block["text"] = CompressTextWithConfig(text, cfg)
 					compressed = true

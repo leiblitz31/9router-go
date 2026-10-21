@@ -222,7 +222,7 @@ func CompressBuildOutput(s string, maxLines int) string {
 		}
 		return strings.Join(errors, "\n")
 	}
-	return smartTruncateLines(lines, maxLines)
+	return smartTruncateLines(lines, maxLines, nil)
 }
 
 // CompressTestOutput filters test output to highlight failures and summarize passes.
@@ -240,7 +240,7 @@ func CompressTestOutput(s string, maxLines int) string {
 		if len(summaryLines) > 0 {
 			return strings.Join(summaryLines, "\n") + fmt.Sprintf("\n... (all tests passed; %d verbose lines omitted)", len(lines)-len(summaryLines))
 		}
-		return smartTruncateLines(lines, maxLines)
+		return smartTruncateLines(lines, maxLines, nil)
 	}
 
 	if hasFailures {
@@ -257,11 +257,11 @@ func CompressTestOutput(s string, maxLines int) string {
 			filtered = append(filtered, l)
 		}
 		if len(filtered) > maxLines {
-			return smartTruncateLines(filtered, maxLines)
+			return smartTruncateLines(filtered, maxLines, nil)
 		}
 		return strings.Join(filtered, "\n")
 	}
-	return smartTruncateLines(lines, maxLines)
+	return smartTruncateLines(lines, maxLines, nil)
 }
 
 // CompressPackageOutput collapses verbose package manager output.
@@ -309,7 +309,7 @@ func CompressPackageOutput(s string, maxLines int) string {
 		filtered = append(filtered, l)
 	}
 	if len(filtered) > maxLines {
-		return smartTruncateLines(filtered, maxLines)
+		return smartTruncateLines(filtered, maxLines, nil)
 	}
 	return strings.Join(filtered, "\n")
 }
@@ -332,10 +332,18 @@ func CompressContainerOutput(s string, maxLines int) string {
 		result = append(result, fmt.Sprintf("... (%d table entries truncated)", len(rows)-keep))
 		return strings.Join(result, "\n")
 	}
-	return smartTruncateLines(lines, maxLines)
+	return smartTruncateLines(lines, maxLines, nil)
 }
 
-func smartTruncateLines(lines []string, maxLines int) string {
+// smartTruncateLines keeps the head and the tail of a body and drops the
+// middle.
+//
+// The middle is where a single failure line usually sits — a run that looked
+// fine for two hundred lines and then broke once — so the diagnostic lines
+// are recovered instead of dropped. The matched filter is what says which
+// lines are diagnostics: its own error and summary patterns first, the
+// severity vocabulary as the fallback for a body no filter claimed.
+func smartTruncateLines(lines []string, maxLines int, f *RTKFilter) string {
 	if len(lines) <= maxLines {
 		return strings.Join(lines, "\n")
 	}
@@ -347,10 +355,17 @@ func smartTruncateLines(lines []string, maxLines int) string {
 	if tailCount < 1 {
 		tailCount = 1
 	}
-	head := lines[:headCount]
-	tail := lines[len(lines)-tailCount:]
-	result := append(head, fmt.Sprintf("... (%d lines truncated)", len(lines)-headCount-tailCount))
-	return strings.Join(append(result, tail...), "\n")
+	if headCount+tailCount >= len(lines) {
+		headCount = len(lines) / 2
+		tailCount = len(lines) - headCount
+	}
+	head, preserved, tail, dropped := splitForTruncation(lines, headCount, tailCount, f)
+	result := make([]string, 0, len(head)+len(preserved)+len(tail)+1)
+	result = append(result, head...)
+	result = append(result, fmt.Sprintf("... (%d lines truncated)", dropped))
+	result = append(result, preserved...)
+	result = append(result, tail...)
+	return strings.Join(result, "\n")
 }
 
 // CompressTextWithConfig compresses text according to RTKConfig settings.
@@ -500,7 +515,7 @@ func CompressTextDetailedWithCommand(text string, command string, cfg RTKConfig)
 	// 3. Smart line truncation if still over maxLines
 	lines := strings.Split(curr, "\n")
 	if len(lines) > maxLines && len(curr) >= MinCompressSize {
-		curr = smartTruncateLines(lines, maxLines)
+		curr = smartTruncateLines(lines, maxLines, matchedFilter)
 		techniques = append(techniques, "smart-truncation")
 	}
 
