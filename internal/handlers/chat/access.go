@@ -329,6 +329,16 @@ func (h *ChatHandler) checkModelAccess(key *models.APIKey, modelID string) error
 
 // writeModelAccessError maps a gate error onto the wire: a policy failure is 503,
 // a typed denial is 403, anything else is a 400.
+//
+// The 403 envelope comes from the shared writer (handlerutil.WriteJSONError),
+// so its type and code are permission_error / insufficient_quota — the same
+// pair upstream's ERROR_TYPES[403] produces (open-sse/config/errorConfig.js).
+// The message is upstream's exact client-facing sentence, so it names the
+// model the client asked for and nothing else — never the key name and never
+// the key's allow list.
+//
+// The 503 policy failure keeps its own shape: it is not an upstream status,
+// so it carries a code of its own rather than the status-derived one.
 func writeModelAccessError(w http.ResponseWriter, err error) {
 	if IsPolicyUnavailable(err) {
 		handlerutil.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{
@@ -340,17 +350,34 @@ func writeModelAccessError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
-	if IsModelNotAllowed(err) {
-		handlerutil.WriteJSON(w, http.StatusForbidden, map[string]any{
-			"error": map[string]string{
-				"message": "Model not allowed for this API key",
-				"type":    "permission_denied",
-				"code":    "model_not_allowed",
-			},
-		})
+	// errors.As and IsModelNotAllowed ask the same question of the same
+	// error type, so this is the same verdict the 403 branch used to get —
+	// but the typed error is unwrapped HERE, and the unwrap result is
+	// checked, so the branch cannot dereference a nil pointer.
+	var denied *ErrModelNotAllowed
+	if errors.As(err, &denied) {
+		handlerutil.WriteJSONError(w, http.StatusForbidden, modelAccessDeniedMessage(denied.Model))
 		return
 	}
 	handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
+}
+
+// modelAccessDeniedMessage is the client-facing sentence for a model-access
+// denial. It reproduces upstream decolua/9router's
+// `keyAccessDeniedMessage(requested)` from
+// src/shared/constants/keyAccess.js verbatim:
+//
+//	export function keyAccessDeniedMessage(requested) {
+//	  return `This API key is not allowed to use model "${requested}"`;
+//	}
+//
+// Upstream calls it at src/sse/services/keyAccess.js:115 and sends it through
+// errorResponse(FORBIDDEN, ...) -> buildErrorBody -> ERROR_TYPES[403]
+// (open-sse/config/errorConfig.js) = {type: permission_error, code:
+// insufficient_quota}. The model is interpolated raw, so it is quoted with
+// double quotes and never escaped.
+func modelAccessDeniedMessage(model string) string {
+	return `This API key is not allowed to use model "` + model + `"`
 }
 
 // enforceModelAccess runs the gate for the calling key and writes the response

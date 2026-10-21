@@ -4,7 +4,6 @@ package integration
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 )
 
@@ -65,11 +64,13 @@ func TestRestrictedKeyDeniedOnEveryMediaEndpoint(t *testing.T) {
 			if res.Status != http.StatusForbidden {
 				t.Fatalf("POST %s = %d, want 403 (body: %s)", ep.path, res.Status, truncate(res.Body))
 			}
-			// The wire contract is the structured access denial, not the
-			// typed error's own sentence: writeModelAccessError emits one
-			// envelope shape for every endpoint that shares the gate.
-			if msg := res.ErrorMessage(t); !strings.Contains(msg, "Model not allowed") {
-				t.Errorf("error = %q, want it to name the access denial", msg)
+			// The wire contract is upstream's whole body, not just the
+			// status: upstream decolua/9router refuses with
+			// errorResponse(FORBIDDEN, keyAccessDeniedMessage(requested)),
+			// so the message is that exact sentence with the model quoted.
+			want := `This API key is not allowed to use model "denied-model"`
+			if msg := res.ErrorMessage(t); msg != want {
+				t.Errorf("error = %q, want %q", msg, want)
 			}
 		})
 	}

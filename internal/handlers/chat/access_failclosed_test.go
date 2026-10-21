@@ -6,12 +6,32 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/dbtest"
 	"9router/proxy/internal/models"
 )
+
+// errorEnvelope is the OpenAI-style error body the access gate writes.
+type errorEnvelope struct {
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error"`
+}
+
+// decodeErrorEnvelope decodes a recorded error body as the shared envelope.
+func decodeErrorEnvelope(t *testing.T, body []byte) errorEnvelope {
+	t.Helper()
+	var env errorEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("unmarshal error body: %v", err)
+	}
+	return env
+}
 
 func setupFailClosedTestDB(t testing.TB) (*sql.DB, *db.Repo, func()) {
 	t.Helper()
@@ -97,13 +117,15 @@ func TestModelAccess_FailClosedSemantics(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("want 403, got %d", rec.Code)
 		}
-		var body map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("unmarshal error body: %v", err)
+		env := decodeErrorEnvelope(t, rec.Body.Bytes())
+		if env.Error.Code != "insufficient_quota" {
+			t.Fatalf("want error.code == insufficient_quota, got %q", env.Error.Code)
 		}
-		errObj, ok := body["error"].(map[string]any)
-		if !ok || errObj["code"] != "model_not_allowed" {
-			t.Fatalf("want error.code == model_not_allowed, got %v", body)
+		if env.Error.Type != "permission_error" {
+			t.Fatalf("want error.type == permission_error, got %q", env.Error.Type)
+		}
+		if !strings.Contains(env.Error.Message, "gpt-4o") {
+			t.Fatalf("want error.message to name the model, got %q", env.Error.Message)
 		}
 	})
 
@@ -124,13 +146,15 @@ func TestModelAccess_FailClosedSemantics(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("want 403, got %d", rec.Code)
 		}
-		var body map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("unmarshal error body: %v", err)
+		env := decodeErrorEnvelope(t, rec.Body.Bytes())
+		if env.Error.Code != "insufficient_quota" {
+			t.Fatalf("want error.code == insufficient_quota, got %q", env.Error.Code)
 		}
-		errObj, ok := body["error"].(map[string]any)
-		if !ok || errObj["code"] != "model_not_allowed" {
-			t.Fatalf("want error.code == model_not_allowed, got %v", body)
+		if env.Error.Type != "permission_error" {
+			t.Fatalf("want error.type == permission_error, got %q", env.Error.Type)
+		}
+		if !strings.Contains(env.Error.Message, "gpt-4o") {
+			t.Fatalf("want error.message to name the model, got %q", env.Error.Message)
 		}
 	})
 
