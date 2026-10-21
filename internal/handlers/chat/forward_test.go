@@ -5,6 +5,7 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/translator"
 )
 
@@ -317,5 +319,42 @@ func TestForwardRequest_StreamSetsAcceptHeader(t *testing.T) {
 	}
 	if !strings.HasPrefix(rec.Body.String(), "data: {") {
 		t.Errorf("expected streamed body, got %q", rec.Body.String())
+	}
+}
+
+// An upstream that pauses mid-turn for longer than the pending-completion bound
+// must still deliver its remaining chunks. Before the redundant stall reader
+// was removed, this reader wrapped the upstream at exactly that bound, so a
+// pause the bridge tolerates ended the stream early instead.
+func TestHandleStreamResponse_ActivePauseExceedsCompletionBound(t *testing.T) {
+	prev := executor.PendingCompletionFlushTimeout
+	executor.PendingCompletionFlushTimeout = 40 * time.Millisecond
+	defer func() { executor.PendingCompletionFlushTimeout = prev }()
+
+	h, cleanup := setupHandlerForForward(t)
+	defer cleanup()
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte(`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"chunk1"}}]}` + "\n\n"))
+		time.Sleep(100 * time.Millisecond)
+		_, _ = pw.Write([]byte(`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"chunk2"},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = pw.Write([]byte("data: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+
+	rec := httptest.NewRecorder()
+	ctx := translator.WithResponsesBridge(translator.WithRequestedModel(context.Background(), "gpt-x"))
+	metrics := &streamMetrics{}
+
+	if err := h.handleStreamResponse(ctx, rec, pr, false, time.Now(), metrics); err != nil {
+		t.Fatalf("handleStreamResponse failed on active pause: %v", err)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "chunk1") || !strings.Contains(out, "chunk2") {
+		t.Errorf("missing streamed chunks in response: %s", out)
+	}
+	if !strings.Contains(out, "event: response.completed") {
+		t.Errorf("expected response.completed in response: %s", out)
 	}
 }
