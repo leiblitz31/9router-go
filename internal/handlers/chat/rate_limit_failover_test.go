@@ -101,7 +101,7 @@ func TestRetryableCooldownSec(t *testing.T) {
 		{"429 retryinfo window wins", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("120s"), 120},
 		{"429 header window wins", http.StatusTooManyRequests, 2 * time.Second, http.Header{"Retry-After": {"30"}}, rateLimitedBody, 30},
 		{"429 short window shortens the lock so the brief retry can run", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("1s"), 1},
-		{"429 nonsense window is capped", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("72h"), int(maxResetCooldown / time.Second)},
+		{"429 nonsense window is capped", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("72h"), int(max429LockCooldown / time.Second)},
 		{"503 keeps its own backoff", http.StatusServiceUnavailable, 30 * time.Second, nil, rateLimitedBody, 30},
 		{"503 still reads the quota reset", http.StatusServiceUnavailable, 30 * time.Second, nil, `{"error":{"message":"Quota exceeded. Resets in 2m."}}`, 120},
 	}
