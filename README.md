@@ -327,8 +327,21 @@ For Claude Messages clients: `ANTHROPIC_BASE_URL=http://localhost:20130/v1`.
 | `HTTP_PROXY` / `HTTPS_PROXY` | Go defaults | Upstream egress proxy |
 | `PPROF_ENABLED` | `false` | Expose `/debug/pprof/*` (keep off on untrusted networks) |
 | `TRUST_PROXY` / `TRUST_CLOUDFLARE` | unset | Trust forwarded client-IP headers |
+| `TRUSTED_PROXIES` | unset | CIDR list of the reverse proxies whose forwarded client-IP headers are trusted |
 
 `.env.example` documents the security-sensitive subset and OAuth overrides.
+
+A forwarded client-IP header is only read when the TCP peer is inside the
+trusted set — otherwise a client could rotate `X-Forwarded-For` and give every
+login attempt its own rate-limit bucket. `TRUST_PROXY=true` trusts loopback and
+the RFC1918/link-local ranges; `TRUSTED_PROXIES` takes a comma-separated list
+of CIDRs or single IPs and **replaces** those defaults, so set it when the
+proxy connects from an address outside them.
+
+Behind a proxy that is *not* in the trusted set, every request is bucketed by
+the proxy's own socket address, so all users of that proxy share one login
+bucket: five failed attempts lock them all out. `TRUSTED_PROXIES` is the knob
+that separates them again.
 
 ### API surface
 
