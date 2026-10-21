@@ -23,6 +23,7 @@ var DatabaseModule = fx.Module("database",
 	// startup side effect. As a Provide it would be rejected for returning
 	// only an error.
 	fx.Invoke(MigrateVault),
+	fx.Invoke(SeedDoHPool),
 )
 
 // ProvideDatabase initializes the global SQLite database and registers an OnStop lifecycle hook to close it cleanly.
@@ -101,6 +102,27 @@ func MigrateVault(repo *db.Repo, cfg *config.Config) error {
 	}
 	if result.Sealed > 0 || len(result.Skipped) > 0 {
 		log.Info("vault", "credential migration complete", "sealed", result.Sealed, "skipped", len(result.Skipped))
+	}
+	return nil
+}
+
+// SeedDoHPool plants the default DoH resolver pool on installs that have
+// no doh pool yet, so a fresh install can route through DNS-over-HTTPS
+// resolvers without hand-writing a pool row first. It never pins the pool
+// to a provider — that stays a dashboard decision — and an install that
+// already has any doh pool is left exactly as its operator arranged it.
+//
+// Failure is not fatal, for the same reason as MigrateVault: a gateway
+// that starts without the convenience pool is strictly better than one
+// that refuses to start.
+func SeedDoHPool(repo *db.Repo) error {
+	seeded, err := repo.SeedDefaultDoHPool()
+	if err != nil {
+		log.Warn("db", "default DoH pool seed skipped", "error", err)
+		return nil
+	}
+	if seeded {
+		log.Info("db", "seeded default DoH resolver pool", "pool", db.DefaultDoHPoolName, "resolvers", len(db.DefaultDoHResolvers))
 	}
 	return nil
 }
