@@ -27,7 +27,7 @@ const rateLimitedBody = `{"error":{"message":"rate limited"}}`
 // isoRetryAfterBody carries the wait as an absolute timestamp, the shape
 // extractRetryAfter has always understood.
 func isoRetryAfterBody(d time.Duration) string {
-	return `{"error":{"message":"rate limited","retryAfter":"` + time.Now().Add(d).UTC().Format(time.RFC3339) + `"}}`
+	return retryAfterBody(time.Now(), d)
 }
 
 // TestRetryAfterWait_Extraction pins every carrier of a retry instruction. The

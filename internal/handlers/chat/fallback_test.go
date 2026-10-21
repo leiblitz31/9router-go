@@ -262,13 +262,12 @@ func TestHandleMessagesComboFallback_RetriesOnceOnBoundedRetryAfter(t *testing.T
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := hits.Add(1)
 		if n == 1 {
-			// Upstream says "wait ~1s" (RFC3339). A 429 is only worth retrying
+			// Upstream says "wait ~1s". A 429 is only worth retrying
 			// inside brief429RetryTolerance — past that the account is out of
 			// quota and re-hitting it deepens the upstream's backoff — so the
 			// bound, not the old 8s cap, is what this covers.
-			ra := time.Now().Add(time.Second).Format(time.RFC3339)
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":{"retryAfter":"` + ra + `"}}`))
+			w.Write([]byte(retryAfterBody(time.Now(), time.Second)))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
