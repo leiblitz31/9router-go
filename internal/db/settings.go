@@ -70,6 +70,12 @@ type SettingsData struct {
 	SystemPromptPrefix         string                          `json:"systemPromptPrefix,omitempty"`
 	SystemPromptSuffix         string                          `json:"systemPromptSuffix,omitempty"`
 	HeadroomUrl                string                          `json:"headroomUrl"`
+	// HeadroomEnabled is the master switch for in-flight compression. It is
+	// separate from HeadroomUrl because the URL has a default the panel fills
+	// in, so "a URL exists" cannot stand in for "the operator turned this on".
+	// Off by default: an unconfigured proxy must not be a slow path on every
+	// request.
+	HeadroomEnabled            bool                            `json:"headroomEnabled"`
 	HeadroomCodeAware          bool                            `json:"headroomCodeAware"`
 	HeadroomKompress           bool                            `json:"headroomKompress"`
 	HeadroomTimeoutMs          int                             `json:"headroomTimeoutMs"`
@@ -246,6 +252,9 @@ func (r *Repo) GetSettings() (*SettingsData, error) {
 	}
 	if v := handlerutil.GetString(raw, "headroomUrl"); v != "" {
 		s.HeadroomUrl = v
+	}
+	if v, ok := raw["headroomEnabled"].(bool); ok {
+		s.HeadroomEnabled = v
 	}
 	if v, ok := raw["headroomCodeAware"].(bool); ok {
 		s.HeadroomCodeAware = v

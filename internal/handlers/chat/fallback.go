@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/headroom"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/observ"
@@ -472,7 +473,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	// beta query, the OAuth cloaking and the beta-flag merge below.
 	upstreamClaude := isAnthropic || servesClaudeMessages(provider, providerCfg)
 	compressStart := time.Now()
-	pipedBody, origTokens, savedTokens, savedPct := h.applyTokenSavers(body, claudeNative)
+	pipedBody, origTokens, savedTokens, savedPct := h.applyTokenSavers(ctx, body, claudeNative)
 	compressDurMs := int(time.Since(compressStart).Milliseconds())
 	if compressDurMs <= 0 {
 		compressDurMs = 1
@@ -1032,7 +1033,7 @@ func isClientCanceled(ctx context.Context, err error) bool {
 // /v1/messages): system prompts must go to the top-level "system" field —
 // a role:"system" message is rejected by the Anthropic API.
 // false from compress/inject means nothing changed (or unparseable) — keep original, not a failure.
-func (h *ChatHandler) applyTokenSavers(body []byte, claudeNative bool) ([]byte, int, int, int) {
+func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeNative bool) ([]byte, int, int, int) {
 	if h.TokenSaver == nil {
 		return body, 0, 0, 0
 	}
@@ -1096,6 +1097,22 @@ func (h *ChatHandler) applyTokenSavers(body []byte, claudeNative bool) ([]byte, 
 		prompt := tokensaver.GetADHDPrompt(h.TokenSaver.ADHDLevel())
 		if next, did := inject(out, prompt); did {
 			out = next
+		}
+	}
+	// Headroom runs after the in-process savers and before the global prompt, so
+	// it never sees the prompt this process is about to add.
+	//
+	// The client is built per call rather than cached on the handler: the proxy
+	// URL is an operator setting that can change while requests are in flight,
+	// and a shared client would need a lock around every field read to stay
+	// correct. Compress itself fails open on every refusal, so the only cost of
+	// not caching is one struct allocation.
+	if h.TokenSaver.HeadroomEnabled() {
+		if url, timeoutMs := h.TokenSaver.HeadroomEndpoint(); url != "" {
+			client := headroom.NewClient(url, "", nil)
+			if next, did, err := client.Compress(ctx, out, "", timeoutMs); err == nil && did {
+				out = next
+			}
 		}
 	}
 	// Global system prompt, last in the chain so the prefix stays the first
