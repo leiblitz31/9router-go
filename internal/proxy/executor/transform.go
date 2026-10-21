@@ -279,6 +279,18 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 		Reasoning           any            `json:"reasoning,omitempty"`
 		Tools               jsontext.Value `json:"tools,omitempty"`
 		ResponseFormat      jsontext.Value `json:"response_format,omitempty"`
+		// ServiceTier is carried through unchanged. Upstream does the same in
+		// open-sse/translator/request/openai-responses.js, and the Chat
+		// Completions body is rebuilt field by field here, so a field this
+		// struct does not name is a field the Responses upstream never sees.
+		//
+		// jsontext.Value rather than string: a client may send null, a number
+		// or an empty string, and only raw bytes keep both the presence and
+		// the exact value. Which of those the destination accepts is the
+		// executor's rule, not the translator's — the Codex backend rewrites
+		// the field in normalizeCodexServiceTier, while the other Responses
+		// providers take it as sent.
+		ServiceTier jsontext.Value `json:"service_tier,omitempty"`
 	}
 	if err := json.Unmarshal(body, &oreq); err != nil {
 		return nil, "", fmt.Errorf("parse request: %w", err)
@@ -507,6 +519,15 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 				respReq["tools"] = apiTools
 			}
 		}
+	}
+
+	// Presence matters more than the value here: a client that sent null, "", a
+	// number or "fast" gets that byte for byte, because the destination decides
+	// what it means. Only a field the client never sent is dropped —
+	// KindInvalid, not KindNull — since upstream's Codex normalize guards on
+	// truthiness and therefore leaves null in the body.
+	if oreq.ServiceTier.Kind() != jsontext.KindInvalid {
+		respReq["service_tier"] = oreq.ServiceTier
 	}
 
 	applyCodexModelShape(respReq, cleanModel)
