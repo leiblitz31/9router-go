@@ -75,9 +75,10 @@ func TestWindowCacheHitRate(t *testing.T) {
 }
 
 func TestWindowCacheHitRateAllUncached(t *testing.T) {
-	if rate := windowCacheHitRate([]db.UsageHistoryRow{
+	rate := windowCacheHitRate([]db.UsageHistoryRow{
 		{PromptTokens: 10, Tokens: `{"prompt_tokens":10}`},
-	}); rate != nil {
+	})
+	if rate != nil {
 		t.Errorf("rate = %v, want nil when no request has a cache", *rate)
 	}
 }

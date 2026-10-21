@@ -1,12 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import {
-  isComboFlowVisible,
-  isDetailsExpandedByDefault,
-  isUsageTrendVisible,
-  setComboFlowVisible,
-  setDetailsExpandedByDefault,
-  setUsageTrendVisible,
-} from './displayPrefs'
+import { isDetailsExpandedByDefault, setDetailsExpandedByDefault } from './displayPrefs'
 
 // Bun has no DOM storage; displayPrefs guards on `typeof localStorage`, so a
 // stub is installed per test and the previous descriptor is restored after
@@ -61,25 +54,7 @@ describe('usage detail collapse preference', () => {
   })
 })
 
-describe('Overview panel visibility preference', () => {
-  it('shows both panels on a browser that never touched the switches', () => {
-    expect(isComboFlowVisible()).toBe(true)
-    expect(isUsageTrendVisible()).toBe(true)
-  })
-
-  it('round-trips each switch independently', () => {
-    setComboFlowVisible(false)
-    expect(isComboFlowVisible()).toBe(false)
-    expect(isUsageTrendVisible()).toBe(true)
-    setUsageTrendVisible(false)
-    expect(isUsageTrendVisible()).toBe(false)
-    setUsageTrendVisible(true)
-    expect(isUsageTrendVisible()).toBe(true)
-    expect(isComboFlowVisible()).toBe(false)
-  })
-
-  it('treats a hand-edited value as visible', () => {
-    localStorage.setItem('showComboFlow', 'yes')
-    expect(isComboFlowVisible()).toBe(true)
-  })
-})
+// The Overview's two optional panels are hidden through the Usage arrangement
+// (lib/usagePanel.svelte.ts) rather than a separate localStorage switch, so the
+// coverage for that lives in usagePanelPlan.test.ts and nav.test.ts. Upstream's
+// showComboFlow / showUsageTrend keys would be a second, competing control.

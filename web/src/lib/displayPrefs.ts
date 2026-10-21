@@ -14,35 +14,20 @@ export function setDetailsExpandedByDefault(on: boolean): void {
   localStorage.setItem(DETAILS_EXPANDED_KEY, on ? '1' : '0')
 }
 
-// The Overview's two optional panels (Combo flow, Usage trend) are visible by
-// default; the Settings > Display switches below hide the whole panel from the
-// section. Visibility, not the collapsed state: a hidden panel is not rendered
-// and the preference survives the visit.
-const COMBO_FLOW_KEY = 'showComboFlow'
-const USAGE_TREND_KEY = 'showUsageTrend'
+// The heavy Settings blocks — the currency rate grid, the per-panel Usage list
+// with its arrangement controls, and the sidebar feature-visibility row — stay
+// folded behind the Display switch until an operator asks for them. Nothing is
+// turned off by folding them: the currency still formats every cost and the
+// arrangement still drives the Usage page, so this is a disclosure preference
+// rather than a feature flag, and it sits with the other display defaults.
+const ADVANCED_SETTINGS_KEY = 'advancedSettingsVisible'
 
-export function isComboFlowVisible(): boolean {
-  if (typeof localStorage === 'undefined') return true
-  return localStorage.getItem(COMBO_FLOW_KEY) !== '0'
+export function isAdvancedSettingsVisible(): boolean {
+  if (typeof localStorage === 'undefined') return false
+  return localStorage.getItem(ADVANCED_SETTINGS_KEY) === '1'
 }
 
-export function setComboFlowVisible(on: boolean): void {
+export function setAdvancedSettingsVisible(on: boolean): void {
   if (typeof localStorage === 'undefined') return
-  localStorage.setItem(COMBO_FLOW_KEY, on ? '1' : '0')
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('display-prefs-changed'))
-  }
-}
-
-export function isUsageTrendVisible(): boolean {
-  if (typeof localStorage === 'undefined') return true
-  return localStorage.getItem(USAGE_TREND_KEY) !== '0'
-}
-
-export function setUsageTrendVisible(on: boolean): void {
-  if (typeof localStorage === 'undefined') return
-  localStorage.setItem(USAGE_TREND_KEY, on ? '1' : '0')
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('display-prefs-changed'))
-  }
+  localStorage.setItem(ADVANCED_SETTINGS_KEY, on ? '1' : '0')
 }

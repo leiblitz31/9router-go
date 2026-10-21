@@ -6,6 +6,7 @@
   import ProviderArtwork from '../providers/ProviderArtwork.svelte'
   import { api, normalizeLastError, type ProviderConnection } from '../../api/client'
   import UsageDashboard from './UsageDashboard.svelte'
+  import { isPanelVisible } from '../../lib/usagePanel.svelte'
   import { copyToClipboard } from '../../lib/clipboard'
   import {
     cachedTokensFor,
@@ -56,6 +57,10 @@
   // opens the modal on the summary fields and fills in the rest once the
   // by-id read lands.
   async function openDetail(item: RequestDetailItem) {
+    // The payload modal is one of the panels Settings can hide; the row keeps
+    // its cursor and click handler, so the guard is what stops an invisible
+    // dialog from opening behind a hidden section.
+    if (!isPanelVisible('details.payload')) return
     selectedDetail = item
     detailError = ''
     const id = item.id
@@ -118,6 +123,7 @@
 
 <UsageDashboard />
 
+{#if isPanelVisible('details.requests')}
 <Card padding="none" class="overflow-hidden border border-border">
   <div class="px-5 py-3 border-b border-border flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-surface-2">
     <div>
@@ -257,6 +263,7 @@
               <td class="py-3 px-4 text-right font-mono text-emerald-500 text-[11px]">
                 {item.cost ? costIn(item.cost, 4) : '—'}
               </td>
+              {#if isPanelVisible('details.payload')}
               <td class="py-3 px-4 text-right">
                 <button
                   type="button"
@@ -269,6 +276,7 @@
                   View
                 </button>
               </td>
+              {/if}
             </tr>
           {/each}
         </tbody>
@@ -303,9 +311,10 @@
     {/if}
   {/if}
 </Card>
+{/if}
 
 <!-- Detail Modal (OmniRoute style) -->
-{#if selectedDetail}
+{#if selectedDetail && isPanelVisible('details.payload')}
   {@const acc = resolveAccount(selectedDetail)}
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
     <div class="w-full max-w-4xl lg:max-w-5xl max-h-[90vh] rounded-2xl bg-surface border border-border shadow-2xl flex flex-col overflow-hidden">

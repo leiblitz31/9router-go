@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -397,23 +398,38 @@ const requestDetailListSelect = `
 	       COALESCE(json_extract(data, '$.protocol'), ''),
 	       json_valid(data)
 	FROM requestDetails
+	%s
 	ORDER BY timestamp DESC
 	LIMIT ? OFFSET ?`
 
+// requestDetailCount counts exactly the rows requestDetailListSelect would page.
+// The two share the predicate slot so a windowed page can never report a total
+// gathered from outside its window.
+const requestDetailCount = `SELECT COUNT(*) FROM requestDetails %s`
+
 // GetRequestDetailsPaged returns one page of collapsed detail rows and the
 // total number of recorded requests.
+//
+// since is the optional timestamp floor behind ?period on the Details tab; an
+// empty string reads the whole table.
 //
 // The count is not allowed to fail quietly. Reporting 0 next to a page that
 // does carry rows is the same "zero that means broken" class this reader's
 // siblings were fixed for, and it reaches the caller looking like a coherent
 // empty page.
-func (r *Repo) GetRequestDetailsPaged(limit, offset int) ([]RequestDetailListRow, int, error) {
+func (r *Repo) GetRequestDetailsPaged(ctx context.Context, limit, offset int, since string) ([]RequestDetailListRow, int, error) {
+	where := ""
+	var args []any
+	if since != "" {
+		where = "WHERE timestamp >= ?"
+		args = append(args, since)
+	}
 	var total int
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM requestDetails`).Scan(&total); err != nil {
+	if err := r.db.QueryRowContext(ctx, fmt.Sprintf(requestDetailCount, where), args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count requestDetails: %w", err)
 	}
 
-	rows, err := r.db.Query(requestDetailListSelect, limit, offset)
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(requestDetailListSelect, where), append(args, limit, offset)...)
 	if err != nil {
 		return nil, total, fmt.Errorf("query requestDetails paged: %w", err)
 	}

@@ -39,7 +39,7 @@
   import { parseMediaProvider, parseProviderId, pathToTab, providerPath, mediaProviderPath, TAB_ROUTES, type ActiveTab, type MediaProviderRoute } from './lib/router'
   import { PROVIDER_CATALOG } from './lib/providers'
   import { getIconPath } from './components/connections/types'
-  import { isNavHidden, normalizeHiddenNav } from './lib/nav'
+  import { isNavHidden, normalizeHiddenNav, normalizeNavOrder } from './lib/nav'
   import { setHiddenNavEntries } from './lib/navVisibility.svelte'
   import { setDisplayCurrency } from './lib/currency.svelte'
 
@@ -55,9 +55,11 @@
   // "this deployment stores no hide list" from "the list has not arrived yet".
   let settingsLoaded = $state(false)
 
-  // Feature Visibility: the entries the operator hid in Settings. The sidebar
-  // and this guard read the same list (web/src/lib/nav.ts).
+  // Feature Visibility: the entries the operator hid, and the arrangement they
+  // moved them into. The sidebar and this guard read the same settings
+  // (web/src/lib/nav.ts).
   let hiddenNav = $derived(normalizeHiddenNav(settings.navVisibility))
+  let navOrder = $derived(normalizeNavOrder(settings.navVisibility))
 
   // Mirror the list for the components that read it outside the settings flow
   // (the API-key editor drops its Plan field with the entry).
@@ -349,6 +351,7 @@
         bind:updateInfo={systemUpdateInfo}
         bind:version={systemVersion}
         hiddenNav={hiddenNav}
+        navOrder={navOrder}
       />
     </div>
 

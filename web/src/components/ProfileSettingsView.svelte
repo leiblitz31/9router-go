@@ -1,15 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import {
-    AlertCircle,
     Check,
-    Coins,
-    Database,
     Download,
     Key,
     Laptop,
     Loader2,
-    Lock,
+    PanelLeft,
     RefreshCw,
     Save,
     Shield,
@@ -26,14 +23,44 @@
   import { api, getAuthHeaders, responseErrorMessage, type DatabaseStats, type Settings } from '../api/client'
   import { isCompactUnitsEnabled, setCompactUnits } from '../lib/compactNumber'
   import {
-    isComboFlowVisible,
+    isAdvancedSettingsVisible,
     isDetailsExpandedByDefault,
-    isUsageTrendVisible,
-    setComboFlowVisible,
+    setAdvancedSettingsVisible,
     setDetailsExpandedByDefault,
-    setUsageTrendVisible
   } from '../lib/displayPrefs'
-  import { TOGGLEABLE_NAV_ENTRIES, orderHiddenNav, setNavVisible } from '../lib/nav'
+  import {
+    USAGE_PANEL_FIXED_POSITION,
+    USAGE_PANEL_GROUPS,
+    USAGE_PANEL_ORDERABLE_GROUPS,
+    USAGE_PANEL_PRESETS,
+    type UsagePanelGroupId,
+    type UsagePanelId,
+    type UsagePanelPreset,
+    activeUsagePreset,
+    applyUsagePreset,
+    isPanelVisible,
+    movePanel,
+    panelOrder,
+    resetPanelOrder,
+    saveUsagePanels,
+    sendPanelTo,
+    setPanelVisible,
+    usagePanelsDirty,
+  } from '../lib/usagePanel.svelte'
+  import {
+    ALWAYS_VISIBLE_NAV_IDS,
+    NAV_PRESETS,
+    activeNavPreset,
+    arrangedNavGroups,
+    dropNavEntry,
+    moveNavEntry,
+    navPresetHidden,
+    normalizeNavOrder,
+    orderHiddenNav,
+    setNavVisible,
+    type NavEntry,
+    type NavPreset,
+  } from '../lib/nav'
   import {
     CURRENCY_CATALOG,
     DEFAULT_RATES,
@@ -64,6 +91,7 @@
   let maxRequestRecords = $state<number>(5000)
   let usageHistoryRetentionDays = $state<number>(0)
   let dbStats = $state<DatabaseStats | null>(null)
+  let dbStatsError = $state<string | null>(null)
   let isPruning = $state(false)
   let isPruningUsage = $state(false)
   let isVacuuming = $state(false)
@@ -84,10 +112,104 @@
   // Usage detail panels (Activity Heatmap, Node Health) start collapsed; the
   // switch below flips that default (detailsExpandedByDefault, localStorage).
   let detailsExpanded = $state(isDetailsExpandedByDefault())
-  // The two optional Overview panels are visible by default; these switches
-  // take them out of the section (showComboFlow / showUsageTrend, localStorage).
-  let comboFlow = $state(isComboFlowVisible())
-  let usageTrend = $state(isUsageTrendVisible())
+
+  // The heavy blocks below — the currency rate grid, the per-panel Usage list
+  // with its arrangement controls, and the sidebar feature-visibility row — stay
+  // folded until this is on. A disclosure preference like the two above, not a
+  // feature flag: the currency still formats every cost and the arrangement
+  // still drives the Usage page while folded.
+  let advancedSettings = $state(isAdvancedSettingsVisible())
+  // Usage-page panel visibility and arrangement. The card below edits the draft
+  // in lib/usagePanel.svelte.ts; the global Save writes it with the rest of the
+  // form, so an edit there raises the same bottom-right reminder a switch does.
+  let panelPreset = $derived(activeUsagePreset())
+  let panelHint = $derived(
+    USAGE_PANEL_PRESETS.find((p) => p.id === panelPreset)?.hint ?? 'Custom selection'
+  )
+
+  // Drag-and-drop arrangement, shared by the Usage panel list and the sidebar
+  // list. A row's handle is the drag source and the row is the drop target, so a
+  // drag never starts from the toggle; the arrows stay as the keyboard path,
+  // since a drag has no keyboard equivalent. Both write the same draft, so one
+  // Save covers either — and a drag that started in one list cannot land in the
+  // other, which is what `zone` is for.
+  type DragZone = 'panel' | 'nav'
+  let dragZone = $state<DragZone | null>(null)
+  let dragGroup = $state<UsagePanelGroupId | null>(null)
+  let dragId = $state<string | null>(null)
+  let dragTarget = $state<{ id: string; before: boolean } | null>(null)
+
+  function startRowDrag(
+    event: DragEvent,
+    zone: DragZone,
+    id: string,
+    group: UsagePanelGroupId | null = null
+  ) {
+    dragZone = zone
+    dragGroup = group
+    dragId = id
+    dragTarget = null
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.setData('text/plain', id)
+    }
+  }
+
+  // Which half of the row the pointer is over decides whether the row lands above
+  // or below it, which is the only drop feedback the list needs.
+  function trackRowDrop(
+    event: DragEvent,
+    zone: DragZone,
+    id: string,
+    group: UsagePanelGroupId | null = null
+  ) {
+    if (dragZone !== zone || !dragId || dragId === id) return
+    // The Usage list is drawn one section at a time, and a panel belongs to its
+    // section: a drop across sections has no destination.
+    if (zone === 'panel' && group !== dragGroup) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    dragTarget = { id, before: event.clientY < rect.top + rect.height / 2 }
+  }
+
+  function leaveRowDrop(event: DragEvent, id: string) {
+    const row = event.currentTarget as HTMLElement
+    if (dragTarget?.id === id && !row.contains(event.relatedTarget as Node | null)) dragTarget = null
+  }
+
+  function dropOnRow(
+    event: DragEvent,
+    zone: DragZone,
+    id: string,
+    group: UsagePanelGroupId | null = null
+  ) {
+    if (dragZone !== zone || !dragId) return
+    if (zone === 'panel' && group !== dragGroup) return
+    event.preventDefault()
+    const before = dragTarget?.id === id ? dragTarget.before : true
+    if (zone === 'panel' && dragGroup) {
+      sendPanelTo(dragGroup, dragId as UsagePanelId, id as UsagePanelId, before)
+    }
+    if (zone === 'nav') navOrder = dropNavEntry(navOrder, dragId, id, before)
+    endRowDrag()
+    markUnsaved()
+  }
+
+  function endRowDrag() {
+    dragZone = null
+    dragGroup = null
+    dragId = null
+    dragTarget = null
+  }
+
+  // The cards have no Save of their own. A preset, an arrow, a drop or a switch
+  // inside them is not a form field, so each edit raises the settings reminder
+  // itself — the same one a settings input raises through the form handler.
+  function markLayoutEdit(apply: () => void) {
+    apply()
+    markUnsaved()
+  }
   let stickyRoundRobinLimit = $state(3)
   let comboStrategy = $state('first-model')
   let forceFallback = $state(false)
@@ -95,6 +217,15 @@
   // Feature Visibility: ids of the sidebar entries this deployment hides. The
   // entry list itself lives in web/src/lib/nav.ts, shared with the sidebar.
   let hiddenNav = $state<string[]>([])
+  // The order those entries are drawn in. Empty means "the order
+  // web/src/lib/nav.ts declares", which is what Reset order writes back.
+  let navOrder = $state<string[]>([])
+  // The preset the hide list currently equals, and what it leaves out — the same
+  // read-back the Usage panel list does, so "Custom" means the same thing here.
+  let navPreset = $derived(activeNavPreset(hiddenNav))
+  let navPresetHint = $derived(
+    NAV_PRESETS.find((preset) => preset.id === navPreset)?.hint ?? 'A selection of your own'
+  )
   // A visibility change is not saved until the operator presses Save, so the
   // button is offered on its own for a few seconds after a change.
   let showSaveHint = $state(false)
@@ -178,6 +309,7 @@
 
       // Feature Visibility
       hiddenNav = orderHiddenNav(settings.navVisibility)
+      navOrder = normalizeNavOrder(settings.navVisibility)
       // Currency
       applyCurrency(settings.displayCurrency)
     }
@@ -194,6 +326,7 @@
         if (typeof s.stickyRoundRobinLimit === 'number') stickyRoundRobinLimit = s.stickyRoundRobinLimit
         // Feature Visibility
         hiddenNav = orderHiddenNav(s.navVisibility)
+        navOrder = normalizeNavOrder(s.navVisibility)
         if (s.comboStrategy) comboStrategy = String(s.comboStrategy)
         if (typeof s.forceFallback === 'boolean') forceFallback = s.forceFallback
         enableSystemPrompt = !!s.systemPromptEnabled
@@ -350,13 +483,16 @@
         oidcClientId,
         oidcScopes,
         oidcLoginLabel,
-        navVisibility: { hidden: hiddenNav },
+        navVisibility: { hidden: hiddenNav, order: navOrder },
         samlEntryPoint,
         samlIssuer,
         samlCert,
         samlLoginLabel,
         displayCurrency: currencySetting(),
       })
+      // The arrangement is a localStorage preference, so it is written only once
+      // the settings it was edited alongside have been kept.
+      if (usagePanelsDirty()) saveUsagePanels()
       saveSuccess = true
       showSaveHint = false
       if (saveHintTimer) clearTimeout(saveHintTimer)
@@ -510,8 +646,12 @@
   async function loadDbStats() {
     try {
       dbStats = await api.getDatabaseStats()
-    } catch {
-      // best-effort
+      dbStatsError = null
+    } catch (err) {
+      // The card renders without the numbers rather than not at all: the rows
+      // fall back to "—" and the prune/vacuum actions stay reachable, because a
+      // failed probe must not take the buttons with it.
+      dbStatsError = err instanceof Error ? err.message : String(err)
     }
   }
 
@@ -616,115 +756,7 @@
     onchange={handleSettingsInput}
     onclick={handleSettingsInput}
   >
-    <!-- SECTION: Display. Unit abbreviation and the usage-detail default are
-         localStorage preferences; the sidebar switch below them is a saved
-         setting (navVisibility), so a change there raises the save reminder. -->
-    <Card padding="md" class="space-y-4">
-      <div class="flex items-center justify-between pb-2 border-b border-border">
-        <div class="flex items-center gap-2">
-          <Sliders class="w-4 h-4 text-brand-500" />
-          <h2 class="text-sm font-bold text-text-main">Display</h2>
-        </div>
-      </div>
 
-      <div class="flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <p class="font-semibold text-text-main">Unit abbreviation</p>
-          <p class="text-[11px] text-text-subtle">Large numbers as 亿/万 (zh) or M/B (en); off → full numbers</p>
-        </div>
-        <div data-save-hint="off">
-          <Toggle
-            checked={compactUnits}
-            size="sm"
-            label="Unit abbreviation"
-            onChange={(val: boolean) => {
-              setCompactUnits(val)
-              compactUnits = isCompactUnitsEnabled()
-            }}
-          />
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <p class="font-semibold text-text-main">Expand usage details</p>
-          <p class="text-[11px] text-text-subtle">
-            Activity Heatmap and Node Health open instead of starting collapsed
-          </p>
-        </div>
-        <div data-save-hint="off">
-          <Toggle
-            checked={detailsExpanded}
-            size="sm"
-            label="Expand usage details"
-            onChange={(val: boolean) => {
-              setDetailsExpandedByDefault(val)
-              detailsExpanded = isDetailsExpandedByDefault()
-            }}
-          />
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <p class="font-semibold text-text-main">Combo flow</p>
-          <p class="text-[11px] text-text-subtle">
-            Off: removes the Combo flow panel from Overview and stops background combo queries
-          </p>
-        </div>
-        <div data-save-hint="off">
-          <Toggle
-            checked={comboFlow}
-            size="sm"
-            label="Combo flow"
-            onChange={(val: boolean) => {
-              setComboFlowVisible(val)
-              comboFlow = isComboFlowVisible()
-            }}
-          />
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <p class="font-semibold text-text-main">Usage trend</p>
-          <p class="text-[11px] text-text-subtle">
-            Off: removes the Usage trend chart from Overview and skips chart queries
-          </p>
-        </div>
-        <div data-save-hint="off">
-          <Toggle
-            checked={usageTrend}
-            size="sm"
-            label="Usage trend"
-            onChange={(val: boolean) => {
-              setUsageTrendVisible(val)
-              usageTrend = isUsageTrendVisible()
-            }}
-          />
-        </div>
-      </div>
-
-      {#each TOGGLEABLE_NAV_ENTRIES as entry (entry.id)}
-        <div class="flex items-center justify-between gap-3">
-          <div class="min-w-0">
-            <p class="font-semibold text-text-main">Advanced usage</p>
-            <p class="text-[11px] text-text-subtle">
-              Off: {entry.label} leaves the sidebar, its URL stops resolving, and the API-key
-              editor hides the Plan field
-            </p>
-          </div>
-          <Toggle
-            checked={!hiddenNav.includes(entry.id)}
-            size="sm"
-            label="Advanced usage"
-            onChange={(val) => {
-              hiddenNav = setNavVisible(hiddenNav, entry.id, val)
-            }}
-          />
-        </div>
-      {/each}
-    </Card>
     <!-- SECTION 1: Runtime Storage -->
     <Card padding="md" class="space-y-4">
       <div class="flex items-center justify-between pb-2 border-b border-border">
@@ -1131,61 +1163,88 @@
           </div>
         </div>
 
-        <!-- Database Storage Stats & Actions -->
-        {#if dbStats}
-          <div class="p-3 rounded-xl bg-bg border border-border space-y-3">
-            <div class="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-              <div>
-                <span class="text-text-muted">Database File Size: </span>
-                <span class="font-mono font-semibold text-text-main">{formatBytes(dbStats.databaseSizeBytes)}</span>
-              </div>
-              <div>
-                <span class="text-text-muted">Request Details: </span>
-                <span class="font-mono font-semibold text-text-main">{dbStats.requestDetailsCount.toLocaleString()} rows</span>
-              </div>
-              <div>
-                <span class="text-text-muted">Usage Ledger: </span>
-                <span class="font-mono font-semibold text-text-main">{dbStats.usageHistoryCount.toLocaleString()} rows</span>
-                {#if dbStats.usageHistoryOldestTimestamp}
-                  <span class="text-[10px] text-text-subtle font-mono ml-1">(since {dbStats.usageHistoryOldestTimestamp.slice(0, 10)})</span>
-                {/if}
-              </div>
-              {#if dbStats.reclaimableBytes > 0}
-                <div>
-                  <span class="text-text-muted">Reclaimable: </span>
-                  <span class="font-mono font-semibold text-amber-500">{formatBytes(dbStats.reclaimableBytes)}</span>
-                </div>
+        <!-- Database Storage Stats & Actions. The numbers come from the
+             admin-session stats endpoint, so an install whose dashboard is open
+             without a session (requireLogin off) fails it while every other card
+             works: the rows then read "—" and the reason is printed, instead of
+             the whole block — buttons included — vanishing. -->
+        <div class="p-3 rounded-xl bg-bg border border-border space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <div>
+              <span class="text-text-muted">Database File Size: </span>
+              <span class="font-mono font-semibold text-text-main"
+                >{dbStats ? formatBytes(dbStats.databaseSizeBytes) : '—'}</span
+              >
+            </div>
+            <div>
+              <span class="text-text-muted">Request Details: </span>
+              <span class="font-mono font-semibold text-text-main"
+                >{dbStats ? `${(dbStats.requestDetailsCount ?? 0).toLocaleString()} rows` : '—'}</span
+              >
+            </div>
+            <div>
+              <span class="text-text-muted">Usage Ledger: </span>
+              <span class="font-mono font-semibold text-text-main"
+                >{dbStats ? `${(dbStats.usageHistoryCount ?? 0).toLocaleString()} rows` : '—'}</span
+              >
+              {#if dbStats?.usageHistoryOldestTimestamp}
+                <span class="text-[10px] text-text-subtle font-mono ml-1"
+                  >(since {dbStats.usageHistoryOldestTimestamp.slice(0, 10)})</span
+                >
               {/if}
             </div>
+            {#if !dbStats || (dbStats.reclaimableBytes ?? 0) > 0}
+              <div>
+                <span class="text-text-muted">Reclaimable: </span>
+                <span class="font-mono font-semibold text-amber-500"
+                  >{dbStats ? formatBytes(dbStats.reclaimableBytes ?? 0) : '—'}</span
+                >
+              </div>
+            {/if}
+          </div>
 
-            <div class="flex flex-wrap gap-2 pt-1 border-t border-border-subtle/60">
+          {#if dbStatsError}
+            <div
+              class="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-500"
+            >
+              <span>Storage stats unavailable — {dbStatsError}</span>
               <button
                 type="button"
-                onclick={handlePrune}
-                disabled={isPruning}
-                class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs text-text-main font-medium transition cursor-pointer disabled:opacity-50"
+                onclick={loadDbStats}
+                class="rounded-md border border-amber-500/40 px-2 py-0.5 font-semibold transition-colors hover:bg-amber-500/20 cursor-pointer"
               >
-                <span>{isPruning ? 'Pruning...' : 'Prune Expired Records'}</span>
-              </button>
-              <button
-                type="button"
-                onclick={handlePruneUsage}
-                disabled={isPruningUsage || !dbStats || dbStats.usageHistoryCount === 0}
-                class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs text-text-main font-medium transition cursor-pointer disabled:opacity-50"
-              >
-                <span>{isPruningUsage ? 'Pruning Ledger...' : 'Prune Usage History'}</span>
-              </button>
-              <button
-                type="button"
-                onclick={handleVacuum}
-                disabled={isVacuuming}
-                class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 border border-brand-500/30 text-xs text-brand-500 font-semibold transition cursor-pointer disabled:opacity-50"
-              >
-                <span>{isVacuuming ? 'Compacting...' : 'Compact Database (VACUUM)'}</span>
+                Retry
               </button>
             </div>
+          {/if}
+
+          <div class="flex flex-wrap gap-2 pt-1 border-t border-border-subtle/60">
+            <button
+              type="button"
+              onclick={handlePrune}
+              disabled={isPruning}
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs text-text-main font-medium transition cursor-pointer disabled:opacity-50"
+            >
+              <span>{isPruning ? 'Pruning...' : 'Prune Expired Records'}</span>
+            </button>
+            <button
+              type="button"
+              onclick={handlePruneUsage}
+              disabled={isPruningUsage || (dbStats !== null && (dbStats.usageHistoryCount ?? 0) === 0)}
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs text-text-main font-medium transition cursor-pointer disabled:opacity-50"
+            >
+              <span>{isPruningUsage ? 'Pruning Ledger...' : 'Prune Usage History'}</span>
+            </button>
+            <button
+              type="button"
+              onclick={handleVacuum}
+              disabled={isVacuuming}
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 border border-brand-500/30 text-xs text-brand-500 font-semibold transition cursor-pointer disabled:opacity-50"
+            >
+              <span>{isVacuuming ? 'Compacting...' : 'Compact Database (VACUUM)'}</span>
+            </button>
           </div>
-        {/if}
+        </div>
       </div>
     </Card>
 
@@ -1247,6 +1306,416 @@
         </div>
       </div>
     </Card>
+    <!-- SECTION: Display. Unit abbreviation, the usage-detail default, an
+         advanced-settings disclosure that unfolds the currency rates, the
+         per-panel Usage list and the sidebar features, and the display currency
+         itself. The switches here are localStorage preferences that apply at
+         once, like the two toggles at the top: every change still raises the
+         save reminder, because the currency they sit beside is a saved setting. -->
+    <Card padding="md" class="space-y-4">
+      <div class="flex items-center justify-between pb-2 border-b border-border">
+        <div class="flex items-center gap-2">
+          <Sliders class="w-4 h-4 text-brand-500" />
+          <h2 class="text-sm font-bold text-text-main">Display</h2>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <p class="text-xs font-semibold text-text-main">Unit abbreviation</p>
+          <p class="text-[11px] text-text-subtle">Large numbers as 亿/万 (zh) or M/B (en); off → full numbers</p>
+        </div>
+        <Toggle
+          checked={compactUnits}
+          size="sm"
+          label="Unit abbreviation"
+          onChange={(val: boolean) => {
+            setCompactUnits(val)
+            compactUnits = isCompactUnitsEnabled()
+          }}
+        />
+      </div>
+
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <p class="text-xs font-semibold text-text-main">Advanced settings</p>
+          <p class="text-[11px] text-text-subtle">
+            Unfolds the currency rates, the Sidebar card and the per-panel Usage list below. Folding
+            them back changes nothing about what they do.
+          </p>
+        </div>
+        <Toggle
+          checked={advancedSettings}
+          size="sm"
+          label="Advanced settings"
+          onChange={(val: boolean) => {
+            setAdvancedSettingsVisible(val)
+            advancedSettings = isAdvancedSettingsVisible()
+          }}
+        />
+      </div>
+
+      <!-- Currency: the display currency every cost surface reads, kept here
+           because it is one of these preferences rather than a section of its
+           own. The catalog and the formatting rules live in lib/currency.ts. -->
+      <div class="space-y-3 border-t border-border pt-3">
+        <p class="text-xs font-semibold text-text-main">Currency</p>
+
+        <p class="text-[11px] text-text-subtle leading-relaxed">
+          Every cost is measured in USD and shown here in the currency you pick. The rates are yours
+          to keep: edit them, or refresh them from a public provider.
+        </p>
+
+        <div class="space-y-3">
+          <div class="space-y-1">
+            <label for="currency-code" class="text-xs font-semibold text-text-main">Display currency</label>
+            <select
+              id="currency-code"
+              bind:value={currencyCode}
+              class="w-full px-3 py-2 rounded-lg bg-bg border border-border text-xs text-text-main focus:outline-none focus:border-brand-500"
+            >
+              {#each CURRENCY_CATALOG as option (option.code)}
+                <option value={option.code}>{option.code} — {option.label}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs text-text-main">Show USD next to the converted amount</span>
+            <Toggle
+              checked={currencyShowBoth}
+              size="sm"
+              label="Show USD next to the converted amount"
+              onChange={(val) => (currencyShowBoth = val)}
+            />
+          </div>
+        </div>
+
+        {#if advancedSettings}
+        <div class="space-y-1">
+          <p class="text-xs text-text-main">Rates — one USD in each currency</p>
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {#each CURRENCY_CATALOG as option (option.code)}
+              <label class="flex items-center gap-2 rounded-[10px] border border-border-subtle px-2 py-1.5">
+                <span class="w-9 text-[11px] font-semibold text-text-muted">{option.code}</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  inputmode="decimal"
+                  value={currencyRates[option.code] ?? ''}
+                  placeholder={String(DEFAULT_RATES[option.code] ?? '')}
+                  oninput={(e) => setRate(option.code, (e.target as HTMLInputElement).value)}
+                  class="w-full bg-transparent text-xs text-text-main focus:outline-none"
+                />
+              </label>
+            {/each}
+          </div>
+        </div>
+        {/if}
+
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="text-[11px] text-text-subtle">
+            1 USD = {formatCost(1, { code: currencyCode, rates: currencyRates, showBoth: false })} ·
+            {describeRates(currencySetting())}
+          </p>
+          <Button variant="secondary" size="sm" onclick={refreshRates} loading={isRefreshingRates}>
+            <RefreshCw class="w-3.5 h-3.5 text-text-muted" />
+            <span>Update currency</span>
+          </Button>
+        </div>
+
+        {#if ratesMessage}
+          <p class="text-[11px] text-text-muted leading-relaxed">{ratesMessage}</p>
+        {/if}
+      </div>
+    </Card>
+    {#if advancedSettings}
+    <!-- SECTION: Sidebar. Which entries this deployment draws, and in what order
+         they sit, folded behind the Display switch with the Usage panel card: both
+         are arrangement surfaces rather than day-to-day preferences. Both facts
+         ride the one server-side navVisibility value, so a single Save publishes
+         them; the preset fills the switches and leaves the arrangement where the
+         operator put it. -->
+    <Card padding="md" class="space-y-4">
+      <div class="flex items-center justify-between gap-2 pb-2 border-b border-border">
+        <div class="flex items-center gap-2">
+          <PanelLeft class="w-4 h-4 text-brand-500" />
+          <h2 class="text-sm font-bold text-text-main">Sidebar</h2>
+        </div>
+        <button
+          type="button"
+          onclick={() => markLayoutEdit(() => (navOrder = []))}
+          class="text-[10px] font-medium text-text-muted transition-colors hover:text-text-main cursor-pointer"
+        >
+          Reset order
+        </button>
+      </div>
+
+      <div class="space-y-2">
+        <div class="space-y-1">
+          <label class="text-[11px] font-medium text-text-muted" for="sidebar-preset">Preset</label>
+          <select
+            id="sidebar-preset"
+            value={navPreset}
+            title={navPresetHint}
+            onchange={(event) =>
+              markLayoutEdit(() =>
+                (hiddenNav = navPresetHidden(
+                  (event.currentTarget as HTMLSelectElement).value as NavPreset
+                ))
+              )}
+            class="w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text-main focus:border-brand-500 focus:outline-none"
+          >
+            <!-- Shown only while the switches match no preset: a selection of
+                 one's own is a state to read, not one to pick. -->
+            <option value="custom" disabled>Custom</option>
+            {#each NAV_PRESETS as preset (preset.id)}
+              <option value={preset.id} title={preset.hint}>{preset.label}</option>
+            {/each}
+          </select>
+          <p class="text-[11px] text-text-subtle">{navPresetHint}</p>
+        </div>
+
+        {#snippet navRow(entry: NavEntry, siblings: NavEntry[])}
+          {@const index = siblings.findIndex((candidate) => candidate.id === entry.id)}
+          <div
+            class="relative flex items-center justify-between gap-3 rounded-md px-1 py-1 {dragZone ===
+            'nav' && dragId === entry.id
+              ? 'opacity-40'
+              : ''}"
+            ondragover={(event) => trackRowDrop(event, 'nav', entry.id)}
+            ondragleave={(event) => leaveRowDrop(event, entry.id)}
+            ondrop={(event) => dropOnRow(event, 'nav', entry.id)}
+          >
+            {#if dragTarget?.id === entry.id && dragId !== entry.id}
+              <div
+                class="pointer-events-none absolute inset-x-0 h-0.5 bg-primary {dragTarget?.before
+                  ? 'top-0'
+                  : 'bottom-0'}"
+              ></div>
+            {/if}
+            <div class="flex min-w-0 items-center gap-1.5">
+              <span
+                class="material-symbols-outlined cursor-grab text-[14px] text-text-subtle active:cursor-grabbing"
+                title="Drag to reorder"
+                aria-hidden="true"
+                draggable="true"
+                ondragstart={(event) => startRowDrag(event, 'nav', entry.id)}
+                ondragend={endRowDrag}>drag_indicator</span
+              >
+              <p class="min-w-0 truncate text-xs text-text-main">{entry.label}</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  title="Move up"
+                  aria-label="Move {entry.label} up"
+                  disabled={index === 0}
+                  onclick={() =>
+                    markLayoutEdit(() => (navOrder = moveNavEntry(navOrder, entry.id, -1)))}
+                  class="rounded p-0.5 text-text-muted transition-colors hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <span class="material-symbols-outlined text-[14px]">arrow_upward</span>
+                </button>
+                <button
+                  type="button"
+                  title="Move down"
+                  aria-label="Move {entry.label} down"
+                  disabled={index === siblings.length - 1}
+                  onclick={() =>
+                    markLayoutEdit(() => (navOrder = moveNavEntry(navOrder, entry.id, 1)))}
+                  class="rounded p-0.5 text-text-muted transition-colors hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <span class="material-symbols-outlined text-[14px]">arrow_downward</span>
+                </button>
+              </div>
+              <Toggle
+                checked={!hiddenNav.includes(entry.id)}
+                disabled={ALWAYS_VISIBLE_NAV_IDS.includes(entry.id)}
+                title={ALWAYS_VISIBLE_NAV_IDS.includes(entry.id)
+                  ? 'Always visible: this is the page the panel lives on'
+                  : ''}
+                size="sm"
+                label="{entry.label} in the sidebar"
+                onChange={(val: boolean) => {
+                  hiddenNav = setNavVisible(hiddenNav, entry.id, val)
+                }}
+              />
+            </div>
+          </div>
+        {/snippet}
+
+        {#each arrangedNavGroups(navOrder) as group (group.id)}
+          <div class="space-y-1">
+            {#if group.label}
+              <p class="text-[10px] font-semibold uppercase tracking-wider text-text-subtle">
+                {group.label}
+              </p>
+            {/if}
+            {#each group.entries as entry (entry.id)}
+              {@render navRow(entry, group.entries)}
+              {#if entry.kind === 'accordion'}
+                <div class="ml-4 space-y-1 border-l border-border-subtle pl-2">
+                  {#each entry.children as child (child.id)}
+                    {@render navRow(child, entry.children)}
+                  {/each}
+                </div>
+              {/if}
+            {/each}
+          </div>
+        {/each}
+      </div>
+    </Card>
+    {/if}
+    {#if advancedSettings}
+    <!-- SECTION: Usage dashboard. Per-panel visibility and arrangement for every
+         Usage section (Overview, Details, Cache Analytics, Compression
+         Analytics), folded away with the rest of the advanced settings: the
+         arrangement keeps driving the Usage page while the card is hidden. It has
+         no Save of its own on purpose — the presets, the toggles, the arrows and a
+         drag all raise the global reminder, and the global Save writes the
+         arrangement with the rest of the form. -->
+    <Card padding="md" class="space-y-4">
+      <div class="flex items-center justify-between gap-2 pb-2 border-b border-border">
+        <div class="flex items-center gap-2">
+          <Sliders class="w-4 h-4 text-brand-500" />
+          <h2 class="text-sm font-bold text-text-main">Usage dashboard</h2>
+        </div>
+      </div>
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <p class="text-xs font-semibold text-text-main">Expand usage details</p>
+          <p class="text-[11px] text-text-subtle">
+            Activity Heatmap and Node Health open instead of starting collapsed
+          </p>
+        </div>
+        <Toggle
+          checked={detailsExpanded}
+          size="sm"
+          label="Expand usage details"
+          onChange={(val: boolean) => {
+            setDetailsExpandedByDefault(val)
+            detailsExpanded = isDetailsExpandedByDefault()
+          }}
+        />
+      </div>
+      <div class="space-y-4">
+        <div class="space-y-2">
+        <div class="space-y-1">
+          <label class="text-[11px] font-medium text-text-muted" for="usage-panel-preset">Preset</label>
+          <select
+            id="usage-panel-preset"
+            value={panelPreset}
+            title={panelHint}
+            onchange={(event) =>
+              markLayoutEdit(() =>
+                applyUsagePreset((event.currentTarget as HTMLSelectElement).value as UsagePanelPreset)
+              )}
+            class="w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text-main focus:border-brand-500 focus:outline-none"
+          >
+            <!-- Shown only while the toggles match no preset: an arrangement of
+                 one's own is a state to read, not one to pick. -->
+            <option value="custom" disabled>Custom</option>
+            {#each USAGE_PANEL_PRESETS as preset (preset.id)}
+              <option value={preset.id} title={preset.hint}>{preset.label}</option>
+            {/each}
+          </select>
+        </div>
+          <p class="text-[11px] text-text-subtle">{panelHint}</p>
+        </div>
+        {#each USAGE_PANEL_GROUPS as group (group.id)}
+          {@const orderable = USAGE_PANEL_ORDERABLE_GROUPS.includes(group.id)}
+          <div class="space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-[10px] font-semibold uppercase tracking-wider text-text-subtle">
+                {group.label}
+              </p>
+              {#if orderable}
+                <button
+                  type="button"
+                  onclick={() => markLayoutEdit(() => resetPanelOrder(group.id))}
+                  class="text-[10px] font-medium text-text-muted transition-colors hover:text-text-main cursor-pointer"
+                >
+                  Reset order
+                </button>
+              {:else}
+                <span class="text-[10px] text-text-subtle">Order fixed by the layout</span>
+              {/if}
+            </div>
+            {#each panelOrder(group.id) as itemId, index (itemId)}
+              {@const item = group.items.find((candidate) => candidate.id === itemId)}
+              {@const fixed = USAGE_PANEL_FIXED_POSITION[itemId]}
+              {@const grabbable = orderable && !fixed}
+              {@const landing = dragTarget?.id === itemId && dragId !== itemId}
+              <div
+                class="relative flex items-center justify-between gap-3 rounded-md px-1 py-1 {dragId ===
+                itemId
+                  ? 'opacity-40'
+                  : ''}"
+                ondragover={(event) => trackRowDrop(event, 'panel', itemId, group.id)}
+                ondragleave={(event) => leaveRowDrop(event, itemId)}
+                ondrop={(event) => dropOnRow(event, 'panel', itemId, group.id)}
+              >
+                {#if landing}
+                  <div
+                    class="pointer-events-none absolute inset-x-0 h-0.5 bg-primary {dragTarget?.before
+                      ? 'top-0'
+                      : 'bottom-0'}"
+                  ></div>
+                {/if}
+                <div class="flex min-w-0 items-center gap-1.5">
+                  {#if grabbable}
+                    <span
+                      class="material-symbols-outlined cursor-grab text-[14px] text-text-subtle active:cursor-grabbing"
+                      title="Drag to reorder"
+                      aria-hidden="true"
+                      draggable="true"
+                      ondragstart={(event) => startRowDrag(event, 'panel', itemId, group.id)}
+                      ondragend={endRowDrag}>drag_indicator</span
+                    >
+                  {/if}
+                  <p class="min-w-0 text-xs text-text-main">{item?.label}</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  {#if orderable}
+                    <div class="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        title={fixed ?? 'Move up'}
+                        aria-label="Move {item?.label} up"
+                        disabled={Boolean(fixed) || index === 0}
+                        onclick={() => markLayoutEdit(() => movePanel(group.id, itemId, -1))}
+                        class="rounded p-0.5 text-text-muted transition-colors hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <span class="material-symbols-outlined text-[14px]">arrow_upward</span>
+                      </button>
+                      <button
+                        type="button"
+                        title={fixed ?? 'Move down'}
+                        aria-label="Move {item?.label} down"
+                        disabled={Boolean(fixed) || index === panelOrder(group.id).length - 1}
+                        onclick={() => markLayoutEdit(() => movePanel(group.id, itemId, 1))}
+                        class="rounded p-0.5 text-text-muted transition-colors hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <span class="material-symbols-outlined text-[14px]">arrow_downward</span>
+                      </button>
+                    </div>
+                  {/if}
+                  <Toggle
+                    checked={isPanelVisible(itemId)}
+                    size="sm"
+                    label={item?.label ?? itemId}
+                    onChange={(val: boolean) => setPanelVisible(itemId, val)}
+                  />
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/each}
+      </div>
+    </Card>
+    {/if}
 
     <!-- Save reminder: an operator who flipped a switch must not walk away
          without saving. It appears on a change and hides itself again after a
@@ -1263,78 +1732,6 @@
         </Button>
       </div>
     {/if}
-    <!-- SECTION 7: Currency -->
-    <Card padding="md" class="space-y-4">
-      <div class="flex items-center gap-2 pb-2 border-b border-border">
-        <Coins class="w-4 h-4 text-brand-500" />
-        <h2 class="text-sm font-bold text-text-main">Currency</h2>
-      </div>
-
-      <p class="text-xs text-text-muted leading-relaxed">
-        Every cost is measured in USD and shown here in the currency you pick. The rates are yours
-        to keep: edit them, or refresh them from a public provider.
-      </p>
-
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div class="space-y-1">
-          <label for="currency-code" class="text-[11px] font-medium text-text-muted">Display currency</label>
-          <select
-            id="currency-code"
-            bind:value={currencyCode}
-            class="w-full px-3 py-2 rounded-lg bg-bg border border-border text-xs text-text-main focus:outline-none focus:border-brand-500"
-          >
-            {#each CURRENCY_CATALOG as option (option.code)}
-              <option value={option.code}>{option.code} — {option.label}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="flex items-center justify-between gap-3 rounded-[10px] border border-border-subtle px-3 py-2">
-          <span class="text-xs text-text-muted">Show USD next to the converted amount</span>
-          <Toggle
-            checked={currencyShowBoth}
-            size="sm"
-            label="Show USD next to the converted amount"
-            onChange={(val) => (currencyShowBoth = val)}
-          />
-        </div>
-      </div>
-
-      <div class="space-y-1">
-        <p class="text-[11px] font-medium text-text-muted">Rates — one USD in each currency</p>
-        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-          {#each CURRENCY_CATALOG as option (option.code)}
-            <label class="flex items-center gap-2 rounded-[10px] border border-border-subtle px-2 py-1.5">
-              <span class="w-9 text-[11px] font-semibold text-text-muted">{option.code}</span>
-              <input
-                type="number"
-                min="0"
-                step="any"
-                inputmode="decimal"
-                value={currencyRates[option.code] ?? ''}
-                placeholder={String(DEFAULT_RATES[option.code] ?? '')}
-                oninput={(e) => setRate(option.code, (e.target as HTMLInputElement).value)}
-                class="w-full bg-transparent text-xs text-text-main focus:outline-none"
-              />
-            </label>
-          {/each}
-        </div>
-      </div>
-
-      <div class="flex flex-wrap items-center justify-between gap-2">
-        <p class="text-[11px] text-text-subtle">
-          1 USD = {formatCost(1, { code: currencyCode, rates: currencyRates, showBoth: false })} ·
-          {describeRates(currencySetting())}
-        </p>
-        <Button variant="ghost" onclick={refreshRates} loading={isRefreshingRates}>
-          <RefreshCw class="w-3.5 h-3.5" />
-          <span>Refresh from provider</span>
-        </Button>
-      </div>
-
-      {#if ratesMessage}
-        <p class="text-[11px] text-text-muted leading-relaxed">{ratesMessage}</p>
-      {/if}
-    </Card>
 
     <Modal
       isOpen={dbAuthOpen}

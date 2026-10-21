@@ -168,10 +168,10 @@
       <span class="cf-route-arrow" data-state={routeState} aria-hidden="true">
         <svg viewBox="0 0 40 12" preserveAspectRatio="none">
           <path d="M1 6 H37" />
-          <circle cx="1" cy="6" r="2.2">
-            <animate attributeName="cx" values="1;37" dur="1.1s" repeatCount="indefinite" />
-          </circle>
         </svg>
+        {#if routeState === 'trying'}
+          <span class="cf-dot"></span>
+        {/if}
       </span>
       <div class="cf-chip" data-role="combo">
         <span class="material-symbols-outlined cf-chip-icon">account_tree</span>

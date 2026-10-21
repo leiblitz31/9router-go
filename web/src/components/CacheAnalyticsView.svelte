@@ -14,6 +14,7 @@
   import { periodLabel, type Period } from './analytics/types'
   import type { ViewOption } from './analytics/types'
   import { costIn } from '../lib/currency.svelte'
+  import { isPanelVisible } from '../lib/usagePanel.svelte'
 
   type CacheView = 'prompt' | 'semantic'
 
@@ -395,6 +396,7 @@
     <!-- Hourly trend. The window picker moved up into the section header: it
          chooses the period for the cards, the breakdowns and this chart at
          once, so it can no longer sit here scoping only the chart. -->
+    {#if isPanelVisible('cache.trend')}
     <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm">
       <div class="mb-4">
         <h3 class="text-sm font-semibold text-text-main flex items-center gap-1.5">
@@ -462,8 +464,10 @@
         </div>
       {/if}
     </div>
+    {/if}
 
     <!-- Provider Breakdown Table -->
+    {#if isPanelVisible('cache.provider')}
     <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm">
       <h3 class="text-sm font-semibold text-text-main mb-3 flex items-center gap-1.5">
         <span class="material-symbols-outlined text-[18px] text-brand-500">dns</span>
@@ -518,8 +522,10 @@
           </p>
         {/if}
     </div>
+    {/if}
 
     <!-- Model Breakdown Table -->
+    {#if isPanelVisible('cache.model')}
     <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm">
       <h3 class="text-sm font-semibold text-text-main mb-3 flex items-center gap-1.5">
         <span class="material-symbols-outlined text-[18px] text-brand-500">model_training</span>
@@ -573,6 +579,7 @@
           </p>
         {/if}
     </div>
+    {/if}
 
   {:else if activeView === 'semantic'}
     <!-- Semantic Cache View -->
@@ -627,6 +634,7 @@
     </div>
 
     <!-- Management & Actions Bar -->
+    {#if isPanelVisible('cache.invalidation')}
     <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm space-y-4">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -666,8 +674,10 @@
         </button>
       </div>
     </div>
+    {/if}
 
     <!-- Entries Table -->
+    {#if isPanelVisible('cache.entries')}
     <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm space-y-4">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex items-center gap-2">
@@ -799,5 +809,6 @@
         {/if}
       {/if}
     </div>
+    {/if}
   {/if}
 </div>

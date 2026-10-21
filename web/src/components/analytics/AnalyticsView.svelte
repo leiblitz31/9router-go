@@ -26,8 +26,8 @@
   import UsageChart from './UsageChart.svelte'
   import ProviderTopologyCard from './ProviderTopologyCard.svelte'
   import ComboFlowCard from './ComboFlowCard.svelte'
+  import { usageBlocks, isPanelVisible } from '../../lib/usagePanel.svelte'
   import Card from '../../lib/ui/Card.svelte'
-  import { isComboFlowVisible, isUsageTrendVisible } from '../../lib/displayPrefs'
   import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
   interface Props {
     connections?: ProviderConnection[]
@@ -50,30 +50,22 @@
   let period = $state<Period>('today')
   let isFetching = $state(false)
 
-  // The two panels at the end of the Overview start collapsed, unlike the
-  // Details panels: they are extra reading below the fold, not the section's
-  // subject. Settings > Display hides each one outright instead.
+  // The two optional Overview panels start collapsed and say so with a chevron,
+  // the same affordance the Details panels use. Collapsed is a view state, not a
+  // preference: the switch that hides a panel outright is the arrangement's own
+  // visibility toggle, and that one also skips the combo query below.
   let comboFlowOpen = $state(false)
   let usageTrendOpen = $state(false)
-  let showComboFlow = $state(isComboFlowVisible())
-  let showUsageTrend = $state(isUsageTrendVisible())
-
-  $effect(() => {
-    const onPrefsChange = () => {
-      showComboFlow = isComboFlowVisible()
-      showUsageTrend = isUsageTrendVisible()
-    }
-    if (typeof window !== 'undefined') {
-      window.addEventListener('display-prefs-changed', onPrefsChange)
-      window.addEventListener('storage', onPrefsChange)
-    }
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('display-prefs-changed', onPrefsChange)
-        window.removeEventListener('storage', onPrefsChange)
-      }
-    }
-  })
+  // The trend's metric switch lives in the panel header, and the header label
+  // describes the active metric — so both the mode and the hourly fact the
+  // label repeats are owned here (UsageChart reports the bucket shape back).
+  let trendMode = $state<'tokens' | 'costs'>('tokens')
+  let trendHourly = $state(false)
+  const trendLabel = $derived(
+    trendMode === 'costs'
+      ? `Estimated cost per ${trendHourly ? 'hour' : 'day'}, stacked by model family.`
+      : `Tokens per ${trendHourly ? 'hour' : 'day'}, stacked by model family.`
+  )
 
   // Choosing a section has to move the URL when that section owns one, or the
   // next reload silently drops back to Overview.
@@ -164,13 +156,13 @@
     }
   }
 
-  async function loadDetails(page = 1) {
+  async function loadDetails(page = 1, window: Period = period) {
     detailsLoading = true
     detailsError = ''
     try {
       const limit = 20
       const offset = (page - 1) * limit
-      const res = await api.getRequestDetails(limit, offset)
+      const res = await api.getRequestDetails(limit, offset, window)
       if (res && Array.isArray(res.details)) {
         details = res.details
         detailsTotal = res.total || 0
@@ -192,13 +184,16 @@
   })
 
   $effect(() => {
-    if (section === 'details') loadDetails(detailsPage)
+    if (section === 'details') loadDetails(detailsPage, period)
   })
 
-  // Loaded once: editing a combo is rare, and a reload picks up the change.
-  // Skipped entirely when Combo flow is disabled in Settings > Display.
+  // Loaded once: editing a combo is rare, and a reload picks up the change. The
+  // query is skipped outright while the Combo flow panel is hidden — the panel
+  // draws nothing then, so the definitions would only cost a request and memory
+  // (upstream #429). `isPanelVisible` reads the arrangement, so turning the panel
+  // back on in Settings refetches without a reload.
   $effect(() => {
-    if (!showComboFlow) {
+    if (!isPanelVisible('overview.comboFlow')) {
       comboDefs = []
       return
     }
@@ -448,41 +443,20 @@
   <SectionMenu {section} onSectionChange={(next) => (section = next)} />
 {/snippet}
 
-<!-- Both Overview panels are collapsed by default and say so with a chevron,
-     the same affordance UsageDashboard uses for its own detail panels. -->
-{#snippet comboFlowIcon()}
-  <span class="material-symbols-outlined text-[18px]" aria-hidden="true">account_tree</span>
-{/snippet}
-{#snippet comboFlowToggle()}
+<!-- Both optional Overview panels are collapsed by default and say so with the
+     same chevron the Details panels use, so a reader recognizes the affordance
+     without learning a second one. -->
+{#snippet panelToggle(open: boolean, label: string, onToggle: () => void)}
   <button
     type="button"
-    aria-expanded={comboFlowOpen}
-    aria-label="Toggle Combo flow"
-    onclick={() => (comboFlowOpen = !comboFlowOpen)}
-    class="p-1 rounded-lg text-text-muted hover:text-text-main hover:bg-surface-2 transition-colors cursor-pointer"
+    aria-expanded={open}
+    aria-label="Toggle {label}"
+    onclick={onToggle}
+    class="shrink-0 cursor-pointer self-start rounded-lg p-1 text-text-muted transition-colors hover:bg-surface-3 hover:text-text-main focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 sm:self-auto"
   >
     <span
       class="material-symbols-outlined text-[18px] transition-transform duration-200"
-      style:transform={comboFlowOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
-    >
-      expand_more
-    </span>
-  </button>
-{/snippet}
-{#snippet usageTrendIcon()}
-  <span class="material-symbols-outlined text-[18px]" aria-hidden="true">monitoring</span>
-{/snippet}
-{#snippet usageTrendToggle()}
-  <button
-    type="button"
-    aria-expanded={usageTrendOpen}
-    aria-label="Toggle Usage trend"
-    onclick={() => (usageTrendOpen = !usageTrendOpen)}
-    class="p-1 rounded-lg text-text-muted hover:text-text-main hover:bg-surface-2 transition-colors cursor-pointer"
-  >
-    <span
-      class="material-symbols-outlined text-[18px] transition-transform duration-200"
-      style:transform={usageTrendOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
+      style:transform={open ? 'rotate(180deg)' : 'rotate(0deg)'}
     >
       expand_more
     </span>
@@ -491,17 +465,17 @@
 
 
 <div class="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
-  <!-- The section picker and the window selector the Overview needs. Cache
-       Analytics and Compression Analytics each put the picker in their own
-       header, beside the controls they own (issue #209); Details reads its
-       window from the shared Usage page. -->
+  <!-- The section picker and the window selector. Cache Analytics and
+       Compression Analytics each put the picker in their own header, beside the
+       controls they own (issue #209). Details shares this row's control, which
+       windows the request table through ?period; the panels above it keep the
+       window they label in place (lifetime is all time, Node Health is 7 days),
+       so no number here changes meaning silently. -->
   {#if section === 'overview' || section === 'details'}
     <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       {@render sectionMenu()}
 
-      {#if section === 'overview'}
-        <PeriodSelect value={period} busy={isFetching} onChange={(next) => (period = next)} />
-      {/if}
+      <PeriodSelect value={period} busy={isFetching} onChange={(next) => (period = next)} />
     </div>
   {/if}
 
@@ -532,96 +506,117 @@
   {/if}
 
   {#if section === 'overview'}
-    <!-- 5 Overview KPI Cards -->
-    <SummaryKpiCards {stats} />
-
-    <!-- Topology + Recent Requests -->
-    <div class="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
-      <ProviderTopologyCard
-        providers={topologyProviders}
-        {activeRequests}
-        {pulseProvider}
-        {lastProvider}
-        {errorProvider}
-        onRefresh={() => loadStats(period)}
-      />
-      <!-- Recent Requests Card -->
-      <div class="bg-surface border border-border-subtle rounded-[14px] shadow-[var(--shadow-soft)] p-4 flex min-w-0 flex-col overflow-hidden" style="height: 480px">
-        <div class="px-1 py-2 border-b border-border shrink-0">
-          <span class="text-xs font-semibold text-text-muted uppercase tracking-wide">Recent Requests</span>
+    <!-- The panels of this section, in the arrangement Settings holds. A block
+         is one panel, except for the map + Recent Requests row: those two share
+         one grid row while both are visible and adjacent, and fall apart into
+         full-width blocks once the arrangement separates them. -->
+    {#each usageBlocks('overview') as block (block.key)}
+      {#if block.key === 'overview.kpi'}
+        <SummaryKpiCards {stats} />
+      {:else if block.key === 'overview.comboFlow'}
+        <!-- Combo flow: router -> combo -> members, only while a combo is in use
+             (or just finished). The provider map keeps its own animation. The
+             panel starts collapsed: the flow is only interesting while a request
+             is moving, and an expanded empty tree reads as a broken panel. The
+             header is the Details panels' own — same fonts, same chevron, with
+             the panel's icon in front of the title. -->
+        <Card padding="none" class="overflow-hidden border border-border">
+          <div
+            class="flex flex-col gap-3 bg-surface-2 px-5 py-3 sm:flex-row sm:items-center sm:justify-between {comboFlowOpen
+              ? 'border-b border-border'
+              : ''}"
+          >
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="material-symbols-outlined text-[18px] text-text-muted" aria-hidden="true"
+                >account_tree</span
+              >
+              <div class="min-w-0">
+                <h2 class="font-headline text-sm font-bold text-text-main">Combo flow</h2>
+                <p class="font-body text-xs text-text-muted">Router → combo → members, live</p>
+              </div>
+            </div>
+            {@render panelToggle(comboFlowOpen, 'Combo flow', () => (comboFlowOpen = !comboFlowOpen))}
+          </div>
+          {#if comboFlowOpen}
+            <div class="p-5">
+              <ComboFlowCard
+                combos={comboDefs}
+                {activeRequests}
+                recentRequests={stats.recentRequests || []}
+                {errorProvider}
+              />
+            </div>
+          {/if}
+        </Card>
+      {:else if block.key === 'overview.topology+overview.recent'}
+        <div class="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
+          {@render topologyMap()}
+          {@render recentRequestsCard()}
         </div>
-
-        {#if !stats.recentRequests || stats.recentRequests.length === 0}
-          <div class="flex-1 flex items-center justify-center text-text-muted text-xs">
-            No requests recorded yet.
+      {:else if block.key === 'overview.topology'}
+        {@render topologyMap()}
+      {:else if block.key === 'overview.recent'}
+        {@render recentRequestsCard()}
+      {:else if block.key === 'overview.trend'}
+        <!-- Usage trend: the same collapsed-by-default shape as Combo flow, so the
+             two optional panels read alike. The metric switch lives here, in the
+             header, beside the chevron — the label below it names what is drawn,
+             so the two cannot disagree. -->
+        <Card padding="none" class="overflow-hidden border border-border">
+          <div
+            class="flex flex-col gap-3 bg-surface-2 px-5 py-3 sm:flex-row sm:items-center sm:justify-between {usageTrendOpen
+              ? 'border-b border-border'
+              : ''}"
+          >
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="material-symbols-outlined text-[18px] text-text-muted" aria-hidden="true"
+                >monitoring</span
+              >
+              <div class="min-w-0">
+                <h2 class="font-headline text-sm font-bold text-text-main">Usage trend</h2>
+                <p class="font-body text-xs text-text-muted">{trendLabel}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2 self-start sm:self-auto">
+              <div
+                class="inline-flex rounded-xl bg-surface border border-border p-1 shadow-sm"
+                role="group"
+                aria-label="Chart metric"
+              >
+                <button
+                  type="button"
+                  onclick={() => (trendMode = 'costs')}
+                  class="rounded-lg px-3 py-1 text-xs font-semibold transition-colors cursor-pointer {trendMode ===
+                  'costs'
+                    ? 'bg-brand-500 text-white shadow-sm'
+                    : 'text-text-muted hover:text-text-main'}"
+                >
+                  Costs
+                </button>
+                <button
+                  type="button"
+                  onclick={() => (trendMode = 'tokens')}
+                  class="rounded-lg px-3 py-1 text-xs font-semibold transition-colors cursor-pointer {trendMode ===
+                  'tokens'
+                    ? 'bg-brand-500 text-white shadow-sm'
+                    : 'text-text-muted hover:text-text-main'}"
+                >
+                  Tokens
+                </button>
+              </div>
+              {@render panelToggle(usageTrendOpen, 'Usage trend', () => (usageTrendOpen = !usageTrendOpen))}
+            </div>
           </div>
-        {:else}
-          <div class="flex-1 overflow-y-auto">
-            <table class="w-full table-fixed min-w-[280px] border-collapse text-xs">
-              <colgroup>
-                <col class="w-[20px]" />
-                <col />
-                <col class="w-[96px]" />
-                <col class="w-[56px]" />
-              </colgroup>
-              <thead class="sticky top-0 bg-bg z-10">
-                <tr class="border-b border-border">
-                  <th class="py-1.5 pl-3 text-left font-semibold text-text-muted"></th>
-                  <th class="py-1.5 text-left font-semibold text-text-muted">Model</th>
-                  <th class="py-1.5 text-right font-semibold text-text-muted whitespace-nowrap">In / Out</th>
-                  <th class="py-1.5 pr-3 text-right font-semibold text-text-muted whitespace-nowrap">When</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-border/50 font-mono text-[11px]">
-                {#each stats.recentRequests as req}
-                  <tr class="hover:bg-bg-subtle transition-colors">
-                    <td class="py-1.5 pl-3 align-middle">
-                      <span class="mx-auto block w-1.5 h-1.5 rounded-full {req.status === 'ok' || req.status === 'success' ? 'bg-success' : 'bg-red-500'}"></span>
-                    </td>
-                    <td class="py-1.5 pr-2 min-w-0">
-                      <span class="block truncate font-mono text-[11px]" title={req.model}>{req.model}</span>
-                    </td>
-                    <td class="py-1.5 pr-3 text-right whitespace-nowrap">
-                      <span class="text-primary">{fmt(req.promptTokens)}↑</span>
-                      <span class="text-success">{fmt(req.completionTokens)}↓</span>
-                    </td>
-                    <td class="py-1.5 pr-3 text-right text-text-muted whitespace-nowrap text-[10px]">
-                      {timeAgo(req.timestamp)}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      </div>
-    </div>
-
-    <!-- Breakdown Table -->
-    <UsageBreakdownTable {stats} />
-
-    <!-- Combo flow: router -> combo -> members, only while a combo is in use
-         (or just finished). The provider map above keeps its own animation. -->
-    {#if showComboFlow}
-      <Card padding="md" title="Combo flow" icon={comboFlowIcon} action={comboFlowToggle}>
-        {#if comboFlowOpen}
-          <ComboFlowCard
-            combos={comboDefs}
-            {activeRequests}
-            recentRequests={stats.recentRequests || []}
-            {errorProvider}
-          />
-        {/if}
-      </Card>
-    {/if}
-
-    {#if showUsageTrend}
-      <Card padding="md" title="Usage trend" icon={usageTrendIcon} action={usageTrendToggle}>
-        {#if usageTrendOpen}
-          <UsageChart {period} />
-        {/if}
-      </Card>
-    {/if}
+          {#if usageTrendOpen}
+            <div class="p-5">
+              <UsageChart {period} bind:viewMode={trendMode} bind:hourly={trendHourly} />
+            </div>
+          {/if}
+        </Card>
+      {:else if block.key === 'overview.breakdown'}
+        <UsageBreakdownTable {stats} />
+      {/if}
+    {/each}
   {:else if section === 'cache'}
     <CacheAnalyticsView>
       {#snippet headerLeft()}
@@ -648,3 +643,72 @@
     />
   {/if}
 </div>
+{#snippet topologyMap()}
+  <ProviderTopologyCard
+    providers={topologyProviders}
+    {activeRequests}
+    {pulseProvider}
+    {lastProvider}
+    {errorProvider}
+    onRefresh={() => loadStats(period)}
+  />
+{/snippet}
+
+{#snippet recentRequestsCard()}
+  <div
+    class="bg-surface border border-border-subtle rounded-[14px] shadow-[var(--shadow-soft)] p-4 flex min-w-0 flex-col overflow-hidden"
+    style="height: 480px"
+  >
+    <div class="px-1 py-2 border-b border-border shrink-0">
+      <span class="text-xs font-semibold text-text-muted uppercase tracking-wide">Recent Requests</span>
+    </div>
+
+    {#if !stats.recentRequests || stats.recentRequests.length === 0}
+      <div class="flex-1 flex items-center justify-center text-text-muted text-xs">
+        No requests recorded yet.
+      </div>
+    {:else}
+      <div class="flex-1 overflow-y-auto">
+        <table class="w-full table-fixed min-w-[280px] border-collapse text-xs">
+          <colgroup>
+            <col class="w-[20px]" />
+            <col />
+            <col class="w-[96px]" />
+            <col class="w-[56px]" />
+          </colgroup>
+          <thead class="sticky top-0 bg-bg z-10">
+            <tr class="border-b border-border">
+              <th class="py-1.5 pl-3 text-left font-semibold text-text-muted"></th>
+              <th class="py-1.5 text-left font-semibold text-text-muted">Model</th>
+              <th class="py-1.5 text-right font-semibold text-text-muted whitespace-nowrap">In / Out</th>
+              <th class="py-1.5 pr-3 text-right font-semibold text-text-muted whitespace-nowrap">When</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-border/50 font-mono text-[11px]">
+            {#each stats.recentRequests as req}
+              <tr class="hover:bg-bg-subtle transition-colors">
+                <td class="py-1.5 pl-3 align-middle">
+                  <span
+                    class="mx-auto block w-1.5 h-1.5 rounded-full {req.status === 'ok' || req.status === 'success'
+                      ? 'bg-success'
+                      : 'bg-red-500'}"
+                  ></span>
+                </td>
+                <td class="py-1.5 pr-2 min-w-0">
+                  <span class="block truncate font-mono text-[11px]" title={req.model}>{req.model}</span>
+                </td>
+                <td class="py-1.5 pr-3 text-right whitespace-nowrap">
+                  <span class="text-primary">{fmt(req.promptTokens)}↑</span>
+                  <span class="text-success">{fmt(req.completionTokens)}↓</span>
+                </td>
+                <td class="py-1.5 pr-3 text-right text-text-muted whitespace-nowrap text-[10px]">
+                  {timeAgo(req.timestamp)}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </div>
+{/snippet}

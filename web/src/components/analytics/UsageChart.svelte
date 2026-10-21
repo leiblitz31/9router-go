@@ -9,6 +9,13 @@
 
   interface Props {
     period?: string
+    /**
+     * Which stack the chart draws. Owned by the parent because the switch that
+     * picks it sits in the panel header, and the header label describes it.
+     */
+    viewMode?: 'tokens' | 'costs'
+    /** Whether the buckets are hourly — the same fact the header label needs. */
+    hourly?: boolean
   }
 
   interface ChartBucket {
@@ -24,12 +31,15 @@
     total: number
   }
 
-  let { period = '7d' }: Props = $props()
+  let {
+    period = '7d',
+    viewMode = $bindable('tokens'),
+    hourly = $bindable(false),
+  }: Props = $props()
 
   let buckets = $state<ChartBucket[]>([])
   let loading = $state(true)
   let failed = $state(false)
-  let viewMode = $state<'tokens' | 'costs'>('tokens')
   let hovered = $state<number | null>(null)
 
   const WIDTH = 640
@@ -50,6 +60,9 @@
       .then((data) => {
         if (cancelled) return
         buckets = Array.isArray(data) ? data : []
+        // The server buckets hourly for short windows; the header label repeats
+        // that fact, so it is reported rather than re-derived up there.
+        hourly = /^\d\d:\d\d$/.test(buckets[0]?.label || '')
         loading = false
       })
       .catch(() => {
@@ -115,7 +128,6 @@
   const maxTotal = $derived(Math.max(1, ...stack.map((s) => s.total)))
   const hasData = $derived(stack.some((s) => s.total > 0))
   const step = $derived(buckets.length > 1 ? WIDTH / (buckets.length - 1) : WIDTH)
-  const hourly = $derived(/^\d\d:\d\d$/.test(buckets[0]?.label || ''))
 
   function xAt(index: number): number {
     return buckets.length > 1 ? index * step : WIDTH / 2
@@ -141,39 +153,7 @@
   }
 </script>
 
-<div class="bg-surface border border-border-subtle rounded-[14px] shadow-[var(--shadow-soft)] flex min-w-0 flex-col gap-3 p-4">
-  <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-    <div>
-      <h3 class="text-sm font-semibold text-text-main flex items-center gap-1.5">
-        <span class="material-symbols-outlined text-[18px] text-brand-500" aria-hidden="true">show_chart</span>
-        Usage Trend
-      </h3>
-      <p class="text-xs text-text-subtle">
-        {viewMode === 'costs' ? 'Estimated cost' : 'Tokens'} per {hourly ? 'hour' : 'day'}, stacked by model family.
-      </p>
-    </div>
-    <div class="inline-flex rounded-xl bg-surface border border-border p-1 shadow-sm self-start sm:self-auto" role="group" aria-label="Chart metric">
-      <button
-        type="button"
-        onclick={() => (viewMode = 'costs')}
-        class="rounded-lg px-3 py-1 text-xs font-semibold transition-colors cursor-pointer {viewMode === 'costs'
-          ? 'bg-brand-500 text-white shadow-sm'
-          : 'text-text-muted hover:text-text-main'}"
-      >
-        Costs
-      </button>
-      <button
-        type="button"
-        onclick={() => (viewMode = 'tokens')}
-        class="rounded-lg px-3 py-1 text-xs font-semibold transition-colors cursor-pointer {viewMode === 'tokens'
-          ? 'bg-brand-500 text-white shadow-sm'
-          : 'text-text-muted hover:text-text-main'}"
-      >
-        Tokens
-      </button>
-    </div>
-  </div>
-
+<div class="flex min-w-0 flex-col gap-3">
   {#if loading}
     <div class="flex items-center justify-center py-12 text-text-muted text-xs">
       <span class="material-symbols-outlined animate-spin text-[20px] mr-2" aria-hidden="true">progress_activity</span>

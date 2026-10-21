@@ -177,28 +177,25 @@ body {
   font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
 }
 
-/* Topology: router card pulse + electric edge beam (matching upstream 9Router) */
+/* Topology: router card pulse + electric edge beam (matching upstream 9Router).
+   The pulse and the icon shake animate transform only. They used to animate a
+   three-layer box-shadow and a drop-shadow filter as well, which made the
+   browser re-rasterise a blurred shadow and a filter region on every frame for
+   as long as a request was in flight — measured at ~1.1 s of main-thread task
+   time per 5 s on the Usage page, of which this card was ~95% (issue #381
+   follow-up). */
 @keyframes topology-router-pulse {
   0%, 100% {
     transform: translate(-50%, -50%) scale(1);
-    box-shadow:
-      0 0 16px rgba(253, 224, 71, 0.4),
-      0 0 32px rgba(34, 211, 238, 0.35),
-      inset 0 0 12px rgba(250, 204, 21, 0.3);
   }
   50% {
     transform: translate(-50%, -50%) scale(1.05);
-    box-shadow:
-      0 0 24px rgba(253, 224, 71, 0.75),
-      0 0 48px rgba(34, 211, 238, 0.6),
-      0 0 64px rgba(74, 222, 128, 0.35),
-      inset 0 0 18px rgba(250, 204, 21, 0.5);
   }
 }
 @keyframes topology-router-icon-shake {
-  0%, 100% { transform: rotate(0deg) scale(1); filter: drop-shadow(0 0 2px #fde047); }
-  25% { transform: rotate(-5deg) scale(1.08); filter: drop-shadow(0 0 6px #facc15); }
-  75% { transform: rotate(5deg) scale(1.08); filter: drop-shadow(0 0 6px #22d3ee); }
+  0%, 100% { transform: rotate(0deg) scale(1); }
+  25% { transform: rotate(-5deg) scale(1.08); }
+  75% { transform: rotate(5deg) scale(1.08); }
 }
 @keyframes topology-router-label-flicker {
   0%, 100% { text-shadow: 0 0 6px #fde047, 0 0 12px #22d3ee; }
@@ -216,15 +213,17 @@ body {
 .topology-router-core {
   animation: topology-router-pulse 0.75s ease-in-out infinite !important;
   border-color: #fde047 !important;
+  /* Static glow: painted once instead of on every frame of the pulse. */
+  box-shadow:
+    0 0 16px rgba(253, 224, 71, 0.4),
+    0 0 32px rgba(34, 211, 238, 0.35),
+    inset 0 0 12px rgba(250, 204, 21, 0.3);
 }
 .topology-router-icon {
   animation: topology-router-icon-shake 0.45s ease-in-out infinite;
 }
 .topology-router-label {
   animation: topology-router-label-flicker 0.7s ease-in-out infinite;
-}
-.topology-router-badge {
-  box-shadow: 0 0 10px #fde047, 0 0 16px rgba(34, 211, 238, 0.6);
 }
 .topology-edge-kame {
   stroke-dasharray: 8 6;
@@ -486,6 +485,7 @@ body {
 }
 /* the hop: a line with a dot travelling from the gateway into the combo */
 .cf-route-arrow {
+  position: relative;
   flex: none;
   height: 12px;
   width: 1.6rem;
@@ -512,9 +512,29 @@ body {
   stroke-linecap: round;
   opacity: 0.85;
 }
-.cf-route-arrow circle {
-  fill: currentColor;
-  filter: drop-shadow(0 0 3px currentColor);
+/* The dot rides the hop as a composited translate, and only while a member is
+   actually being tried. The previous version was an SVG <animate> on cx plus a
+   drop-shadow filter: both are main-thread paint work that ran at 60fps for as
+   long as the card was mounted, including once the run had already finished
+   (issue #381 follow-up). */
+.cf-dot {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  height: 5px;
+  width: 5px;
+  margin-top: -2.5px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: cf-hop 1.1s linear infinite;
+}
+@keyframes cf-hop {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(calc(1.6rem - 5px));
+  }
 }
 /* the ordered list: a rail down the numbers, one row per member */
 .cf-list {
@@ -579,12 +599,10 @@ body {
 .cf-row[data-status='trying'] .cf-order-disc {
   border-color: #f59e0b;
   color: #f59e0b;
-  box-shadow: 0 0 8px rgba(245, 158, 11, 0.35);
 }
 .cf-row[data-status='connected'] .cf-order-disc {
   border-color: #10b981;
   color: #10b981;
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
 }
 .cf-row[data-status='failed'] .cf-order-disc {
   border-color: #ef4444;
@@ -604,7 +622,6 @@ body {
 .cf-row[data-status='trying'] .cf-row-card {
   border-color: #f59e0b;
   background: rgba(245, 158, 11, 0.09);
-  box-shadow: 0 0 12px rgba(245, 158, 11, 0.2);
 }
 .cf-row[data-status='connected'] .cf-row-card {
   border-color: #10b981;

@@ -12,6 +12,7 @@
   import MenuItem from '../lib/ui/MenuItem.svelte'
   import { costIn, currentCurrency } from '../lib/currency.svelte'
   import { convertFromUsd } from '../lib/currency'
+  import { isPanelVisible } from '../lib/usagePanel.svelte'
 
   interface Props {
     /**
@@ -338,6 +339,7 @@
   </div>
 
   <!-- Hourly Trend Chart -->
+  {#if isPanelVisible('compression.trend')}
   <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm">
     <div class="flex flex-col gap-1 mb-4">
       <h3 class="text-sm font-semibold text-text-main flex items-center gap-1.5">
@@ -388,10 +390,12 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   <!-- Breakdown Grid: Modes, Providers, Models -->
   <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
     <!-- Breakdown by Mode -->
+    {#if isPanelVisible('compression.mode')}
     <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm space-y-4">
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold text-text-main flex items-center gap-1.5">
@@ -433,8 +437,10 @@
         </div>
       {/if}
     </div>
+    {/if}
 
     <!-- Breakdown by Provider -->
+    {#if isPanelVisible('compression.provider')}
     <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm space-y-4">
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold text-text-main flex items-center gap-1.5">
@@ -477,8 +483,10 @@
         </div>
       {/if}
     </div>
+    {/if}
 
     <!-- Breakdown by Model -->
+    {#if isPanelVisible('compression.model')}
     <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm space-y-4">
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold text-text-main flex items-center gap-1.5">
@@ -523,9 +531,11 @@
         </div>
       {/if}
     </div>
+    {/if}
   </div>
 
   <!-- Top 10 Biggest Savers Table -->
+  {#if isPanelVisible('compression.topSavers')}
   <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm space-y-4">
     <div class="flex items-center justify-between">
       <div>
@@ -611,8 +621,10 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   <!-- Real Usage Receipts & Telemetry Details -->
+  {#if isPanelVisible('compression.receipts')}
   <div class="rounded-2xl border border-border bg-surface p-5 shadow-sm">
     <h3 class="text-sm font-semibold text-text-main mb-3 flex items-center gap-1.5">
       <span class="material-symbols-outlined text-[18px] text-brand-500">receipt_long</span>
@@ -646,4 +658,5 @@
       </div>
     </div>
   </div>
+  {/if}
 </div>

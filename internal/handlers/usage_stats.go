@@ -532,7 +532,7 @@ func HandleRequestDetails(repo *db.Repo) http.HandlerFunc {
 			}
 		}
 
-		rows, total, err := repo.GetRequestDetailsPaged(limit, offset)
+		rows, total, err := repo.GetRequestDetailsPaged(r.Context(), limit, offset, detailsSince(r.URL.Query().Get("period"), time.Now()))
 		if err != nil {
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -550,6 +550,25 @@ func HandleRequestDetails(repo *db.Repo) http.HandlerFunc {
 			"offset":  offset,
 		})
 	}
+}
+
+// detailsSince turns ?period into the timestamp floor for the request-details
+// table. An empty result means unbounded: an absent parameter and `all` read the
+// whole table, while `today`, `24h`, `<n>h` and `<n>d` each start where
+// resolveUsagePeriod says — the same resolver /api/usage/stats uses, so the two
+// sections cannot disagree about what "last 7 days" means.
+func detailsSince(raw string, now time.Time) string {
+	if raw == "" || raw == "all" {
+		return ""
+	}
+	window := resolveUsagePeriod(raw, now)
+	if !window.since.IsZero() {
+		return window.since.UTC().Format(time.RFC3339)
+	}
+	if window.days > 0 {
+		return now.AddDate(0, 0, -window.days).UTC().Format(time.RFC3339)
+	}
+	return ""
 }
 
 // newDetailListItem maps a collapsed row onto the wire shape, running the same
