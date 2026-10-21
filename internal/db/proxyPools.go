@@ -60,6 +60,15 @@ func (p *ProxyPool) IsEdgeRelay() bool {
 	}
 }
 
+// IsDoh reports whether a pool's URLs are DNS-over-HTTPS resolver specs
+// (aliases like "cloudflare" or DoH endpoint URLs) rather than proxy
+// addresses. The chat path branches on the same type value: a doh pool is
+// dialed through its resolvers, never with http.ProxyURL, and never treated
+// as an edge relay even though a spec can be an https URL.
+func (p *ProxyPool) IsDoh() bool {
+	return p != nil && p.Type == "doh"
+}
+
 // IsEdgeRelayURL reports whether a URL is hosted on a platform that serves edge
 // relays rather than CONNECT proxies (Vercel, Cloudflare Workers, Deno Deploy,
 // Netlify Functions). It exists so a relay URL pasted into a pool declared as a
@@ -164,13 +173,14 @@ func (p *ProxyPool) NextURL() string {
 // deploy-type pools. Field order matches what the Next.js dashboard writes so
 // the shared DB stays byte-compatible.
 type ProxyPoolData struct {
-	Name         string  `json:"name"`
-	ProxyURL     string  `json:"proxyUrl"`
-	NoProxy      string  `json:"noProxy"`
-	Type         string  `json:"type"`
-	StrictProxy  bool    `json:"strictProxy"`
-	LastTestedAt *string `json:"lastTestedAt"`
-	LastError    *string `json:"lastError"`
+	Name         string   `json:"name"`
+	ProxyURL     string   `json:"proxyUrl"`
+	URLs         []string `json:"urls,omitempty"`
+	NoProxy      string   `json:"noProxy"`
+	Type         string   `json:"type"`
+	StrictProxy  bool     `json:"strictProxy"`
+	LastTestedAt *string  `json:"lastTestedAt"`
+	LastError    *string  `json:"lastError"`
 }
 
 // InsertProxyPool inserts a new proxy pool row and returns the pool object in
@@ -190,7 +200,7 @@ func (r *Repo) InsertProxyPool(d ProxyPoolData) (map[string]any, error) {
 		return nil, fmt.Errorf("insert proxy pool: %w", err)
 	}
 	r.invalidateActivePoolIDs()
-	return map[string]any{
+	created := map[string]any{
 		"id":           id,
 		"name":         d.Name,
 		"proxyUrl":     d.ProxyURL,
@@ -203,7 +213,11 @@ func (r *Repo) InsertProxyPool(d ProxyPoolData) (map[string]any, error) {
 		"lastError":    nil,
 		"createdAt":    now,
 		"updatedAt":    now,
-	}, nil
+	}
+	if len(d.URLs) > 0 {
+		created["urls"] = d.URLs
+	}
+	return created, nil
 }
 
 // randomID returns a random hex id (uuid-shaped, like the dashboard's uuidv4).

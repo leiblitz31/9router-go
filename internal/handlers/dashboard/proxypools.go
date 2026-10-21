@@ -143,9 +143,25 @@ func (h *DashboardHandler) HandleCreateProxyPool(w http.ResponseWriter, r *http.
 		}
 	}
 
+	// A doh pool's urls are resolver specs, not proxy addresses. Keep only
+	// the non-blank ones and refuse a pool that names none: it could never
+	// resolve anything, and the failure would otherwise surface later as
+	// opaque upstream 502s. The proxyUrl field is meaningless for doh, so
+	// it is dropped rather than stored as a stale decoy.
+	var resolvers []string
+	if req.Type == "doh" {
+		resolvers = cleanResolverSpecs(req.URLs)
+		if len(resolvers) == 0 {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, "doh pool requires at least one resolver")
+			return
+		}
+		req.ProxyURL = ""
+	}
+
 	poolData := db.ProxyPoolData{
 		Name:        req.Name,
 		ProxyURL:    req.ProxyURL,
+		URLs:        resolvers,
 		NoProxy:     req.NoProxy,
 		Type:        req.Type,
 		StrictProxy: req.StrictProxy,
@@ -179,6 +195,13 @@ func (h *DashboardHandler) HandleUpdateProxyPool(w http.ResponseWriter, r *http.
 	if err := json.Unmarshal(body, &updates); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
+	}
+
+	// A pool switched to doh must not keep a stale proxy URL: the data plane
+	// reads urls first for a doh pool, and a leftover proxyUrl would mislabel
+	// the pool everywhere else it is displayed.
+	if poolType, _ := updates["type"].(string); poolType == "doh" {
+		updates["proxyUrl"] = ""
 	}
 
 	if err := h.Repo.UpdateProxyPool(id, updates); err != nil {
@@ -225,6 +248,14 @@ func (h *DashboardHandler) HandleTestProxyPool(w http.ResponseWriter, r *http.Re
 	pool, err := h.Repo.GetProxyPool(id)
 	if err != nil || pool == nil {
 		handlerutil.WriteJSONError(w, http.StatusNotFound, "proxy pool not found")
+		return
+	}
+
+	// A doh pool's URLs are resolver specs, not proxy addresses: probing one
+	// as an HTTP proxy would fail a healthy pool, so it gets a DNS probe
+	// through its own resolvers instead.
+	if pool.IsDoh() {
+		h.testDoHPool(w, r, id, pool)
 		return
 	}
 

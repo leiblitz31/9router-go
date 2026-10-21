@@ -40,7 +40,9 @@
 
   interface PoolForm {
     name: string
+    poolType: 'standard' | 'doh'
     proxyUrl: string
+    resolvers: string
     noProxy: string
     isActive: boolean
     strictProxy: boolean
@@ -49,11 +51,22 @@
   function normalizeFormData(data: Partial<ProxyPool> = {}): PoolForm {
     return {
       name: data.name || '',
+      poolType: data.type === 'doh' ? 'doh' : 'standard',
       proxyUrl: data.proxyUrl || '',
+      resolvers: (data.urls ?? []).join('\n'),
       noProxy: data.noProxy || '',
       isActive: data.isActive !== false,
       strictProxy: data.strictProxy === true,
     }
+  }
+
+  // A doh pool's resolvers are edited as one spec per line; blank lines are
+  // decoration, so saving and validating both go through this split.
+  function parseResolvers(text: string): string[] {
+    return text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
   }
 
   let proxyPools = $state<ProxyPool[]>([])
@@ -90,6 +103,16 @@
     onConfirm: () => Promise<void> | void
   } | null>(null)
   let relayMenuRef = $state<HTMLDivElement | null>(null)
+
+  // One validity rule for both Save buttons (create and edit render the same
+  // fields): a name, plus a proxy URL for a standard pool or at least one
+  // resolver line for a doh pool.
+  let formValid = $derived(
+    formData.name.trim() !== '' &&
+      (formData.poolType === 'doh'
+        ? parseResolvers(formData.resolvers).length > 0
+        : formData.proxyUrl.trim() !== '')
+  )
 
   // Tested pools float to the top (most recently tested first);
   // never-tested pools keep backend order below.
@@ -252,14 +275,30 @@
   }
 
   async function handleSave() {
-    const payload = {
+    const payload: Partial<ProxyPool> = {
       name: formData.name.trim(),
-      proxyUrl: formData.proxyUrl.trim(),
-      noProxy: formData.noProxy.trim(),
       isActive: formData.isActive === true,
       strictProxy: formData.strictProxy === true,
     }
-    if (!payload.name || !payload.proxyUrl) return
+    if (formData.poolType === 'doh') {
+      // A doh pool stores resolver specs, never a proxy URL: an empty
+      // proxyUrl in the payload would only leave a stale decoy field in
+      // the pool's stored data, so the key is not sent at all.
+      payload.type = 'doh'
+      payload.urls = parseResolvers(formData.resolvers)
+      if (!payload.name || payload.urls.length === 0) return
+    } else {
+      payload.proxyUrl = formData.proxyUrl.trim()
+      payload.noProxy = formData.noProxy.trim()
+      if (editingPool?.type === 'doh') {
+        // Switching a doh pool back to a standard proxy: restate the type
+        // and clear the resolver specs, otherwise the stored pool keeps
+        // resolving as doh (its urls win over proxyUrl at read time).
+        payload.type = payload.proxyUrl.startsWith('socks') ? 'socks5' : 'http'
+        payload.urls = []
+      }
+      if (!payload.name || !payload.proxyUrl) return
+    }
     saving = true
     try {
       if (editingPool) {
@@ -723,13 +762,51 @@
      fields live in one snippet rather than being written twice. -->
 {#snippet singleFields()}
   <Input label="Name" bind:value={formData.name} placeholder="Office Proxy" />
-  <Input label="Proxy URL" bind:value={formData.proxyUrl} placeholder="http://127.0.0.1:7897" />
-  <Input
-    label="No Proxy"
-    bind:value={formData.noProxy}
-    placeholder="localhost,127.0.0.1,.internal"
-    hint="Comma-separated hosts/domains to bypass proxy"
-  />
+
+  <div class="flex flex-col gap-1.5">
+    <p class="text-sm font-medium text-text-main">Pool Type</p>
+    <div class="flex gap-1 rounded-lg border border-border/50 bg-surface-2 p-1">
+      {#each [{ value: 'standard', label: 'Standard Proxy' }, { value: 'doh', label: 'DNS-over-HTTPS (DoH)' }] as option (option.value)}
+        <button
+          type="button"
+          aria-pressed={formData.poolType === option.value}
+          onclick={() => (formData.poolType = option.value as PoolForm['poolType'])}
+          class="flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors {formData.poolType ===
+          option.value
+            ? 'bg-brand-500 text-white shadow-sm'
+            : 'text-text-muted hover:text-text-main'}"
+        >
+          {option.label}
+        </button>
+      {/each}
+    </div>
+  </div>
+
+  {#if formData.poolType === 'doh'}
+    <div>
+      <label for="pool-resolvers" class="text-sm font-medium text-text-main mb-1 block">
+        Resolvers (one per line)
+      </label>
+      <textarea
+        id="pool-resolvers"
+        bind:value={formData.resolvers}
+        placeholder={'cloudflare\ngoogle\nhttps://one.one.one.one/dns-query'}
+        class="w-full min-h-[120px] py-2 px-3 text-sm text-text-main bg-surface-2 border border-transparent rounded-[10px] focus:ring-1 focus:ring-primary/30 focus:border-primary/50 focus:outline-none transition-all font-mono"
+      ></textarea>
+      <p class="text-xs text-text-muted mt-1">
+        Resolver aliases (cloudflare, google, quad9, adguard) or full https://…/dns-query URLs.
+        Upstream hostnames are resolved through these resolvers instead of dialing a proxy.
+      </p>
+    </div>
+  {:else}
+    <Input label="Proxy URL" bind:value={formData.proxyUrl} placeholder="http://127.0.0.1:7897" />
+    <Input
+      label="No Proxy"
+      bind:value={formData.noProxy}
+      placeholder="localhost,127.0.0.1,.internal"
+      hint="Comma-separated hosts/domains to bypass proxy"
+    />
+  {/if}
 
   <div
     class="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between"
@@ -1058,11 +1135,24 @@
                     {#if pool.type === 'netlify'}
                       <Badge size="sm">netlify relay</Badge>
                     {/if}
+                    {#if pool.type === 'doh'}
+                      <Badge size="sm">doh</Badge>
+                    {/if}
                     <Badge size="sm">
                       {pool.boundConnectionCount || 0} bound
                     </Badge>
                   </div>
-                  <p class="text-xs text-text-muted truncate mt-1">{pool.proxyUrl}</p>
+                  {#if pool.type === 'doh'}
+                    <p class="text-xs text-text-muted truncate mt-1">
+                      {pool.urls && pool.urls.length > 0
+                        ? pool.urls[0]
+                        : 'No resolvers configured'}{pool.urls && pool.urls.length > 1
+                        ? ` (+${pool.urls.length - 1} more)`
+                        : ''}
+                    </p>
+                  {:else}
+                    <p class="text-xs text-text-muted truncate mt-1">{pool.proxyUrl}</p>
+                  {/if}
                   {#if pool.noProxy}
                     <p class="text-xs text-text-muted truncate">No proxy: {pool.noProxy}</p>
                   {/if}
@@ -1397,7 +1487,7 @@
             <Button
               fullWidth
               onclick={handleSave}
-              disabled={!formData.name.trim() || !formData.proxyUrl.trim() || saving}
+              disabled={!formValid || saving}
             >
               {saving ? 'Saving...' : 'Save'}
             </Button>
@@ -1433,7 +1523,7 @@
               <Button
                 fullWidth
                 onclick={handleSave}
-                disabled={!formData.name.trim() || !formData.proxyUrl.trim() || saving}
+                disabled={!formValid || saving}
               >
                 {saving ? 'Saving...' : 'Save'}
               </Button>

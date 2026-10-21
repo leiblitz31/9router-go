@@ -443,7 +443,7 @@ export interface HeadroomExtrasResponse {
 export interface ProxyPool {
   id: string
   name: string
-  type: 'http' | 'socks5' | 'vercel' | 'cloudflare' | 'deno' | 'netlify' | string
+  type: 'http' | 'socks5' | 'vercel' | 'cloudflare' | 'deno' | 'netlify' | 'doh' | string
   proxyUrl?: string
   urls?: string[]
   noProxy?: string

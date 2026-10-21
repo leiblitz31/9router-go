@@ -132,6 +132,24 @@ func (r *dohResolver) resolveDialTarget(ctx context.Context, host, addr string) 
 	return net.JoinHostPort(ip, port), nil
 }
 
+// ProbeDoHResolvers resolves hostname through the given resolver specs and
+// returns the round-trip latency of the successful answer. It backs the
+// dashboard's pool test for doh pools: the pool passes when at least one of
+// its resolvers answers, which is precisely the failover pickIP performs
+// across the resolver's endpoints, so the probe wraps it instead of
+// duplicating the DNS query path.
+func ProbeDoHResolvers(ctx context.Context, specs []string, hostname string) (int64, error) {
+	return probeDoHResolvers(ctx, newDoHResolver(specs...), hostname)
+}
+
+func probeDoHResolvers(ctx context.Context, resolver *dohResolver, hostname string) (int64, error) {
+	start := time.Now()
+	if _, err := resolver.pickIP(ctx, hostname); err != nil {
+		return 0, fmt.Errorf("proxy.ProbeDoHResolvers: %w", err)
+	}
+	return time.Since(start).Milliseconds(), nil
+}
+
 // pickIP returns one public A record for host, rotating across the cached
 // records so a multi-homed target spreads load the way round-robin DNS would.
 func (r *dohResolver) pickIP(ctx context.Context, host string) (string, error) {
