@@ -139,7 +139,14 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 	// credential, and the embeddings endpoint is authenticated by that token
 	// rather than by the stored one. It is set after the static-header loop
 	// because it replaces the Authorization header on purpose.
-	if connData != nil {
+	//
+	// The override is scoped to the GitHub provider: the token is a GitHub
+	// credential, and upstream sends it only from the GitHub embeddings
+	// adapter (open-sse/handlers/embeddingProviders/github.js). Without the
+	// scope check the token was applied to whichever upstream the connection
+	// pointed at, so a connection for any other provider that happened to
+	// carry the key had its own key replaced and leaked the GitHub credential.
+	if connData != nil && providers.ResolveAlias(modelInfo.Provider) == "github" {
 		if copilotToken, ok := connData.ProviderSpecificData["copilotToken"].(string); ok && copilotToken != "" {
 			req.Header.Set("Authorization", "Bearer "+copilotToken)
 		}
