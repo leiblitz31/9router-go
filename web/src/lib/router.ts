@@ -20,6 +20,7 @@ export type ActiveTab =
   | 'media-systemone'
   | 'media-web'
   | 'proxy-pools'
+  | 'doh-resolvers'
   | 'skills'
   | 'console-log'
   | 'terminal'
@@ -47,6 +48,7 @@ export const TAB_ROUTES: Record<ActiveTab, string> = {
   'media-systemone': '/dashboard/media-providers/systemone',
   'media-web': '/dashboard/media-providers/web',
   'proxy-pools': '/dashboard/proxy-pools',
+  'doh-resolvers': '/dashboard/doh',
   skills: '/dashboard/skills',
   'console-log': '/dashboard/console-log',
   terminal: '/dashboard/console-log',
@@ -145,6 +147,10 @@ const ROUTE_TO_TAB: Record<string, ActiveTab> = {
   // proxy pools
   '/dashboard/proxy-pools': 'proxy-pools',
   '/proxy-pools': 'proxy-pools',
+
+  // doh resolvers
+  '/dashboard/doh': 'doh-resolvers',
+  '/doh': 'doh-resolvers',
   // skills
   '/dashboard/skills': 'skills',
   '/skills': 'skills',
@@ -220,6 +226,7 @@ export function pathToTab(pathname: string): ActiveTab {
   if (normalized.includes('token-saver')) return 'token-saver'
   if (normalized.includes('cli-tools')) return 'cli-tools'
   if (normalized.includes('proxy-pools')) return 'proxy-pools'
+  if (normalized.includes('doh')) return 'doh-resolvers'
   if (normalized.includes('skills')) return 'skills'
   if (
     normalized.includes('console-log') ||

@@ -440,6 +440,25 @@ export interface HeadroomExtrasResponse {
   error?: string
 }
 
+/** The DoH page's backend-owned facts (GET /api/doh/defaults): the seeded
+ * pool's name and resolver list plus the alias → endpoint table. The page
+ * renders these instead of carrying a second copy that could drift from
+ * what the seed plants and the data plane dials. */
+export interface DoHDefaults {
+  poolName: string
+  resolvers: string[]
+  aliases: Record<string, string>
+}
+
+/** One resolver's grade from POST /api/proxy-pools/{id}/test-resolvers. */
+export interface DoHResolverProbeResult {
+  spec: string
+  endpoint: string
+  ok: boolean
+  latencyMs: number
+  error?: string
+}
+
 export interface ProxyPool {
   id: string
   name: string
@@ -1934,6 +1953,15 @@ export const api = {
       `/api/proxy-pools/${encodeURIComponent(id)}/test`,
       { method: 'POST' }
     ),
+  // DoH Resolvers page: per-resolver grades (the aggregate pool test above
+  // passes when any one resolver answers, so a dead spec stays invisible
+  // there) and the backend-owned defaults the page renders.
+  testProxyPoolResolvers: (id: string) =>
+    request<{ results: DoHResolverProbeResult[] }>(
+      `/api/proxy-pools/${encodeURIComponent(id)}/test-resolvers`,
+      { method: 'POST' }
+    ),
+  getDoHDefaults: () => request<DoHDefaults>('/api/doh/defaults'),
   deployVercelRelay: (payload: { vercelToken: string; projectName?: string }) =>
     request<{ success?: boolean; proxyUrl?: string; deployUrl?: string; error?: string }>('/api/proxy-pools/vercel-deploy', {
       method: 'POST',

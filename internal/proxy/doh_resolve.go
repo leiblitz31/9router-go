@@ -41,6 +41,25 @@ func dohEndpoint(spec string) string {
 	return spec
 }
 
+// DoHEndpoint maps a resolver spec to the DoH JSON endpoint it queries: a
+// known alias resolves through dohAliases, anything else is used verbatim.
+// The dashboard renders this mapping next to each spec so an operator can
+// see which service a spec names without the frontend duplicating the alias
+// table and drifting from the data plane's own reading of it.
+func DoHEndpoint(spec string) string {
+	return dohEndpoint(spec)
+}
+
+// DoHAliases returns the alias → endpoint table, copied so a caller cannot
+// mutate the data plane's own map.
+func DoHAliases() map[string]string {
+	out := make(map[string]string, len(dohAliases))
+	for alias, endpoint := range dohAliases {
+		out[alias] = endpoint
+	}
+	return out
+}
+
 const (
 	// dohCacheMaxEntries bounds the resolve cache: a gateway dials a small
 	// set of provider hosts, so 512 live names is generous headroom, and the
@@ -140,6 +159,16 @@ func (r *dohResolver) resolveDialTarget(ctx context.Context, host, addr string) 
 // duplicating the DNS query path.
 func ProbeDoHResolvers(ctx context.Context, specs []string, hostname string) (int64, error) {
 	return probeDoHResolvers(ctx, newDoHResolver(specs...), hostname)
+}
+
+// ProbeDoHResolver probes ONE resolver spec on its own — no failover to a
+// sibling endpoint — and returns the round-trip latency of its answer. The
+// dashboard's per-resolver test uses it to grade every spec in a doh pool
+// individually, which the aggregate ProbeDoHResolvers cannot do: a pool
+// passes there when any single resolver answers, so a dead spec would stay
+// invisible behind its healthy siblings.
+func ProbeDoHResolver(ctx context.Context, spec, hostname string) (int64, error) {
+	return probeDoHResolvers(ctx, newDoHResolver(spec), hostname)
 }
 
 func probeDoHResolvers(ctx context.Context, resolver *dohResolver, hostname string) (int64, error) {
