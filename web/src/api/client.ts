@@ -1171,6 +1171,23 @@ export const api = {
       return { supported: false, valid: false }
     }
   },
+  /**
+   * Open a throwaway browser and sign in to Gemini Web, so the session is
+   * captured without a browser that keeps running and rotating the same
+   * cookies. Answers with the cookie header to paste.
+   */
+  geminiWebBrowserLogin: async (): Promise<{ cookie: string }> =>
+    request<{ cookie: string }>('/api/providers/gemini-web/browser-login', { method: 'POST' }),
+  /**
+   * Read a session out of a browser that is already signed in, and answer with
+   * the cookie header to paste. The warning says what to do about a browser
+   * that is still running.
+   */
+  geminiWebImportChrome: async (profile?: string): Promise<{ cookie: string; warning: string }> =>
+    request<{ cookie: string; warning: string }>('/api/providers/gemini-web/import-chrome', {
+      method: 'POST',
+      body: JSON.stringify({ profile: profile ?? '' }),
+    }),
   updateConnection: (
     id: string,
     payload:

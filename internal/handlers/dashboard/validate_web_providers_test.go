@@ -234,7 +234,7 @@ func TestValidateGeminiWebDoesNotMistakeTheRegistryConstantForARejection(t *test
 		return http.StatusOK, []byte(`[["wrb.fr","otAQ7b","[6,[false,null,false],false,null,null,null,false,null,null,null,null,null,false,false,1016,[[\"cf41b0e0dd7d53e5\",\"Flash-Lite\"]]]"]]`), nil
 	})
 
-	rec, out := postValidate(t, `{"provider":"gemini-web","apiKey":"__Secure-1PSID=cookie-value"}`)
+	rec, out := postValidate(t, `{"provider":"gemini-web","apiKey":"__Secure-1PSID=cookie-value; __Secure-1PSIDTS=sidts-value"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -251,7 +251,7 @@ func TestValidateGeminiWebAcceptsAWorkingCookie(t *testing.T) {
 		return http.StatusOK, []byte(`[["wrb.fr","otAQ7b","[6,[],[],[[\"cf41b0e0dd7d53e5\",\"Flash-Lite\"]]]"]]`), nil
 	})
 
-	rec, out := postValidate(t, `{"provider":"gemini-web","apiKey":"__Secure-1PSID=cookie-value"}`)
+	rec, out := postValidate(t, `{"provider":"gemini-web","apiKey":"__Secure-1PSID=cookie-value; __Secure-1PSIDTS=sidts-value"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -284,6 +284,56 @@ func TestValidateGeminiWebWithoutACookieSaysItStillWorks(t *testing.T) {
 	}
 	if len(*calls) != 0 {
 		t.Errorf("expected no outbound probe, got %d", len(*calls))
+	}
+}
+
+// TestValidateGeminiWebSignsItsRegistryProbe proves the probe asks the
+// registry the way a signed-in page asks it.
+//
+// The registry RPC is the call that decides which models a session may use,
+// and the site answers it as an anonymous visitor when the call is unsigned.
+// An unsigned probe therefore reports a working Pro account as reaching one
+// model — and a user who pastes a correct cookie is told to paste it again.
+func TestValidateGeminiWebSignsItsRegistryProbe(t *testing.T) {
+	withProbeStub(t, func(_ int, p capturedProbe) (int, []byte, error) {
+		auth := p.headers.Get("Authorization")
+		if !strings.HasPrefix(auth, "SAPISIDHASH ") {
+			t.Errorf("probe authorization = %q, want a SAPISIDHASH signature", auth)
+		}
+		return http.StatusOK, []byte(`[["wrb.fr","otAQ7b","[6,[],[],[[\"cf41b0e0dd7d53e5\",\"Flash-Lite\"]]]"]]`), nil
+	})
+
+	rec, out := postValidate(t, `{"provider":"gemini-web","apiKey":"__Secure-1PSID=psid; __Secure-1PSIDTS=sidts-value; SAPISID=sapisid-value"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if out["valid"] != true {
+		t.Errorf("valid = %v, want true for a session the site answers (error: %v)", out["valid"], out["error"])
+	}
+}
+
+// TestValidateGeminiWebReportsACookieWithoutTheSessionTimestamp proves the
+// probe says what is actually wrong with a credential that carries no
+// __Secure-1PSIDTS.
+//
+// That cookie is what carries the session into the model registry, and a
+// header without it is answered as a visitor's however fresh the rest of it
+// is. Telling the user to re-copy the whole cookie sends them round a loop
+// that ends where it started.
+func TestValidateGeminiWebReportsACookieWithoutTheSessionTimestamp(t *testing.T) {
+	withProbeStub(t, func(_ int, p capturedProbe) (int, []byte, error) {
+		return http.StatusOK, []byte(`[["wrb.fr","otAQ7b","[6,[],[],[[\"cf41b0e0dd7d53e5\",\"Flash-Lite\"]]]"]]`), nil
+	})
+
+	rec, out := postValidate(t, `{"provider":"gemini-web","apiKey":"__Secure-1PSID=psid-only"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if out["valid"] != false {
+		t.Errorf("valid = %v, want false: the credential cannot reach the signed-in models", out["valid"])
+	}
+	if msg := errorMessage(t, out); !strings.Contains(msg, "__Secure-1PSIDTS") {
+		t.Errorf("message = %q, want it to name the cookie that is missing", msg)
 	}
 }
 

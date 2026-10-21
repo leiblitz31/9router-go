@@ -244,6 +244,13 @@ func (r *Repo) GetProviderConnections(provider string, activeOnly bool) ([]*mode
 		if err := scanConnection(rows.Scan, &conn); err != nil {
 			return nil, err
 		}
+		// A sealed credential is not in the data column, so the row is
+		// hydrated here the way the single-row readers do it. Without this
+		// the list carried a data blob with no apiKey, and every caller that
+		// reads the credential from it — the chat path, the dashboard's
+		// credential check, the Gemini Web rotation loop — saw an empty
+		// credential while the row itself was perfectly usable.
+		r.hydrate(&conn)
 		connections = append(connections, &conn)
 	}
 

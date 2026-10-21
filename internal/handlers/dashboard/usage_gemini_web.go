@@ -30,10 +30,17 @@ func fetchGeminiWebUsage(ctx context.Context, apiKey string) usageResult {
 		return usageResult{plan: "Gemini Web", message: fmt.Sprintf("Failed to fetch Gemini Web quota: %v", err)}
 	}
 	if len(buckets) == 0 {
-		return usageResult{
-			plan:    "Gemini Web",
-			message: "Gemini Web connected, but the site reported no quota windows.",
+		// The quota RPC is answered by a signed-in session only. A credential
+		// with nothing to sign is answered as a visitor's, and a visitor has
+		// no allowance to report — so the emptiness is the site's answer, not
+		// a missing feature.
+		message := "Gemini Web connected, but the site reported no quota windows."
+		if !executor.GeminiWebHasSessionTimestamp(cookie) {
+			message = "Gemini Web connected, but the site reported no quota: the cookie carries no " +
+				"__Secure-1PSIDTS, so it is answered as an anonymous visitor. Copy the whole cookie header, " +
+				"including __Secure-1PSIDTS, to see the account's windows."
 		}
+		return usageResult{plan: "Gemini Web", message: message}
 	}
 	quotas := make(map[string]any, len(buckets))
 	for _, bucket := range buckets {

@@ -645,25 +645,34 @@ func TestGeminiWebRefusesASubstitutedModel(t *testing.T) {
 // configured sends them looking for the cookie they already pasted, and the fix
 // is the opposite one: replace it, rather than supply what is already there.
 // Naming the wrong cause costs the support round trip the message exists to
-// avoid, so both branches are pinned.
+// avoid, so every branch is pinned by the cause it names.
 func TestGeminiWebRefusalNamesTheCredentialThatWasTried(t *testing.T) {
 	tests := []struct {
-		name        string
-		apiKey      string
-		want        string
-		notExpected string
+		name string
+		// apiKey is the credential the session presented.
+		apiKey string
+		// cause is the thing the advice has to name, and unwanted is the
+		// thing it must not blame.
+		cause    string
+		unwanted string
 	}{
 		{
-			name:        "no credential",
-			apiKey:      "",
-			want:        "An anonymous session reaches one model",
-			notExpected: "configured __Secure-1PSID reaches",
+			name:     "no credential",
+			apiKey:   "",
+			cause:    "An anonymous session reaches one model",
+			unwanted: "SAPISID",
 		},
 		{
-			name:        "a credential is configured",
-			apiKey:      "__Secure-1PSID=stale-cookie-value",
-			want:        "The configured __Secure-1PSID reaches this one model only",
-			notExpected: "An anonymous session",
+			name:     "a credential without the session timestamp",
+			apiKey:   "__Secure-1PSID=stale-cookie-value",
+			cause:    "__Secure-1PSIDTS",
+			unwanted: "An anonymous session",
+		},
+		{
+			name:     "a complete credential",
+			apiKey:   "__Secure-1PSID=psid-value; __Secure-1PSIDTS=sidts-value",
+			cause:    "reaches this one model only",
+			unwanted: "__Secure-1PSIDTS",
 		},
 	}
 
@@ -683,11 +692,11 @@ func TestGeminiWebRefusalNamesTheCredentialThatWasTried(t *testing.T) {
 				t.Fatal("a model the session does not offer must be refused")
 			}
 			message := err.Error()
-			if !strings.Contains(message, tt.want) {
-				t.Errorf("refusal = %q, want it to contain %q", message, tt.want)
+			if !strings.Contains(message, tt.cause) {
+				t.Errorf("refusal = %q, want it to name %q", message, tt.cause)
 			}
-			if strings.Contains(message, tt.notExpected) {
-				t.Errorf("refusal = %q, must not claim %q for this credential", message, tt.notExpected)
+			if strings.Contains(message, tt.unwanted) {
+				t.Errorf("refusal = %q, must not blame %q for this credential", message, tt.unwanted)
 			}
 			if !strings.Contains(message, "Flash-Lite") {
 				t.Errorf("refusal must still name what the session offers; got %q", message)

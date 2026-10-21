@@ -2266,7 +2266,7 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "icon": "auto_awesome",
     "website": "https://gemini.google.com",
     "authType": "cookie",
-    "authHint": "Optional. Works with no cookie at all — an anonymous gemini.google.com session reaches one model. Paste __Secure-1PSID from a signed-in tab to reach the others.",
+    "authHint": "Optional. Works with no cookie at all — an anonymous gemini.google.com session reaches one model. To reach the others, copy the WHOLE cookie header of a signed-in tab (DevTools → Application → Cookies) including __Secure-1PSIDTS. That cookie is what carries the session into the model registry; without it the site answers as an anonymous visitor, so the session stays on one model. IMPORTANT: copy the cookies from an Incognito window that you close right after, not from a normal tab. Google rotates __Secure-1PSIDTS every few minutes, and a browser that is still open keeps rotating the same session — the router and the browser then cancel each other's session out and the account is signed out. A closed Incognito window is not rotating anything, so the router's renewal is the only one.",
     "noAuth": false,
     "serviceKinds": [
       "llm"

@@ -47,6 +47,10 @@ const (
 // origin is not the public one — a mirror, or a test's own server.
 const geminiWebUploadPath = "/upload"
 
+// geminiWebUploadFallbackPath is where the resumable upload service is
+// reached when the origin is not the public one.
+const geminiWebUploadFallbackPath = "/upload/"
+
 // geminiWebMaxImageBytes bounds one image.
 //
 // The site accepts far larger uploads, but a request that carries one is
@@ -418,7 +422,7 @@ func (s *geminiWebSession) uploadResumable(ctx context.Context, image geminiWebI
 		"x-goog-upload-protocol":              "resumable",
 		"x-goog-upload-header-content-length": fmt.Sprintf("%d", len(image.Data)),
 	}
-	response, err := s.do(ctx, http.MethodPost, geminiWebUploadFallback,
+	response, err := s.do(ctx, http.MethodPost, s.endpoints.uploadFallback,
 		strings.NewReader("File name: "+image.Name), initHeaders["content-type"], initHeaders)
 	if err != nil {
 		return geminiWebAttachment{}, err

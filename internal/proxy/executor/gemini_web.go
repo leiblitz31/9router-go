@@ -125,13 +125,23 @@ func geminiWebRequestedModel(envelope geminiWebRequestEnvelope) string {
 // and the fix is different: that one has to be replaced, while an anonymous
 // session has to be given one. Naming the wrong cause costs a support round
 // trip, so the advice follows the credential rather than assuming its absence.
+//
+// The cause of a one-model session is a missing `__Secure-1PSIDTS`: that
+// cookie is what carries the session into the model registry, and a header
+// without it is answered as a visitor's however fresh the rest of it is.
 func geminiWebOnlyModelAdvice(cookie string) string {
-	if cookie != "" {
-		return "The configured __Secure-1PSID reaches this one model only — a signed-in tab that can use " +
-			"the others needs the cookie pasted again."
+	switch {
+	case cookie == "":
+		return "An anonymous session reaches one model — configure the cookie header of a signed-in " +
+			"gemini.google.com tab to reach the others."
+	case !GeminiWebHasSessionTimestamp(cookie):
+		return "The configured cookie carries no __Secure-1PSIDTS, so gemini.google.com answers it as an " +
+			"anonymous visitor and the session reaches one model. Copy the whole cookie header, including " +
+			"__Secure-1PSIDTS."
+	default:
+		return "The configured session reaches this one model only — a signed-in tab that can use the others " +
+			"needs the cookie pasted again."
 	}
-	return "An anonymous session reaches one model — configure a __Secure-1PSID cookie from a signed-in tab " +
-		"to reach the others."
 }
 
 // geminiWebSelectModel resolves the registry entry the turn is addressed to.

@@ -16,6 +16,7 @@ import (
 	"9router/proxy/internal/config"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/proxy/oauth"
 	"9router/proxy/internal/shutdown"
 	"9router/proxy/internal/updater"
@@ -96,6 +97,11 @@ func ProvideServer(p ServerParams) *http.Server {
 			providers.StartBackgroundCatalogSync(shutdown.Context(), nil, catalogPath)
 			oauth.StartBackgroundRefresh(shutdown.Context(), p.Repo)
 			db.StartRetentionLoop(shutdown.Context(), p.Repo, db.DefaultRequestDetailRetention)
+			// The Gemini Web session cookie is renewed by the site every few
+			// minutes, and the renewed value is what keeps a signed-in
+			// account reaching the models it pays for. Without this loop the
+			// credential has to be pasted again every few minutes.
+			executor.StartGeminiWebRotation(shutdown.Context(), p.Repo)
 
 			log.Printf("9router-go Proxy (%s) starting on port %d", updater.CurrentVersion, p.Config.Port)
 
