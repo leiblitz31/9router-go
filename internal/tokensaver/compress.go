@@ -20,19 +20,42 @@ const (
 	TreeMaxLines    = 200
 )
 
+// protectedTools lists the tools whose output must never be rewritten.
+//
+// The names are matched case-insensitively: the same tool reaches the gateway
+// spelled "Read" by one client and "read" by another, and the repo's own
+// fixtures use the lowercase spelling (`opencode_mock_e2e_test.go` expects
+// "read" and "shell"), while upstream's RTK filters key on "grep". An
+// exact-case map protected only the clients that happened to use the
+// capitalised spelling, which is the opposite of what the list is for.
 var protectedTools = map[string]bool{
-	"Read":   true,
-	"Grep":   true,
-	"Edit":   true,
-	"Write":  true,
+	"read":   true,
+	"grep":   true,
+	"edit":   true,
+	"write":  true,
 	"patch":  true,
 	"anchor": true,
 }
 
 func isProtectedTool(name string) bool {
-	return protectedTools[strings.TrimSpace(name)]
+	return protectedTools[strings.ToLower(strings.TrimSpace(name))]
 }
 
+// isErrorToolResult reports whether a tool result carries an error.
+//
+// The structured flags cover the Anthropic shape, where the error is a field
+// on the tool_result block. The OpenAI Chat Completions shape has no such
+// field: `{"role":"tool","tool_call_id":…,"content":"…"}` carries the failure
+// in the content text, so the only way to see it is to read the text.
+//
+// The markers are the ones the repo's own RTK filters already treat as an
+// error output (`internal/tokensaver/filters/generic-output.json` matches
+// "Error:", "Exception:" and "Traceback (most recent call last):"), so the
+// rule stays in one place. Matching is anchored at the start of the content:
+// a result that merely mentions the word somewhere in the middle is not an
+// error, and the cost of a false positive is only that the result is left
+// uncompressed, while a false negative rewrites the very text the agent
+// needed.
 func isErrorToolResult(m map[string]any) bool {
 	if m == nil {
 		return false
@@ -43,7 +66,44 @@ func isErrorToolResult(m map[string]any) bool {
 	if b, ok := m["isError"].(bool); ok && b {
 		return true
 	}
-	return strings.EqualFold(fmt.Sprintf("%v", m["status"]), "error")
+	if strings.EqualFold(fmt.Sprintf("%v", m["status"]), "error") {
+		return true
+	}
+	// The text of the result, wherever this shape keeps it: the OpenAI
+	// Chat Completions tool message puts it in "content", the OpenAI
+	// Responses function_call_output in "output", and a flat Anthropic
+	// tool_result in "text".
+	for _, key := range []string{"content", "output", "text"} {
+		if hasErrorToolContent(m[key]) {
+			return true
+		}
+	}
+	return false
+}
+
+// errorToolContentMarkers are the prefixes that open an error output. They
+// mirror the match patterns of the generic-output RTK filter.
+var errorToolContentMarkers = []string{
+	"Error:",
+	"Exception:",
+	"Traceback (most recent call last):",
+}
+
+// hasErrorToolContent reports whether a tool result's content opens with one
+// of the error markers. The OpenAI tool shape has no error flag, so this is
+// the only signal it has.
+func hasErrorToolContent(content any) bool {
+	text, ok := content.(string)
+	if !ok {
+		return false
+	}
+	trimmed := strings.TrimSpace(text)
+	for _, marker := range errorToolContentMarkers {
+		if strings.HasPrefix(trimmed, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildToolCallMap(items []map[string]any) map[string]string {

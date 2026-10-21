@@ -607,6 +607,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		// how the topology card learns this provider failed.
 		connName, connEmail := identityNames(h.connIdentityKVOr(f, connectionID))
 		h.LogFailure(
+			ctx,
 			&UsageLogInfo{
 				Provider:              provider,
 				Model:                 model,
@@ -920,6 +921,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	}
 
 	h.LogFailure(
+		ctx,
 		&UsageLogInfo{
 			Provider:              provider,
 			Model:                 model,

@@ -1429,6 +1429,7 @@ func TestLogFailurePersistsSingleSanitizedError(t *testing.T) {
 	repo := db.NewRepo(database)
 	handler := NewChatHandler(repo)
 	handler.LogFailure(
+		context.Background(),
 		&UsageLogInfo{Provider: "openai", Model: "gpt-test", ConnectionID: "conn-1", APIKey: "sk-secret", Endpoint: "/v1/chat/completions"},
 		&translator.OpenAIUsage{PromptTokens: 7, CachedTokens: 3},
 		&upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(`{"error":{"message":"rate limited"}}`)},

@@ -7,6 +7,7 @@ import (
 	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
+	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
@@ -89,7 +90,16 @@ func (h *ChatHandler) effectiveAllowedModels(key *models.APIKey) ([]string, erro
 		log.Error("chat", "allowlist read failed, fail-closed", "error", err, "apiKeyId", key.ID)
 		return nil, &ErrPolicyUnavailable{Message: "Policy service temporarily unavailable"}
 	}
-	return h.withPlanPatterns(key.ID, key.PlanID, patterns), nil
+	merged, err := h.withPlanPatterns(key.ID, key.PlanID, patterns)
+	if err != nil {
+		// The plan half of the policy is unknown, so the union is unknown.
+		// Dropping the plan silently would leave the key's own rows alone,
+		// and a key whose only rows came from its plan would become
+		// unrestricted — the same fail-open the own-rows read above avoids.
+		log.Error("chat", "plan read failed, fail-closed", "error", err, "apiKeyId", key.ID)
+		return nil, &ErrPolicyUnavailable{Message: "Policy service temporarily unavailable"}
+	}
+	return merged, nil
 }
 
 // allowedModelPatterns is the same loader for callers that hold a key id
@@ -110,7 +120,15 @@ func (h *ChatHandler) allowedModelPatterns(keyID string) []string {
 		log.Error("chat", "allowlist read failed, fail-closed", "error", err, "apiKeyId", keyID)
 		return []string{SentinelDenyAll}
 	}
-	return h.withPlanPatterns(keyID, nil, patterns)
+	merged, err := h.withPlanPatterns(keyID, nil, patterns)
+	if err != nil {
+		// Same reason as the own-rows read above: an unknown plan half means
+		// the union is unknown, and a key whose only rows came from its plan
+		// would otherwise be treated as unrestricted.
+		log.Error("chat", "plan read failed, fail-closed", "error", err, "apiKeyId", keyID)
+		return []string{SentinelDenyAll}
+	}
+	return merged
 }
 
 // withPlanPatterns widens a key's allowlist with the patterns its plan grants.
@@ -125,29 +143,56 @@ func (h *ChatHandler) allowedModelPatterns(keyID string) []string {
 // plan is fetched with one joined query. A caller that already holds the key
 // passes its plan id: an empty one — every key minted before F-3 — skips that
 // query entirely, so the common case pays nothing extra.
-func (h *ChatHandler) withPlanPatterns(keyID string, planID *string, own []string) []string {
+//
+// A failed plan read returns an error rather than an empty plan: the union is
+// then unknown, and returning the own rows alone would drop the plan's grant
+// without saying so. A key whose only rows came from its plan would read as
+// unrestricted, which is the fail-open the caller has to be able to refuse.
+//
+// A plan that simply does not exist is not an error: a key can name a plan
+// that was deleted after the key was pointed at it, and such a key grants
+// nothing beyond its own rows.
+func (h *ChatHandler) withPlanPatterns(keyID string, planID *string, own []string) ([]string, error) {
 	if h.Repo == nil {
-		return own
+		return own, nil
 	}
 	var planPatterns []string
 	if planID != nil && strings.TrimSpace(*planID) != "" {
 		plan, err := h.Repo.GetPlan(strings.TrimSpace(*planID))
-		if err == nil {
-			planPatterns = plan.AllowedModels
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// The plan row is gone, or the database predates the
+				// plans table: the key's own rows are all that is
+				// left, and that is not a failure.
+				return own, nil
+			}
+			if errors.Is(err, db.ErrNoPlansTable) {
+				// A database without the plans table cannot have a
+				// key on a plan.
+				return own, nil
+			}
+			return nil, err
 		}
+		planPatterns = plan.AllowedModels
 	} else if planID == nil {
 		// The caller holds only a key id, so the plan id is unknown: one joined
 		// read answers it. A caller that passed a known-empty plan id is not
 		// here, so a key with no plan skips this query entirely.
 		plans, err := h.Repo.GetPlansForKeys([]string{keyID})
-		if err == nil {
-			planPatterns = plans[keyID].AllowedModels
+		if err != nil {
+			if errors.Is(err, db.ErrNoPlansTable) {
+				// A database created before F-3 has no plans table, and
+				// a key in it cannot be on a plan.
+				return own, nil
+			}
+			return nil, err
 		}
+		planPatterns = plans[keyID].AllowedModels
 	}
 	if len(planPatterns) == 0 {
-		return own
+		return own, nil
 	}
-	return unionModelPatterns(own, planPatterns)
+	return unionModelPatterns(own, planPatterns), nil
 }
 
 // unionModelPatterns merges two allowlists in stable order, dropping

@@ -47,7 +47,13 @@ const maxPersistedErrorLen = 512
 
 // LogFailure persists a bounded, credential-free diagnostic for a failed or
 // aborted request. It intentionally does not touch usageHistory/daily totals.
+//
+// ctx is the request context, and it is not optional: the abort verdict is
+// taken from it, so a call site that passes a nil context records a client
+// abort as an ordinary 502 while the response says 499. The same context and
+// the same classifier decide both, so the row and the response agree.
 func (h *ChatHandler) LogFailure(
+	ctx context.Context,
 	info *UsageLogInfo,
 	usage *translator.OpenAIUsage,
 	err error,
@@ -80,7 +86,7 @@ func (h *ChatHandler) LogFailure(
 	if errors.As(err, &upstreamErr) && upstreamErr.StatusCode > 0 {
 		statusCode = upstreamErr.StatusCode
 	}
-	if isClientCanceled(nil, err) {
+	if isClientCanceled(ctx, err) {
 		statusCode = StatusClientClosedRequest
 	}
 	message := extractErrorText([]byte(err.Error()))
