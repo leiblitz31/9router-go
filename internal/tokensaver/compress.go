@@ -13,6 +13,12 @@ const (
 	MinCompressSize = 500
 	SmartTruncHead  = 120
 	SmartTruncTail  = 60
+	// SmartTruncMin is upstream's SMART_TRUNCATE_MIN_LINES
+	// (open-sse/rtk/constants.js). Upstream compares against it with a `<`
+	// in both filters that use it — open-sse/rtk/filters/smartTruncate.js
+	// and open-sse/rtk/filters/readNumbered.js — so a payload of exactly
+	// 250 lines IS truncated. This package keeps the number here, once, and
+	// both paths read it from here.
 	SmartTruncMin   = 250
 	GitDiffMaxLines = 100
 	GitLogMaxLines  = 200
@@ -264,7 +270,23 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 				}
 				command = cmdMap[callID]
 			}
-			if isErrorToolResult(msg) || isProtectedTool(name) {
+			if isErrorToolResult(msg) {
+				continue
+			}
+			if isProtectedTool(name) {
+				// A protected tool's result is not rewritten, with one
+				// exception: a line-numbered file dump, which upstream
+				// truncates safely (head and tail kept, the cut marked).
+				if output, ok := msg["output"].(string); ok {
+					if newOutput, did := compressProtectedText(output); did {
+						msg["output"] = newOutput
+						compressed = true
+					}
+				} else if outputArr, ok := msg["output"].([]any); ok {
+					if compressProtectedParts(outputArr, "input_text", "text") {
+						compressed = true
+					}
+				}
 				continue
 			}
 			if output, ok := msg["output"].(string); ok && len(output) > MinCompressSize {
@@ -295,7 +317,23 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 				}
 				command = cmdMap[callID]
 			}
-			if isErrorToolResult(msg) || isProtectedTool(name) {
+			if isErrorToolResult(msg) {
+				continue
+			}
+			if isProtectedTool(name) {
+				// A protected tool's result is not rewritten, with one
+				// exception: a line-numbered file dump, which upstream
+				// truncates safely (head and tail kept, the cut marked).
+				if content, ok := msg["content"].(string); ok {
+					if newContent, did := compressProtectedText(content); did {
+						msg["content"] = newContent
+						compressed = true
+					}
+				} else if contentArr, ok := msg["content"].([]any); ok {
+					if compressProtectedParts(contentArr, "text") {
+						compressed = true
+					}
+				}
 				continue
 			}
 			if content, ok := msg["content"].(string); ok && len(content) > MinCompressSize {
@@ -335,7 +373,16 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 					}
 					command = cmdMap[toolUseID]
 				}
-				if isErrorToolResult(block) || isProtectedTool(name) {
+				if isErrorToolResult(block) {
+					continue
+				}
+				if isProtectedTool(name) {
+					// A protected tool's result is not rewritten, with one
+					// exception: a line-numbered file dump, which upstream
+					// truncates safely (head and tail kept, the cut marked).
+					if compressProtectedBlock(block) {
+						compressed = true
+					}
 					continue
 				}
 
@@ -486,7 +533,9 @@ func compressTree(s string) string {
 
 func smartTruncate(s string) string {
 	lines := strings.Split(s, "\n")
-	if len(lines) <= SmartTruncMin {
+	// `<` is upstream's comparison (open-sse/rtk/filters/smartTruncate.js):
+	// a payload of exactly SMART_TRUNCATE_MIN_LINES lines is truncated.
+	if len(lines) < SmartTruncMin {
 		return s
 	}
 	head := lines[:SmartTruncHead]
