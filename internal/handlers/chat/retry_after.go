@@ -45,6 +45,18 @@ func comboPassRetryWait(earliest time.Duration, rateLimited bool) time.Duration 
 	return earliest
 }
 
+// max429LockCooldown bounds how long a 429 may park an account, however long
+// a wait the upstream names. A rate limiter's Retry-After describes its own
+// quota window, not how long this gateway should treat a healthy account as
+// dead: OpenCode's free tier answers with a ~2h Retry-After for a window
+// that reopens in minutes, and honouring it up to maxResetCooldown turned a
+// transient refusal into a two-hour outage for every model on the
+// connection. Two minutes is long enough to stop re-picking an account that
+// is still inside a burst, and short enough that a client's own retry loop
+// finds it again. Non-429 statuses keep the quota-reset reading and the
+// maxResetCooldown bound they have always had.
+const max429LockCooldown = 120 * time.Second
+
 // retryableCooldownSec returns how long a failed account must stay out of
 // rotation, in seconds, given the classifier's own backoff as the baseline.
 //
@@ -53,15 +65,19 @@ func comboPassRetryWait(earliest time.Duration, rateLimited bool) time.Duration 
 // old code locked it for the classifier's 2s base, so the same limited account
 // came back two seconds later and absorbed another failing request), and
 // honour a short one and the bounded second pass below actually finds the
-// account again instead of waiting out a lock it set itself. Every other
-// status keeps the quota-reset reading it has always had. maxResetCooldown
-// stops a hostile or nonsensical duration from parking an account forever.
+// account again instead of waiting out a lock it set itself. The honoured
+// wait is capped by max429LockCooldown: the account is re-checked after two
+// minutes at the latest instead of after the upstream's full named window.
+// Every other status keeps the quota-reset reading it has always had.
+// maxResetCooldown stops a hostile or nonsensical duration from parking an
+// account forever.
 func retryableCooldownSec(statusCode int, base time.Duration, ue *upstreamError) int {
 	cooldown := base
 	if statusCode == http.StatusTooManyRequests {
 		if wait, ok := retryAfterWait(ue); ok {
 			cooldown = wait
 		}
+		cooldown = min(cooldown, max429LockCooldown)
 	} else if dur, ok := extractResetDuration(ue.Body); ok {
 		cooldown = dur
 	}
