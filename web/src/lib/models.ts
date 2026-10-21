@@ -1138,15 +1138,6 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "upstreamModelId": "gpt-5.6-luna"
     },
     {
-      "id": "gpt-5.5",
-      "name": "GPT 5.5"
-    },
-    {
-      "id": "gpt-5.5-review",
-      "name": "GPT 5.5 Review",
-      "upstreamModelId": "gpt-5.5"
-    },
-    {
       "id": "gpt-daybreak-blue-latest",
       "name": "GPT Daybreak Blue"
     },
@@ -1190,14 +1181,6 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gpt-5.6-luna-image",
       "name": "GPT 5.6 Luna Image"
-    },
-    {
-      "id": "gpt-5.5-image",
-      "name": "GPT 5.5 Image"
-    },
-    {
-      "id": "gpt-5.3-image",
-      "name": "GPT 5.3 Image"
     }
   ],
   "cohere": [

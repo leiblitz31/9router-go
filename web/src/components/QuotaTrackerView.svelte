@@ -252,8 +252,8 @@
   }
 
   const AUTO_PING_TOOLTIPS: Record<string, string> = {
-    claude: 'Auto-starts a new window on quota reset or fixed schedule. Click to configure.',
-    codex: 'Auto-starts the next 5h Codex window after reset or on schedule. Click to configure.',
+    claude: 'When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.',
+    codex: 'Auto-starts the next 5h Codex window after reset by sending a tiny request. Consumes a small amount of quota.',
   }
 
   function autoPingTooltip(conn: ProviderConnectionLike): string {

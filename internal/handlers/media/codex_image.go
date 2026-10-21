@@ -33,7 +33,7 @@ const (
 	codexImageRefDetail   = "high"
 	// The gpt-image-* ids name the tool's own model, so the Responses call is
 	// answered by the main model and the id travels in the tool definition.
-	codexImagesMainModel = "gpt-5.6-sol"
+	codexImagesMainModel = providers.CodexImagesMainModel
 )
 
 var codexToolImageModels = map[string]bool{
