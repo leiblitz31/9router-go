@@ -22,15 +22,6 @@ const maxProxyClients = 128
 // connection asked second.
 const strictCachePrefix = "strict\x00"
 
-// PetaniProxyPoolID is the special pool ID for the embedded petani-proxy
-// gateway. Unlike regular pools, it doesn't need a DB entry — the gateway
-// URL is fixed at http://127.0.0.1:8888 and managed by 9Router itself.
-// Frontend shows it as a native option below "None (direct)".
-const PetaniProxyPoolID = "__petani__"
-
-// PetaniProxyURL is the fixed gateway address.
-const PetaniProxyURL = "http://127.0.0.1:8888"
-
 var (
 	proxyClientsMu sync.RWMutex
 	proxyClients   = make(map[string]*http.Client)
@@ -70,6 +61,11 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 
 	var proxyURLStr string
 	var proxyType string
+	// dohSpecs holds every resolver spec of a bound "doh" pool. The pool
+	// block below fills it; the doh branch further down builds ONE transport
+	// from the whole list so resolution can fail over between resolvers
+	// instead of depending on the single spec NextURL happened to pick.
+	var dohSpecs []string
 	// The row's own flag, which the pool below may override. Seeding it here is
 	// what makes a legacy connection's strict setting mean anything: the
 	// declaration alone would leave it false for every connection that is not
@@ -90,43 +86,38 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 	// proxy was assigned to prevent, and the dashboard would keep showing the
 	// connection as proxied.
 	if connData.ProxyPoolID != "" {
-		// Special case: embedded petani-proxy gateway (native option).
-		// No DB entry needed — URL is fixed, managed by 9Router.
-		if connData.ProxyPoolID == PetaniProxyPoolID {
-			proxyURLStr = PetaniProxyURL
-			proxyType = "http"
-			connData.ResolvedProxyPool = "Petani Proxy"
-		} else {
-			pool, err := h.Repo.GetProxyPool(connData.ProxyPoolID)
-			switch {
-			case err != nil || pool == nil:
-				log.Warn("proxy", "assigned pool not found", "pool", connData.ProxyPoolID)
-				return nil, fmt.Errorf("proxy pool %q is assigned but does not exist", connData.ProxyPoolID)
-			case !pool.IsActive:
-				log.Warn("proxy", "assigned pool is inactive", "pool", connData.ProxyPoolID)
-				return nil, fmt.Errorf("proxy pool %q is assigned but inactive", connData.ProxyPoolID)
-			}
-			proxyURLStr = pool.NextURL()
-			if proxyURLStr == "" {
-				log.Warn("proxy", "assigned pool has no url", "pool", connData.ProxyPoolID)
-				return nil, fmt.Errorf("proxy pool %q is assigned but carries no url", connData.ProxyPoolID)
-			}
-			proxyType = pool.Type
-			strictProxy = pool.StrictProxy
-			// Name the pool for the log line. The lookup already happened, so this
-			// costs nothing, and "Vercel Relay" answers a question a UUID cannot.
-			connData.ResolvedProxyPool = pool.Name
+		pool, err := h.Repo.GetProxyPool(connData.ProxyPoolID)
+		switch {
+		case err != nil || pool == nil:
+			log.Warn("proxy", "assigned pool not found", "pool", connData.ProxyPoolID)
+			return nil, fmt.Errorf("proxy pool %q is assigned but does not exist", connData.ProxyPoolID)
+		case !pool.IsActive:
+			log.Warn("proxy", "assigned pool is inactive", "pool", connData.ProxyPoolID)
+			return nil, fmt.Errorf("proxy pool %q is assigned but inactive", connData.ProxyPoolID)
+		}
+		proxyURLStr = pool.NextURL()
+		if proxyURLStr == "" {
+			log.Warn("proxy", "assigned pool has no url", "pool", connData.ProxyPoolID)
+			return nil, fmt.Errorf("proxy pool %q is assigned but carries no url", connData.ProxyPoolID)
+		}
+		proxyType = pool.Type
+		strictProxy = pool.StrictProxy
+		if pool.Type == "doh" {
+			dohSpecs = pool.URLs
+		}
+		// Name the pool for the log line. The lookup already happened, so this
+		// costs nothing, and "Vercel Relay" answers a question a UUID cannot.
+		connData.ResolvedProxyPool = pool.Name
 
-			if pool.IsEdgeRelay() {
-				// A relay is an HTTPS endpoint that forwards on x-relay-target /
-				// x-relay-path, not a CONNECT proxy. Dialing it with http.ProxyURL
-				// answers "malformed HTTP status code" (see db.ProxyPool.IsEdgeRelay).
-				// getProviderConfig rewrites the base URL to the relay and injects
-				// those headers, so the plain client is the correct transport here —
-				// the request still leaves through the relay, just not as a tunnel.
-				logProxyOnce(connData.ProxyPoolID, proxyURLStr, proxyType)
-				return h.Client, nil
-			}
+		if pool.IsEdgeRelay() {
+			// A relay is an HTTPS endpoint that forwards on x-relay-target /
+			// x-relay-path, not a CONNECT proxy. Dialing it with http.ProxyURL
+			// answers "malformed HTTP status code" (see db.ProxyPool.IsEdgeRelay).
+			// getProviderConfig rewrites the base URL to the relay and injects
+			// those headers, so the plain client is the correct transport here —
+			// the request still leaves through the relay, just not as a tunnel.
+			logProxyOnce(connData.ProxyPoolID, proxyURLStr, proxyType)
+			return h.Client, nil
 		}
 	}
 
@@ -168,6 +159,26 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 	}
 	logProxyOnce(connData.ProxyPoolID, proxyURLStr, proxyType)
 
+	if proxyType == "doh" {
+		// Pool type "doh": the pool's URLs are resolver specs (doh-mcp
+		// aliases such as "cloudflare"/"google", or DoH JSON endpoint URLs),
+		// not proxy addresses — they must never reach url.Parse below. One
+		// transport takes the whole list and fails resolution over between
+		// resolvers (see proxy.NewSafeTransportWithDoH); the cache key names
+		// the pool, not the single spec NextURL picked for proxyURLStr.
+		specs := dohSpecs
+		if len(specs) == 0 {
+			specs = []string{proxyURLStr}
+		}
+		cacheKey := "doh\x00" + connData.ProxyPoolID + "\x00" + strings.Join(specs, "\x00")
+		if strictProxy {
+			cacheKey = strictCachePrefix + cacheKey
+		}
+		return h.cachedProxyClient(cacheKey, strictProxy, func() *http.Transport {
+			return internalproxy.NewSafeTransportWithDoH(specs...)
+		}), nil
+	}
+
 	parsedURL, err := url.Parse(proxyURLStr)
 	if err == nil && (parsedURL.Scheme == "" || parsedURL.Host == "") {
 		err = fmt.Errorf("no scheme or host in %q", proxyURLStr)
@@ -193,45 +204,53 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 		if strictProxy {
 			cacheKey = strictCachePrefix + proxyURLStr
 		}
-		proxyClientsMu.RLock()
-		client, ok := proxyClients[cacheKey]
-		proxyClientsMu.RUnlock()
-		if ok {
-			return client, nil
-		}
-
-		proxyClientsMu.Lock()
-		defer proxyClientsMu.Unlock()
-		if client, ok = proxyClients[cacheKey]; ok {
-			return client, nil
-		}
-		// Evict idle sockets of a random victim when over cap (amortized O(1);
-		// exact LRU is overkill — URLs are hot or dead, never warm).
-		if len(proxyClients) >= maxProxyClients {
-			for victimURL, victim := range proxyClients {
-				victim.CloseIdleConnections()
-				delete(proxyClients, victimURL)
-				break
-			}
-		}
-
-		baseTransport := internalproxy.NewSafeTransportWithProxy(parsedURL.String(), false)
-		client = &http.Client{
-			Transport: baseTransport,
-			Timeout:   h.Client.Timeout,
-		}
-		if strictProxy {
-			// The marker travels with the client, so every caller that dials a
-			// strict pool — the chat forwarder, the media lanes, the executors —
-			// refuses the direct replay in proxy.DoRequest without having to
-			// thread a flag through each of them.
-			client = internalproxy.ForbidDirectReplay(client)
-		}
-		proxyClients[cacheKey] = client
-		return client, nil
+		return h.cachedProxyClient(cacheKey, strictProxy, func() *http.Transport {
+			return internalproxy.NewSafeTransportWithProxy(parsedURL.String(), false)
+		}), nil
 	}
 
 	// For Edge Relays (vercel, cloudflare, deno), standard client is used because
 	// URL rewriting and x-relay headers are handled at request time.
 	return h.Client, nil
+}
+
+// cachedProxyClient returns the shared client for cacheKey, building its
+// transport on first use. The cache is shared by every proxied branch (http
+// pools, doh pools) so eviction and the strict marker behave identically.
+func (h *ChatHandler) cachedProxyClient(cacheKey string, strictProxy bool, build func() *http.Transport) *http.Client {
+	proxyClientsMu.RLock()
+	client, ok := proxyClients[cacheKey]
+	proxyClientsMu.RUnlock()
+	if ok {
+		return client
+	}
+
+	proxyClientsMu.Lock()
+	defer proxyClientsMu.Unlock()
+	if client, ok = proxyClients[cacheKey]; ok {
+		return client
+	}
+	// Evict idle sockets of a random victim when over cap (amortized O(1);
+	// exact LRU is overkill — URLs are hot or dead, never warm).
+	if len(proxyClients) >= maxProxyClients {
+		for victimURL, victim := range proxyClients {
+			victim.CloseIdleConnections()
+			delete(proxyClients, victimURL)
+			break
+		}
+	}
+
+	client = &http.Client{
+		Transport: build(),
+		Timeout:   h.Client.Timeout,
+	}
+	if strictProxy {
+		// The marker travels with the client, so every caller that dials a
+		// strict pool — the chat forwarder, the media lanes, the executors —
+		// refuses the direct replay in proxy.DoRequest without having to
+		// thread a flag through each of them.
+		client = internalproxy.ForbidDirectReplay(client)
+	}
+	proxyClients[cacheKey] = client
+	return client
 }

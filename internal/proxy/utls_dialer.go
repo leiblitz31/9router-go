@@ -80,6 +80,13 @@ type utlsDialer struct {
 	useEnvProxy bool
 	// insecureSkipVerify disables certificate verification (STRICT_SSL opt-out).
 	insecureSkipVerify bool
+	// doh, when non-nil, resolves the target host over DNS-over-HTTPS and
+	// dials the resolved public IP instead of letting the system resolver
+	// answer (see doh_resolve.go). Only the TCP destination changes: the
+	// uTLS ServerName in dialTLSContext still comes from the original addr,
+	// and a proxy CONNECT names the resolved IP so the proxy cannot
+	// re-resolve the host through the bypassed resolver.
+	doh *dohResolver
 }
 
 // dialTLSContext implements http.Transport.DialTLSContext. It performs the
@@ -117,13 +124,32 @@ func (d *utlsDialer) dialTLSContext(ctx context.Context, network, addr string) (
 	return uconn, nil
 }
 
+// dialPlainContext implements http.Transport.DialContext for a DoH dialer:
+// the same tunnel dialTLSContext uses — DoH resolution plus an optional
+// proxy CONNECT — without the TLS handshake on top.
+func (d *utlsDialer) dialPlainContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("proxy.utlsDialer: invalid addr %q: %w", addr, err)
+	}
+	return d.dialTunnel(ctx, network, addr, host)
+}
+
 // dialTunnel opens a TCP connection to addr, tunneling through a proxy first
 // when one is configured for the target host.
 func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string) (net.Conn, error) {
 	proxyURL := d.resolveProxy(host)
 	dialer := NewSafeDialer()
+	target := addr
+	if d.doh != nil {
+		resolved, err := d.doh.resolveDialTarget(ctx, host, addr)
+		if err != nil {
+			return nil, err
+		}
+		target = resolved
+	}
 	if proxyURL == "" {
-		return dialer.DialContext(ctx, network, addr)
+		return dialer.DialContext(ctx, network, target)
 	}
 	pu, err := url.Parse(proxyURL)
 	if err != nil {
@@ -134,7 +160,7 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 	if err != nil {
 		return nil, err
 	}
-	if err := proxyConnect(ctx, conn, addr, pu); err != nil {
+	if err := proxyConnect(ctx, conn, target, pu); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}

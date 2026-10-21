@@ -150,6 +150,7 @@ func TestProxyPool_IsEdgeRelay(t *testing.T) {
 		{name: "netlify function path", pool: &ProxyPool{Type: "http", URLs: []string{"https://site.example.com/.netlify/functions/relay"}}, want: true},
 		{name: "http typed real proxy stays a proxy", pool: &ProxyPool{Type: "http", URLs: []string{"http://user:pass@proxy.example.com:8080"}}, want: false},
 		{name: "http typed loopback stays a proxy", pool: &ProxyPool{Type: "http", URLs: []string{"http://127.0.0.1:8888"}}, want: false},
+		{name: "doh typed with resolver endpoint stays a pool", pool: &ProxyPool{Type: "doh", URLs: []string{"https://cloudflare-dns.com/dns-query"}}, want: false},
 		{name: "socks5 is not inferred as relay", pool: &ProxyPool{Type: "socks5", URLs: []string{"https://relay.vercel.app"}}, want: false},
 		{name: "lookalike host is not a relay", pool: &ProxyPool{Type: "http", URLs: []string{"https://vercel.app.evil.com"}}, want: false},
 	}

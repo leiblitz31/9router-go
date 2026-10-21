@@ -21,7 +21,6 @@
   import MediaKindView from './components/media/MediaKindView.svelte'
   import MediaProviderDetail from './components/media/MediaProviderDetail.svelte'
   import ProxyPoolsView from './components/ProxyPoolsView.svelte'
-  import PetaniProxyView from './components/PetaniProxyView.svelte'
   import ProfileSettingsView from './components/ProfileSettingsView.svelte'
   import MediaWebView from './components/media/MediaWebView.svelte'
   import QuotaTrackerView from './components/QuotaTrackerView.svelte'
@@ -281,7 +280,6 @@
     'media-systemone': { title: 'System One', description: 'Structured state evaluation models' },
     'media-web': { title: 'Web Fetch & Search', description: 'Configure web search and scrape tools' },
     'proxy-pools': { title: 'Proxy Pools', description: 'Manage your proxy pool configurations' },
-    'petani-proxy': { title: 'Petani Proxy', description: 'Embedded rotating proxy gateway' },
     skills: { title: 'Agent Skills', description: 'Copy a link and paste to your AI to use 9router-go — no install needed' },
     'console-log': { title: 'Console Log', description: 'Live server console output' },
     terminal: { title: 'Console Log', description: 'Live server console output' },
@@ -582,8 +580,6 @@
               {/if}
             {:else if activeTab === 'proxy-pools'}
               <ProxyPoolsView />
-            {:else if activeTab === 'petani-proxy'}
-              <PetaniProxyView />
             {:else if activeTab === 'skills'}
               <SkillsView />
             {:else if activeTab === 'console-log' || activeTab === 'terminal'}

@@ -104,7 +104,6 @@
       class="py-2 px-3 text-sm text-text-main bg-white dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-md focus:ring-1 focus:ring-primary/30 focus:border-primary/50 focus:outline-none transition-all disabled:opacity-50"
     >
       <option value={NONE_PROXY_POOL_VALUE}>None (direct)</option>
-      <option value="__petani__">🌐 Petani Proxy (native)</option>
       {#each proxyPools as pool}
         <option value={pool.id}>{pool.name}</option>
       {/each}
