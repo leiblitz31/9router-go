@@ -1373,25 +1373,38 @@ func mentionsGate(lower string) bool {
 // free-tier gate refusing to serve this traffic, rather than a problem with the
 // account, key or request.
 //
-// The gate answers 403 with a body whose type is FreeTierError when it is not
-// serving free traffic from this egress at that moment. That says nothing about
-// the caller's credentials, and a 403 is read as "you are not allowed" by every
-// client — so it must not be forwarded verbatim; see opencodeClosureError.
+// The gate answers in two shapes for the same condition: the inference gate
+// returns 403 with a body whose type is FreeTierError, and the zen endpoint
+// returns 429 with type FreeUsageLimitError, both when the free tier is not
+// serving at that moment. That says nothing about the caller's credentials,
+// and a 403 is read as "you are not allowed" by every client — so it must not
+// be forwarded verbatim; see opencodeClosureError. The 429 shape matters just
+// as much: on the generic retryable path it was classified as an account rate
+// limit and locked the model — and, via the account cooldown, the whole
+// connection — for the full backoff (observed live: 7200s), even though the
+// free window reopens in seconds to minutes.
 //
-// The provider check keeps every other provider's 403 handling untouched, and
-// the body check keeps a genuine OpenCode auth or quota 403 on the normal path.
+// The provider check keeps every other provider's handling untouched, and
+// the body checks keep a genuine OpenCode auth 403 or a non-free-tier 429 on
+// the normal path.
 func isOpencodeFreeTierRefusal(provider string, ue *upstreamError) bool {
 	switch provider {
 	case "opencode", "opencode-zen", "opencode-go":
 	default:
 		return false
 	}
-	if ue == nil || ue.StatusCode != http.StatusForbidden {
+	if ue == nil {
 		return false
 	}
 	// Match the error type, not the prose: the gate's message text has already
 	// been reworded once.
-	return bytes.Contains(ue.Body, []byte("FreeTierError"))
+	switch ue.StatusCode {
+	case http.StatusForbidden:
+		return bytes.Contains(ue.Body, []byte("FreeTierError"))
+	case http.StatusTooManyRequests:
+		return bytes.Contains(ue.Body, []byte("FreeUsageLimitError"))
+	}
+	return false
 }
 
 func isModelScopedError(statusCode int, errorText string, model string) bool {

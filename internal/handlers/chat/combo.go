@@ -1036,6 +1036,13 @@ func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]stri
 		*excludeIDs = append(*excludeIDs, connID)
 		return
 	}
+	// A free-tier refusal is not an account verdict (see the single-provider
+	// path in fallback.go): skip this connection for the rest of the request
+	// without writing a lock later requests would inherit.
+	if isOpencodeFreeTierRefusal(provider, ue) {
+		*excludeIDs = append(*excludeIDs, connID)
+		return
+	}
 	if connID == "" {
 		return
 	}
