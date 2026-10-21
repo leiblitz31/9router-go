@@ -106,8 +106,17 @@ func hasErrorToolContent(content any) bool {
 	return false
 }
 
-func buildToolCallMap(items []map[string]any) map[string]string {
+// buildToolCallMap indexes every tool call in the conversation by the id its
+// result will reference, and records the command it ran.
+//
+// The name is what the protected-tool skip list matches. The command is what
+// identifies the output: a filter's rules are written for the output of one
+// command, so the command is what decides which filter may apply to it.
+// Without it the only signal left is the content, and content matches text
+// that merely mentions what the filter keys on.
+func buildToolCallMap(items []map[string]any) (map[string]string, map[string]string) {
 	toolMap := make(map[string]string)
+	cmdMap := make(map[string]string)
 	for _, item := range items {
 		// Chat assistant tool_calls
 		if tcList, ok := item["tool_calls"].([]any); ok {
@@ -115,8 +124,14 @@ func buildToolCallMap(items []map[string]any) map[string]string {
 				if tcMap, ok := tc.(map[string]any); ok {
 					id, _ := tcMap["id"].(string)
 					if fn, ok := tcMap["function"].(map[string]any); ok {
-						if name, ok := fn["name"].(string); ok && id != "" {
+						name, _ := fn["name"].(string)
+						if name != "" && id != "" {
 							toolMap[id] = name
+						}
+						if id != "" {
+							if cmd := commandFromToolArgs(fn["arguments"]); cmd != "" {
+								cmdMap[id] = cmd
+							}
 						}
 					}
 				}
@@ -126,8 +141,13 @@ func buildToolCallMap(items []map[string]any) map[string]string {
 		if t, ok := item["type"].(string); ok && t == "function_call" {
 			callID, _ := item["call_id"].(string)
 			name, _ := item["name"].(string)
-			if callID != "" && name != "" {
+			if name != "" && callID != "" {
 				toolMap[callID] = name
+			}
+			if callID != "" {
+				if cmd := commandFromToolArgs(item["arguments"]); cmd != "" {
+					cmdMap[callID] = cmd
+				}
 			}
 		}
 		// Claude tool_use in content array
@@ -137,15 +157,63 @@ func buildToolCallMap(items []map[string]any) map[string]string {
 					if bt, ok := block["type"].(string); ok && bt == "tool_use" {
 						id, _ := block["id"].(string)
 						name, _ := block["name"].(string)
-						if id != "" && name != "" {
+						if name != "" && id != "" {
 							toolMap[id] = name
+						}
+						if id != "" {
+							if cmd := commandFromToolArgs(block["input"]); cmd != "" {
+								cmdMap[id] = cmd
+							}
 						}
 					}
 				}
 			}
 		}
 	}
-	return toolMap
+	return toolMap, cmdMap
+}
+
+// commandFromToolArgs reads the command out of a tool call's arguments.
+//
+// The arguments arrive in three shapes: a JSON string (the Chat Completions
+// and Responses shapes), a decoded object (the Claude tool_use shape), or
+// absent. The keys are the ones the translator's own bash-argument
+// sanitiser accepts, so the same spellings resolve here.
+func commandFromToolArgs(args any) string {
+	switch a := args.(type) {
+	case string:
+		if a == "" {
+			return ""
+		}
+		// Cheap guard before the decode: every key this reads is one of
+		// "command", "cmd" or "CommandLine", so a string without any of
+		// them cannot carry one, and the decode is skipped. The arguments
+		// are decoded once per tool call in the conversation, on a request
+		// path that has to stay cheap.
+		if !strings.Contains(a, "command") && !strings.Contains(a, "Command") &&
+			!strings.Contains(a, "cmd") && !strings.Contains(a, "Cmd") {
+			return ""
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(a), &decoded); err != nil {
+			return ""
+		}
+		return commandFromDecodedArgs(decoded)
+	case map[string]any:
+		return commandFromDecodedArgs(a)
+	}
+	return ""
+}
+
+func commandFromDecodedArgs(args map[string]any) string {
+	for _, key := range []string{"command", "cmd", "CommandLine"} {
+		if s, ok := args[key].(string); ok {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }
 
 // CompressMessages compresses tool_result content in LLM request bodies in-place.
@@ -183,29 +251,31 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 		return body, false
 	}
 
-	toolMap := buildToolCallMap(items)
+	toolMap, cmdMap := buildToolCallMap(items)
 	compressed := false
 	for _, msg := range items {
 		// OpenAI Responses: function_call_output
 		if msg["type"] == "function_call_output" {
 			name, _ := msg["name"].(string)
-			if name == "" {
-				if callID, ok := msg["call_id"].(string); ok {
+			command := ""
+			if callID, ok := msg["call_id"].(string); ok {
+				if name == "" {
 					name = toolMap[callID]
 				}
+				command = cmdMap[callID]
 			}
 			if isErrorToolResult(msg) || isProtectedTool(name) {
 				continue
 			}
 			if output, ok := msg["output"].(string); ok && len(output) > MinCompressSize {
-				msg["output"] = CompressTextWithConfig(output, cfg)
+				msg["output"] = CompressTextWithCommand(output, command, cfg)
 				compressed = true
 			} else if outputArr, ok := msg["output"].([]any); ok {
 				for _, part := range outputArr {
 					if partMap, ok := part.(map[string]any); ok {
 						if t, ok := partMap["type"].(string); ok && (t == "input_text" || t == "text") {
 							if text, ok := partMap["text"].(string); ok && len(text) > MinCompressSize {
-								partMap["text"] = CompressTextWithConfig(text, cfg)
+								partMap["text"] = CompressTextWithCommand(text, command, cfg)
 								compressed = true
 							}
 						}
@@ -218,23 +288,25 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 		// OpenAI tool message
 		if msg["role"] == "tool" {
 			name, _ := msg["name"].(string)
-			if name == "" {
-				if callID, ok := msg["tool_call_id"].(string); ok {
+			command := ""
+			if callID, ok := msg["tool_call_id"].(string); ok {
+				if name == "" {
 					name = toolMap[callID]
 				}
+				command = cmdMap[callID]
 			}
 			if isErrorToolResult(msg) || isProtectedTool(name) {
 				continue
 			}
 			if content, ok := msg["content"].(string); ok && len(content) > MinCompressSize {
-				msg["content"] = CompressTextWithConfig(content, cfg)
+				msg["content"] = CompressTextWithCommand(content, command, cfg)
 				compressed = true
 			} else if contentArr, ok := msg["content"].([]any); ok {
 				for _, part := range contentArr {
 					if partMap, ok := part.(map[string]any); ok {
 						if t, ok := partMap["type"].(string); ok && t == "text" {
 							if text, ok := partMap["text"].(string); ok && len(text) > MinCompressSize {
-								partMap["text"] = CompressTextWithConfig(text, cfg)
+								partMap["text"] = CompressTextWithCommand(text, command, cfg)
 								compressed = true
 							}
 						}
@@ -256,28 +328,30 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 			}
 			if block["type"] == "tool_result" {
 				name, _ := block["name"].(string)
-				if name == "" {
-					if toolUseID, ok := block["tool_use_id"].(string); ok {
+				command := ""
+				if toolUseID, ok := block["tool_use_id"].(string); ok {
+					if name == "" {
 						name = toolMap[toolUseID]
 					}
+					command = cmdMap[toolUseID]
 				}
 				if isErrorToolResult(block) || isProtectedTool(name) {
 					continue
 				}
 
 				if text, ok := block["text"].(string); ok && len(text) > MinCompressSize {
-					block["text"] = CompressTextWithConfig(text, cfg)
+					block["text"] = CompressTextWithCommand(text, command, cfg)
 					compressed = true
 				}
 				if content, ok := block["content"].(string); ok && len(content) > MinCompressSize {
-					block["content"] = CompressTextWithConfig(content, cfg)
+					block["content"] = CompressTextWithCommand(content, command, cfg)
 					compressed = true
 				} else if innerArr, ok := block["content"].([]any); ok {
 					for _, innerPart := range innerArr {
 						if innerBlock, ok := innerPart.(map[string]any); ok {
 							if innerBlock["type"] == "text" {
 								if text, ok := innerBlock["text"].(string); ok && len(text) > MinCompressSize {
-									innerBlock["text"] = CompressTextWithConfig(text, cfg)
+									innerBlock["text"] = CompressTextWithCommand(text, command, cfg)
 									compressed = true
 								}
 							}

@@ -291,6 +291,19 @@ func isStructuredOutput(text string) bool {
 
 // MatchFilter finds the highest priority matching enabled filter for the given text or command.
 func MatchFilter(text string, command string, cfg RTKConfig) *RTKFilter {
+	f, _ := matchFilter(text, command, cfg)
+	return f
+}
+
+// matchFilter finds the matching filter and reports whether it was selected by
+// the command or by the content alone.
+//
+// The distinction matters for the summarising rules: a filter that replaces
+// the output with a fixed string ("git: already on branch") is truthful only
+// when the output really is that command's. Selected by content alone, the
+// same rule fires on a file that merely mentions the phrase, and the model is
+// left with a string it cannot account for.
+func matchFilter(text string, command string, cfg RTKConfig) (*RTKFilter, bool) {
 	filters := LoadFilters()
 	trimmedCmd := strings.TrimSpace(command)
 
@@ -302,7 +315,7 @@ func MatchFilter(text string, command string, cfg RTKConfig) *RTKFilter {
 			}
 			for _, cmdRe := range f.Commands {
 				if cmdRe.MatchString(trimmedCmd) {
-					return f
+					return f, true
 				}
 			}
 		}
@@ -315,10 +328,20 @@ func MatchFilter(text string, command string, cfg RTKConfig) *RTKFilter {
 	// includePatterns keep structural lines and a few named keys, so applying it
 	// deletes every other data line and the result no longer parses.
 	if isStructuredOutput(text) {
-		return nil
+		return nil, false
 	}
 
-	// Phase 2: Try pattern matching against the content
+	// Phase 2: Try pattern matching against the content.
+	//
+	// A filter that names commands was written for that command's output. When
+	// the command is known and no filter claims it, the output is not any
+	// filter's output, so matching one on content alone would rewrite text the
+	// agent asked for: a file that merely mentions "Already on" was rewritten
+	// to "git: already on branch", and the model had no way to tell. The
+	// command identifies the output; the content alone does not.
+	//
+	// When the command could not be resolved, content matching is all there is,
+	// so it stays available.
 	for _, f := range filters {
 		if !IsFilterEnabled(f, cfg) {
 			continue
@@ -327,9 +350,12 @@ func MatchFilter(text string, command string, cfg RTKConfig) *RTKFilter {
 		if f.ID == "generic-output" {
 			continue
 		}
+		if trimmedCmd != "" && len(f.Commands) > 0 {
+			continue
+		}
 		for _, patRe := range f.Patterns {
 			if patRe.MatchString(text) {
-				return f
+				return f, false
 			}
 		}
 	}
@@ -337,11 +363,11 @@ func MatchFilter(text string, command string, cfg RTKConfig) *RTKFilter {
 	// Fall back to generic-output if enabled
 	for _, f := range filters {
 		if f.ID == "generic-output" && IsFilterEnabled(f, cfg) {
-			return f
+			return f, false
 		}
 	}
 
-	return nil
+	return nil, false
 }
 
 // ApplyRTKFilter applies the filter rules to text.

@@ -358,8 +358,27 @@ func CompressTextWithConfig(text string, cfg RTKConfig) string {
 	return CompressTextDetailed(text, cfg).Text
 }
 
+// CompressTextWithCommand compresses text that is known to be the output of
+// the given command.
+//
+// The command is what identifies the output. A filter's rules are written for
+// one command's output, so the command decides which filter may apply; the
+// content alone cannot, because content matches text that merely mentions
+// what the filter keys on. A text that merely mentions it is a different
+// command's output.
+func CompressTextWithCommand(text string, command string, cfg RTKConfig) string {
+	return CompressTextDetailedWithCommand(text, command, cfg).Text
+}
+
 // CompressTextDetailed runs RTK compression and returns comprehensive metrics and metadata.
 func CompressTextDetailed(text string, cfg RTKConfig) RTKCompressResult {
+	return CompressTextDetailedWithCommand(text, "", cfg)
+}
+
+// CompressTextDetailedWithCommand is CompressTextDetailed for text whose
+// originating command is known. An empty command means the command could not
+// be resolved, and only the content-scoped filters apply in that case.
+func CompressTextDetailedWithCommand(text string, command string, cfg RTKConfig) RTKCompressResult {
 	origLen := len(text)
 	origTokens := (origLen + 3) / 4
 	if origLen == 0 {
@@ -390,7 +409,7 @@ func CompressTextDetailed(text string, cfg RTKConfig) RTKCompressResult {
 	cat := DetectCategory(trimmed)
 
 	// 2. Filter matching (OmniRoute 55 RTK Filters & category filtering)
-	matchedFilter := MatchFilter(trimmed, "", cfg)
+	matchedFilter := MatchFilter(trimmed, command, cfg)
 	if matchedFilter != nil {
 		cat = matchedFilter.Category
 		filtered, filterTechs := ApplyRTKFilter(matchedFilter, trimmed, maxLines)
