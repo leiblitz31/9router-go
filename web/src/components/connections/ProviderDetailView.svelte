@@ -73,7 +73,7 @@
   import EditConnectionModal, { type ConnectionUpdate } from './EditConnectionModal.svelte'
   import AddConnectionModal from './AddConnectionModal.svelte'
   import AddCustomModelModal from './AddCustomModelModal.svelte'
-  import { hasAnyNodeLimitPatch, nodeLimitsDraftOf, nodeLimitsSummary, nodeLimitsUsageSummary } from '../../lib/node-limits'
+  import { nodeLimitsDraftOf, nodeLimitsSummary, nodeLimitsUsageSummary } from '../../lib/node-limits'
   import type { ProviderNodeLimitsPatch } from '../../api/client'
   import Badge from '../../lib/ui/Badge.svelte'
   import ProviderHeaderOverridesModal from './ProviderHeaderOverridesModal.svelte'
@@ -2396,17 +2396,13 @@
       // live on the node's own row, so an edited suffix moves them, and a write aimed
       // at the old id would leave the node looking unlimited.
       const savedId = res?.node?.id || previousId
-      if (hasAnyNodeLimitPatch(data.limits)) {
-        try {
-          const saved = await api.setProviderNodeLimits(savedId, data.limits)
-          selectedNode = { ...selectedNode, id: savedId, limits: saved.limits }
-        } catch (err) {
-          alert(
-            `Provider node saved, but its capacity limits did not: ${err instanceof Error ? err.message : String(err)}`,
-          )
-        }
-      } else {
-        selectedNode = { ...selectedNode, id: savedId }
+      try {
+        const saved = await api.setProviderNodeLimits(savedId, data.limits)
+        selectedNode = { ...selectedNode, id: savedId, limits: saved.limits }
+      } catch (err) {
+        alert(
+          `Provider node saved, but its capacity limits did not: ${err instanceof Error ? err.message : String(err)}`,
+        )
       }
       showEditNodeModal = false
       if (savedId !== previousId) {

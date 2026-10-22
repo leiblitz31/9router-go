@@ -246,6 +246,48 @@ func TestProviderNodeLimitsAreEditableThroughTheRouter(t *testing.T) {
 	}
 }
 
+// TestProviderNodeLimits_ClearedToZero pins the clearing path through the full
+// router (request → handler → DB → response): an operator explicitly setting
+// every limit back to zero must not be silently dropped. The previous UI guard
+// (hasAnyNodeLimitPatch in the edit-save path) treated an all-zero patch as
+// "nothing to write", so the PUT never reached the router and the stored limits
+// kept their previous non-zero values.
+func TestProviderNodeLimits_ClearedToZero(t *testing.T) {
+	env := newEnv(t)
+	upstream := env.NewUpstream(t, chatCompletionResponder())
+	seedNaraNode(t, env, upstream, db.ProviderLimits{RPM: 60, TPM: 90_000, Concurrency: 4})
+
+	// Non-zero values are stored as-is.
+	stored, err := env.Repo.GetProviderLimits(context.Background(), "node-nara")
+	if err != nil {
+		t.Fatalf("GetProviderLimits (seed): %v", err)
+	}
+	if stored.RPM != 60 || stored.TPM != 90_000 || stored.Concurrency != 4 {
+		t.Fatalf("seed limits = %+v, want rpm 60/tpm 90000/concurrency 4", stored)
+	}
+
+	// The editor sends an explicit all-zero patch when every field is cleared.
+	put := env.Put(t, "/api/provider-nodes/node-nara/limits",
+		map[string]any{
+			"rpm":         0,
+			"tpm":         0,
+			"concurrency": 0,
+			"tokenQuota":  0,
+		})
+	if put.Status != http.StatusOK {
+		t.Fatalf("PUT /limits (zero patch) = %d, want 200 (body: %s)", put.Status, truncate(put.Body))
+	}
+
+	// Reading back must show every axis at 0 (unlimited).
+	after, err := env.Repo.GetProviderLimits(context.Background(), "node-nara")
+	if err != nil {
+		t.Fatalf("GetProviderLimits (after clear): %v", err)
+	}
+	if after.RPM != 0 || after.TPM != 0 || after.Concurrency != 0 || after.TokenQuota != 0 {
+		t.Errorf("limits after zero patch = %+v, want every axis at 0 (unlimited)", after)
+	}
+}
+
 // nodeUsage reads one node's reported spend from GET /api/provider-nodes — the
 // same number the dispatch gate compares against the node's quota, so a test that
 // waits on it cannot disagree with the refusal it then expects.

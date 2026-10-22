@@ -146,6 +146,39 @@ func TestSetProviderLimits_RejectsNegativeCounts(t *testing.T) {
 	}
 }
 
+// TestSetProviderLimits_AcceptsZeroAsUnlimited pins the clear path: an operator
+// removing a capacity limit writes 0, and the write must land rather than be
+// refused. The dashboard only reaches this function when it sends an explicit
+// patch (web/src/components/connections/ProviderDetailView.svelte), so a 0 here
+// is a deliberate clear, not an absent field.
+func TestSetProviderLimits_AcceptsZeroAsUnlimited(t *testing.T) {
+	ctx := context.Background()
+	repo := openEphemeralSchemaDB(t)
+	seedProviderNode(t, repo, "node-nara", "Nara AI")
+
+	if err := repo.SetProviderLimits(ctx, "node-nara", ProviderLimits{
+		RPM:            60,
+		TPM:            90_000,
+		Concurrency:    4,
+		TokenQuota:     5_000_000,
+		QueueTimeoutMs: 15_000,
+	}); err != nil {
+		t.Fatalf("SetProviderLimits (seed): %v", err)
+	}
+
+	// Clearing every axis back to unlimited.
+	if err := repo.SetProviderLimits(ctx, "node-nara", ProviderLimits{}); err != nil {
+		t.Fatalf("SetProviderLimits (clear) = %v, want a stored clear, not a refusal", err)
+	}
+	got, err := repo.GetProviderLimits(ctx, "node-nara")
+	if err != nil {
+		t.Fatalf("GetProviderLimits: %v", err)
+	}
+	if got != (ProviderLimits{}) {
+		t.Errorf("limits after clearing = %+v, want the zero value (unlimited on every axis)", got)
+	}
+}
+
 func TestSetProviderLimits_NormalisesContractExpiry(t *testing.T) {
 	tests := []struct {
 		name    string
