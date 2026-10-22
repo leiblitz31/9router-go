@@ -1406,9 +1406,12 @@ export const api = {
     }),
 
   // F-4 guardrails
-  getGuardrailPolicies: (scope: string, scopeId = '') =>
+  // No scopeId lists the whole scope (including subject-scoped policies); an
+  // explicit value — even an empty one — resolves one exact scope tuple.
+  getGuardrailPolicies: (scope: string, scopeId?: string) =>
     request<GuardrailPolicy[]>(
-      `/api/guardrails/policies?scope=${encodeURIComponent(scope)}&scopeId=${encodeURIComponent(scopeId)}`
+      `/api/guardrails/policies?scope=${encodeURIComponent(scope)}` +
+        (scopeId === undefined ? '' : `&scopeId=${encodeURIComponent(scopeId)}`)
     ),
   createGuardrailPolicy: (payload: {
     name: string

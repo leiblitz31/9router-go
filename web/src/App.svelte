@@ -288,6 +288,11 @@
     'console-log': { title: 'Console Log', description: 'Live server console output' },
     terminal: { title: 'Console Log', description: 'Live server console output' },
     settings: { title: 'Settings', description: 'Manage your preferences and configuration' },
+    security: {
+      title: 'Security',
+      description: 'Encrypt provider credentials at rest, and scan prompts for personal data and injection attempts before they leave the gateway',
+    },
+    plans: { title: 'Plans', description: 'Per-key quota plans and policy resolution' },
   }
 
   function handleOpenNewCombo() {

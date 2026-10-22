@@ -181,6 +181,16 @@
       description: 'Manage your preferences',
       icon: 'settings',
     },
+    security: {
+      title: 'Security',
+      description: 'Encrypt provider credentials at rest and scan prompts before dispatch',
+      icon: 'shield_lock',
+    },
+    plans: {
+      title: 'Plans',
+      description: 'Per-key quota plans and policy resolution',
+      icon: 'contract',
+    },
     login: {
       title: 'Login',
       description: 'Authentication',
