@@ -3,10 +3,12 @@
 - **The "is this address internal?" question had more than one answer.**
   `internal/proxy` carried a copy of the predicate that decides whether an
   address is private, loopback, link-local, cloud-metadata or reserved, and
-  other layers carried their own. The copies had already drifted: each of them
-  checked only `net.IP`'s stdlib predicates, so none of them covered
+  other layers carried their own. The copy in `internal/proxy` had drifted: it
+  checked only `net.IP`'s stdlib predicates, so it did not cover
   `100.64.0.0/10` — and that range contains `100.100.100.200`, Alibaba Cloud's
-  instance-metadata service. The guard called it public.
+  instance-metadata service. The guard called it public. (`internal/handlerutil`
+  kept its own explicit range table, which does cover it; that copy guards a
+  different path and is left as it is.)
 - **The predicate now lives in `internal/netguard`, once.** It answers the same
   question for every layer that has to ask it, without an import cycle:
   `internal/proxy` already imports `internal/translator`, so the shared copy
