@@ -122,6 +122,86 @@ body {
   opacity: 0.04;
 }
 
+/*
+ * Self-hosted fonts.
+ *
+ * These used to come from fonts.googleapis.com / fonts.gstatic.com, which cost
+ * the first dashboard open two render-blocking stylesheets on a third-party
+ * origin — a blocked CDN stalled the first paint for 21 s in measurement, and
+ * a working one still cost a DNS lookup, a TLS handshake and two round trips
+ * to a host that has nothing to do with the gateway. The gateway serves its
+ * own assets from one origin, so the fonts come from there too.
+ *
+ * `font-display: swap` keeps the text readable while the font is still in
+ * flight: the dashboard shows real content immediately instead of invisible
+ * glyphs. The Material Symbols font is the one exception — it is `block`,
+ * because an icon rendered in the fallback face is a wrong glyph, and a row of
+ * wrong glyphs is worse than a row of blank ones for the moment the font
+ * arrives.
+ *
+ * The latin and latin-ext subsets are both shipped: the dashboard renders
+ * provider names and model ids verbatim, and those carry accented latin
+ * characters.
+ */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('./assets/fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('./assets/fonts/inter-latin-ext-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('./assets/fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('./assets/fonts/jetbrains-mono-latin-ext-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/*
+ * Material Symbols, instanced down to the axes the UI pins.
+ *
+ * The shipped file is the upstream variable font with its weight, grade and
+ * optical-size axes pinned to the values `web/src/index.css` sets on every
+ * icon anyway, and its fill axis kept at its full 0..1 range because the
+ * sidebar flips it. Every glyph Material Symbols defines is still in the
+ * file, so an icon name added to the catalog tomorrow renders — 3908 KB
+ * became 349 KB without removing a single one.
+ */
+@font-face {
+  font-family: 'Material Symbols Outlined';
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 700;
+  src: url('./assets/material-symbols-outlined.woff2') format('woff2');
+}
+
 /* Custom scrollbar (kept from upstream custom-scrollbar utility) */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
@@ -170,6 +250,7 @@ body {
   word-wrap: normal;
   direction: ltr;
   -webkit-font-feature-settings: 'liga';
+  font-feature-settings: 'liga';
   -webkit-font-smoothing: antialiased;
   font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
 }
