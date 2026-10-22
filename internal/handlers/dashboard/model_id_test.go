@@ -14,6 +14,8 @@ func TestInvalidModelIDReason(t *testing.T) {
 		{name: "plain id", id: "glm-5.3", valid: true},
 		{name: "id with a version suffix", id: "claude-opus-4-5", valid: true},
 		{name: "id with a colon", id: "muse-spark-1:free", valid: true},
+		{name: "id with a colon and dot", id: "gpt-5.2:free", valid: true},
+		{name: "id with a colon and slash-free", id: "model1:free", valid: true},
 		{name: "id with a dot", id: "gpt-5.2-turbo", valid: true},
 		{name: "empty", id: "", valid: false},
 		{name: "unsplit space paste", id: "model1 model2:free model3-ext", valid: false},

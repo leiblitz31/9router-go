@@ -18,6 +18,8 @@ describe('parseModelIds: separators', () => {
       want: ['glm-5.3', 'glm-4.7', 'gpt-5.2', 'claude-sonnet-4.5'],
     },
     { name: 'surrounding whitespace is trimmed', input: '  glm-5.3  ,\n  glm-4.7 ', want: ['glm-5.3', 'glm-4.7'] },
+    { name: "colons with commas split on the comma", input: "model1:free,modelX:paid", want: ["model1:free", "modelX:paid"] },
+    { name: "colons with spaces split on spaces", input: "model1:free modelX:paid model2:xvertor", want: ["model1:free", "modelX:paid", "model2:xvertor"] },
     { name: 'an empty paste plans nothing', input: '   \n\t ', want: [] },
   ]
 
