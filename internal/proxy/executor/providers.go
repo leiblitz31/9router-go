@@ -332,6 +332,25 @@ func parseDataURIMime(uri string) string {
 	return "image/png"
 }
 
+// blockText flattens OpenAI message content (string or block array) to plain text.
+func blockText(v any) string {
+	switch c := v.(type) {
+	case string:
+		return c
+	case []any:
+		var b strings.Builder
+		for _, part := range c {
+			if pm, ok := part.(map[string]any); ok {
+				if txt, ok := pm["text"].(string); ok {
+					b.WriteString(txt)
+				}
+			}
+		}
+		return b.String()
+	}
+	return ""
+}
+
 func toCommandcodeImageBlock(part map[string]any) map[string]any {
 	pType, _ := part["type"].(string)
 	if pType == "image_url" {
@@ -435,10 +454,72 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 		}
 	}
 
+	// Tools: upstream validates Anthropic-shaped definitions ({name, input_schema}).
+	// OpenAI's {"type":"function","function":{…}} is rejected with
+	// 400 "expected string, received undefined at params.tools[0].name".
+	if rawTools, ok := params["tools"].([]any); ok {
+		tools := make([]any, 0, len(rawTools))
+		for _, rt := range rawTools {
+			tm, ok := rt.(map[string]any)
+			if !ok {
+				continue
+			}
+			if fn, ok := tm["function"].(map[string]any); ok {
+				name, _ := fn["name"].(string)
+				if name == "" {
+					continue
+				}
+				out := map[string]any{"name": name}
+				if d, _ := fn["description"].(string); d != "" {
+					out["description"] = d
+				}
+				if p, ok := fn["parameters"]; ok && p != nil {
+					out["input_schema"] = p
+				} else {
+					out["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
+				}
+				tools = append(tools, out)
+				continue
+			}
+			if _, ok := tm["name"].(string); ok { // already Anthropic-shaped / provider tool
+				tools = append(tools, tm)
+			}
+		}
+		if len(tools) == 0 {
+			delete(params, "tools")
+			delete(params, "tool_choice")
+		} else {
+			params["tools"] = tools
+		}
+	}
+
+	// tool_choice: upstream takes Anthropic strings only ("auto"/"any"/{type:"tool",name}).
+	switch tc := params["tool_choice"].(type) {
+	case string:
+		switch tc {
+		case "required":
+			params["tool_choice"] = map[string]any{"type": "any"}
+		case "auto":
+			params["tool_choice"] = map[string]any{"type": "auto"}
+		default: // "none"/unknown
+			delete(params, "tool_choice")
+		}
+	case map[string]any:
+		if fn, ok := tc["function"].(map[string]any); ok {
+			name, _ := fn["name"].(string)
+			if name == "" {
+				delete(params, "tool_choice")
+			} else {
+				params["tool_choice"] = map[string]any{"type": "tool", "name": name}
+			}
+		}
+	}
+
 	// CommandCode messages require content as array of blocks (never raw string)
 	if rawMsgs, ok := m["messages"].([]any); ok {
 		var systemTexts []string
 		convertedMsgs := make([]any, 0, len(rawMsgs))
+		toolNames := map[string]string{} // tool_call_id → function name (tool msgs often omit it)
 		for _, rawMsg := range rawMsgs {
 			msgMap, ok := rawMsg.(map[string]any)
 			if !ok {
@@ -451,6 +532,25 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 				if s, ok := contentVal.(string); ok && s != "" {
 					systemTexts = append(systemTexts, s)
 				}
+				continue
+			}
+
+			// OpenAI tool result → AI-SDK tool message; toolName is required there.
+			if role == "tool" {
+				callID, _ := msgMap["tool_call_id"].(string)
+				name, _ := msgMap["name"].(string)
+				if name == "" {
+					name = toolNames[callID]
+				}
+				convertedMsgs = append(convertedMsgs, map[string]any{
+					"role": "tool",
+					"content": []any{map[string]any{
+						"type":       "tool-result",
+						"toolCallId": callID,
+						"toolName":   name,
+						"output":     map[string]any{"type": "text", "value": blockText(contentVal)},
+					}},
+				})
 				continue
 			}
 
@@ -485,6 +585,40 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 					"type": "text",
 					"text": "",
 				})
+			}
+
+			// OpenAI assistant tool_calls → AI-SDK tool-call blocks.
+			if tcs, ok := msgMap["tool_calls"].([]any); ok {
+				for _, rawTC := range tcs {
+					tc, ok := rawTC.(map[string]any)
+					if !ok {
+						continue
+					}
+					fn, _ := tc["function"].(map[string]any)
+					name, _ := fn["name"].(string)
+					if name == "" {
+						continue
+					}
+					callID, _ := tc["id"].(string)
+					args := fn["arguments"]
+					argStr, _ := args.(string)
+					var input any = map[string]any{}
+					if argStr != "" && json.Unmarshal([]byte(argStr), &input) != nil {
+						input = map[string]any{}
+					} else if args != nil && argStr == "" {
+						input = args
+					}
+					contentBlocks = append(contentBlocks, map[string]any{
+						"type":       "tool-call",
+						"toolCallId": callID,
+						"toolName":   name,
+						"input":      input,
+					})
+					toolNames[callID] = name
+				}
+				if len(contentBlocks) == 0 {
+					contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": ""})
+				}
 			}
 
 			convertedMsg := map[string]any{

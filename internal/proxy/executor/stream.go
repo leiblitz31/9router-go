@@ -1252,6 +1252,20 @@ func handleCommandcodeStream(w http.ResponseWriter, req *Request, upstream io.Re
 	return scanner.Err()
 }
 
+// cmdcodeFinishReason maps upstream AI-SDK finish reasons to OpenAI wire values.
+func cmdcodeFinishReason(r string) string {
+	switch r {
+	case "tool-calls":
+		return "tool_calls"
+	case "length", "stop", "content-filter", "error":
+		if r == "content-filter" {
+			return "content_filter"
+		}
+		return r
+	}
+	return r
+}
+
 func ProcessCommandcodeEvent(event map[string]any, eventType string, state *CommandcodeStreamState) []string {
 	if state.ToolIndexByID == nil {
 		state.ToolIndexByID = make(map[string]int)
@@ -1381,14 +1395,14 @@ func ProcessCommandcodeEvent(event map[string]any, eventType string, state *Comm
 
 	case "finish-step":
 		if reason, ok := event["finishReason"].(string); ok {
-			state.FinishReason = reason
+			state.FinishReason = cmdcodeFinishReason(reason)
 		}
 
 	case "finish":
-		reason := state.FinishReason
+		reason := cmdcodeFinishReason(state.FinishReason)
 		if reason == "" {
 			if r, ok := event["finishReason"].(string); ok {
-				reason = r
+				reason = cmdcodeFinishReason(r)
 			}
 			if reason == "" {
 				reason = "stop"
