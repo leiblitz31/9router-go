@@ -368,7 +368,7 @@ func (h *DashboardHandler) HandleDeleteProviderNode(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if err := h.Repo.DeleteProviderNode(id); err != nil {
+	if err := h.Repo.DeleteProviderNode(r.Context(), id); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
