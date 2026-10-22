@@ -107,6 +107,8 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Delete("/keys/{id}", h.HandleDeleteApiKey)
 		r.Put("/keys/{id}/toggle", h.HandleToggleApiKey)
 		r.Post("/keys/{id}/rotate", h.HandleRotateApiKey)
+		r.Get("/keys/{id}/models", h.HandleGetApiKeyModels)
+		r.Put("/keys/{id}/models", h.HandleSetApiKeyModels)
 		r.Put("/keys/{id}", h.HandleUpdateApiKey)
 
 		// F-3 Plans: reusable policy templates the keys inherit from.
