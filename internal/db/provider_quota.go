@@ -109,9 +109,10 @@ func (r *Repo) ProviderQuotaResetID(ctx context.Context, nodeID string) (int, er
 //
 // Matching is one exact column comparison because usageHistory.provider holds the
 // providerNodes id the request resolved to (resolution.go returns node.ID for a
-// custom provider), which idx_uh_provider serves directly. There is no OR across
-// spellings here, unlike the key reader: a node has exactly one name on the wire
-// side of this gateway.
+// custom provider), which idx_uh_prov_tok serves directly — and serves as a
+// covering read, so the sum does not go back to the table once per matching
+// row. There is no OR across spellings here, unlike the key reader: a node
+// has exactly one name on the wire side of this gateway.
 //
 // The history sum and the carryover are read in one statement so a prune landing
 // between two reads cannot report a spend that is neither the before nor the after
@@ -143,32 +144,35 @@ func (r *Repo) ProviderTokenUsage(ctx context.Context, nodeID string) (int, erro
 }
 
 // ProviderTokenUsageByNode sums the same spend as ProviderTokenUsage for every
-// node in one query, keyed by node id. The dashboard lists every node with its
-// policy and usage, so a read per node there would be N+1 on a page load.
+// node, keyed by node id. The dashboard lists every node with its policy and
+// usage, so a read per node there would be N+1 on a page load.
 //
-// Each node keeps its own reset mark, so the mark is resolved per row inside the
-// aggregate rather than passed in; the carryover is unioned instead of joined so a
-// node whose history a prune already deleted still reports the tokens that were
-// carried over (a join would drop exactly those rows). A node with neither history
-// nor carryover is simply absent, which the caller reads as zero.
+// The map holds one entry per node and nothing else. The statement it
+// replaced aggregated the whole ledger by provider, so it also returned an
+// entry for every registry provider that had spent anything — entries no
+// caller of this function ever read, because the caller looks a node's spend
+// up by the node's own id.
+//
+// The statement walks providerNodes and reads each node's spend through a
+// correlated seek rather than aggregating the whole ledger. The aggregate
+// version grouped every ledger row by provider, which on a 400k-row ledger
+// took 1.5 s for a list of 200 nodes — and the cost grew with the ledger, not
+// with the number of nodes, because the scan visited rows belonging to
+// providers that are not custom nodes at all. The seek reads only the rows of
+// the node being asked about, so the list costs one indexed lookup per node
+// and stays flat as the ledger grows.
+//
+// Each node keeps its own reset mark, so the mark is read from the node's own
+// row. The carryover is added rather than joined, so a node whose history a
+// prune already deleted still reports the tokens that were carried over (a
+// join would drop exactly those rows). A node with neither history nor
+// carryover reports zero, which is what the caller reads.
 func (r *Repo) ProviderTokenUsageByNode(ctx context.Context) (map[string]int, error) {
 	usage := map[string]int{}
 	if r == nil || r.db == nil {
 		return usage, nil
 	}
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT providerId, SUM(tokens) FROM (
-		    SELECT h.provider AS providerId,
-		           SUM(COALESCE(h.promptTokens, 0) + COALESCE(h.completionTokens, 0)) AS tokens
-		      FROM usageHistory h
-		     WHERE h.provider <> ''
-		       AND h.id > COALESCE((SELECT n.quotaResetId FROM providerNodes n WHERE n.id = h.provider), 0)
-		     GROUP BY h.provider
-		    UNION ALL
-		    SELECT c.providerId, c.tokens
-		      FROM providerLedgerCarryover c
-		     WHERE c.providerId <> ''
-		) GROUP BY providerId`)
+	rows, err := r.db.QueryContext(ctx, providerTokenUsageByNodeQuery)
 	if err != nil {
 		return nil, fmt.Errorf("get provider token usage by node: %w", err)
 	}
@@ -187,3 +191,15 @@ func (r *Repo) ProviderTokenUsageByNode(ctx context.Context) (map[string]int, er
 	}
 	return usage, nil
 }
+
+// providerTokenUsageByNodeQuery is the statement ProviderTokenUsageByNode runs.
+// It is a named constant because the query-plan test pins the plan: the spend
+// of every node must be read by an index seek, and a plan that falls back to
+// scanning the ledger is the regression this statement exists to prevent.
+const providerTokenUsageByNodeQuery = `
+	SELECT n.id,
+	       COALESCE((SELECT SUM(COALESCE(h.promptTokens, 0) + COALESCE(h.completionTokens, 0))
+	                   FROM usageHistory h
+	                  WHERE h.provider = n.id AND h.id > COALESCE(n.quotaResetId, 0)), 0)
+	     + COALESCE((SELECT c.tokens FROM providerLedgerCarryover c WHERE c.providerId = n.id), 0)
+	  FROM providerNodes n`
