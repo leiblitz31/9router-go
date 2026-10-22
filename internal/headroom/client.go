@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"9router/proxy/internal/log"
 	"9router/proxy/internal/proxy"
 )
 
@@ -192,6 +193,38 @@ func (c *HeadroomClient) Compress(ctx context.Context, body []byte, model string
 	newBody, err := json.Marshal(reqMap)
 	if err != nil {
 		return body, false, nil
+	}
+
+	// Byte-gain guard: a result that is not meaningfully smaller is not worth the
+	// risk of a lossy round trip. The proxy reports its own token counts, but
+	// this compares the bytes actually about to be sent, so a proxy that reports
+	// phantom savings cannot talk the gateway into committing them.
+	//
+	// Upstream db81a8c9 (#4855): check both messageBytes and bodyBytes so that
+	// large unchanged tool schemas dominating the outbound body do not cause
+	// false phantom-savings rejections when messages shrank meaningfully.
+	rawMsgBytes, _ := json.Marshal(rawMessages)
+	compMsgBytes, _ := json.Marshal(compResp.Messages)
+	savedTokens := 0
+	if compResp.TokensSaved != nil {
+		if s, ok := toFloat64(compResp.TokensSaved); ok {
+			savedTokens = int(s)
+		}
+	}
+	diag := &HeadroomDiagnostics{
+		Before: HeadroomSizes{
+			BodyBytes:    len(body),
+			MessageBytes: len(rawMsgBytes),
+		},
+		After: HeadroomSizes{
+			BodyBytes:    len(newBody),
+			MessageBytes: len(compMsgBytes),
+		},
+	}
+	stats := &HeadroomStats{TokensSaved: savedTokens}
+
+	if IsHeadroomPhantomSavings(stats, diag) {
+		log.Warn("headroom", FormatHeadroomPhantomWarning(diag))
 	}
 
 	// Byte-gain guard: a result that is not meaningfully smaller is not worth the
