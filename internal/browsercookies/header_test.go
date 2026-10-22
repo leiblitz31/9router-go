@@ -24,7 +24,7 @@ func TestBuildHeaderUsesTheCanonicalOrder(t *testing.T) {
 		{Host: ".google.com", Name: "COMPASS", Value: "compass-value"},
 	}
 
-	got := buildHeader(cookies)
+	got := buildGoogleHeader(cookies)
 	want := "SID=sid-value; __Secure-1PSID=psid-value; __Secure-1PSIDTS=ts-value; NID=nid-value"
 	if got != want {
 		t.Errorf("buildHeader() = %q, want %q", got, want)
@@ -42,7 +42,7 @@ func TestBuildHeaderPrefersTheCookieThatCoversEveryHost(t *testing.T) {
 		{Host: ".google.com", Name: "SID", Value: "the-wide-one"},
 		{Host: "accounts.google.com", Name: "SID", Value: "the-narrow-one"},
 	}
-	got := buildHeader(cookies)
+	got := buildGoogleHeader(cookies)
 	if !strings.Contains(got, "SID=the-wide-one") {
 		t.Errorf("buildHeader() = %q, want the cookie that covers every host", got)
 	}
@@ -53,7 +53,7 @@ func TestBuildHeaderPrefersTheCookieThatCoversEveryHost(t *testing.T) {
 // An empty cookie is not a cookie, and sending the name without a value
 // would be sending something the site has to make sense of.
 func TestBuildHeaderSkipsAnEmptyValue(t *testing.T) {
-	got := buildHeader([]Cookie{
+	got := buildGoogleHeader([]Cookie{
 		{Host: ".google.com", Name: "SID", Value: ""},
 		{Host: ".google.com", Name: "NID", Value: "nid-value"},
 	})

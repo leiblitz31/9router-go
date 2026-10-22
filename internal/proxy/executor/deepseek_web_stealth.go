@@ -80,6 +80,15 @@ type deepSeekStealth struct {
 	// jitter is the upper bound of the random pause before the first upstream
 	// call. 0 disables it.
 	jitter time.Duration
+
+	// cookie is the site's own session cookie, as the operator's browser
+	// received it. The WAF reads it, and a cookie the site never issued is a
+	// request the site does not recognise.
+	cookie string
+
+	// deviceID is the id the site knows this client by. The site generates it
+	// per browser and keeps it, and the settings calls carry it.
+	deviceID string
 }
 
 // deepSeekStealthFor reads the per-connection stealth options.
@@ -93,6 +102,8 @@ func deepSeekStealthFor(connData map[string]any) deepSeekStealth {
 		persistSession: deepSeekConnBool(connData, "persistSession", true),
 		maxConcurrency: deepSeekConnInt(connData, "maxConcurrency", deepSeekStealthDefaultConcurrency),
 		jitter:         time.Duration(deepSeekConnInt(connData, "jitterMs", deepSeekStealthDefaultJitterMs)) * time.Millisecond,
+		cookie:         deepSeekConnString(connData, "deepSeekCookie"),
+		deviceID:       deepSeekConnString(connData, "deepSeekDeviceId"),
 	}
 	if !stealth.enabled {
 		return deepSeekStealth{}
@@ -147,58 +158,57 @@ func deepSeekConnInt(connData map[string]any, key string, fallback int) int {
 	return fallback
 }
 
-// deepSeekWebUserAgent is the build the fingerprint below was captured from.
+// deepSeekConnString reads a string option, ignoring an empty value so a
+// connection that stores an empty field simply has no cookie.
+func deepSeekConnString(connData map[string]any, key string) string {
+	if connData == nil {
+		return ""
+	}
+	value, _ := connData[key].(string)
+	return strings.TrimSpace(value)
+}
+
+// deepSeekWebUserAgent is the build the fingerprint was captured from.
 //
-// The site is reached without TLS impersonation — Go's ClientHello is Go's —
-// so no UA can be consistent at the TLS layer. What is worth being consistent
-// about is the HTTP layer, where a newer UA beside an older `Sec-Ch-Ua` is
-// free evidence of a scripted client. The sibling implementation downgrades
-// its captured UA to match the profile curl_cffi negotiates; here the declared
-// client and the client-hint headers are simply kept on the same version.
-const deepSeekWebUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+// The capture was a Chrome 156 on Windows, and the UA has to agree with the
+// TLS profile the transport uses: a request that claims one build while its
+// ClientHello says another is a request that contradicts itself. The
+// client-hint headers are gone entirely, because the live client's API
+// requests do not carry them — see deepseek_web_headers.go.
+const deepSeekWebUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 
-// deepSeekWebSecChUA is the client-hint value for the UA above.
-const deepSeekWebSecChUA = `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`
+// DeepSeekWebUserAgent is the exported user agent, for the dashboard probe.
+//
+// The probe and the executor have to present the same build: a credential
+// judged against one browser and then used from another is a credential whose
+// verdict does not hold.
+func DeepSeekWebUserAgent() string { return deepSeekWebUserAgent }
 
-// deepSeekWebClientVersion is the version the current web build sends. The
-// 2.0.0 stamp this provider shipped with is stale, and "update to the latest
-// version" is one of the signals the site reports through an `event: toast`
-// error frame.
-const deepSeekWebClientVersion = "2.3.0"
+// deepSeekWebClientVersion is the version the current web build sends.
+//
+// The live site sends 2.5.0. The 2.0.0 stamp this provider shipped with is
+// stale, and the site reports a stale client through an `event: toast` error
+// frame that says the client must be updated.
+const deepSeekWebClientVersion = "2.5.0"
 
 // deepSeekBrowserHeaders is the header set the current chat.deepseek.com web
-// client sends on every /api/v0/* call, in stealth mode.
+// client sends on a chat call, in stealth mode.
 //
-// It is built from the captured request set of the live client rather than
-// from what the endpoint strictly requires: `Sec-Fetch-*`, `Priority` and the
-// client hints are not validated individually today, but a request carrying
-// only some of them is a request no browser ever made. `Accept-Encoding` is
-// deliberately absent — Go's transport manages compression, and setting it
-// would suppress transparent gzip.
+// It is the captured set rather than what the endpoint strictly requires: the
+// fetch hints, the priority and the client block are not validated
+// individually today, but a request carrying only some of them is a request
+// no browser ever made.
 //
 // Origin and Referer follow whatever host the connection dials, because a
 // request whose headers name a different host than the one it is sent to is
 // the single most obvious sign of a scripted client.
+//
+// The `x-client-*` block is deliberately absent: the chat calls are issued
+// below the app's request interceptor that adds it, so a chat call that
+// carried the block would be a call no browser made. The calls that DO carry
+// it are the settings ones; see deepSeekSettingsHeaders.
 func deepSeekBrowserHeaders(origin string, extra map[string]string) map[string]string {
-	headers := map[string]string{
-		"Accept":                   "*/*",
-		"Accept-Language":          "en-US,en;q=0.9",
-		"Origin":                   origin,
-		"Referer":                  origin + "/",
-		"Priority":                 "u=1, i",
-		"Sec-Ch-Ua":                deepSeekWebSecChUA,
-		"Sec-Ch-Ua-Mobile":         "?0",
-		"Sec-Ch-Ua-Platform":       `"Windows"`,
-		"Sec-Fetch-Dest":           "empty",
-		"Sec-Fetch-Mode":           "cors",
-		"Sec-Fetch-Site":           "same-origin",
-		"User-Agent":               deepSeekWebUserAgent,
-		"X-Client-Bundle-Id":       "com.deepseek.chat",
-		"X-Client-Locale":          "en-US",
-		"X-Client-Platform":        "web",
-		"X-Client-Version":         deepSeekWebClientVersion,
-		"X-Client-Timezone-Offset": strconv.Itoa(deepSeekTimezoneOffsetSeconds()),
-	}
+	headers := deepSeekAPIBaseHeaders(origin)
 	for k, v := range extra {
 		headers[k] = v
 	}
@@ -208,17 +218,21 @@ func deepSeekBrowserHeaders(origin string, extra map[string]string) map[string]s
 // deepSeekPlainHeaders is the set this provider sent before stealth mode
 // existed, kept for the `stealth: false` path so opting out is a real
 // comparison rather than a different flavour of the same thing.
+//
+// The names are lower-case because the ordered writer matches them against
+// the order list by name, and Go's own transport treats header names
+// case-insensitively.
 func deepSeekPlainHeaders(origin string, extra map[string]string) map[string]string {
 	headers := map[string]string{
-		"Accept":             "*/*",
-		"Accept-Language":    "en-US,en;q=0.9",
-		"Origin":             origin,
-		"Referer":            origin + "/",
-		"User-Agent":         deepSeekWebUserAgent,
-		"X-Client-Bundle-Id": "com.deepseek.chat",
-		"X-Client-Locale":    "en-US",
-		"X-Client-Platform":  "web",
-		"X-Client-Version":   deepSeekWebClientVersion,
+		"accept":             "*/*",
+		"accept-language":    "en-US,en;q=0.9",
+		"origin":             origin,
+		"referer":            origin + "/",
+		"user-agent":         deepSeekWebUserAgent,
+		"x-client-bundle-id": "com.deepseek.chat",
+		"x-client-locale":    "en_US",
+		"x-client-platform":  "web",
+		"x-client-version":   deepSeekWebClientVersion,
 	}
 	for k, v := range extra {
 		headers[k] = v
@@ -234,13 +248,6 @@ func deepSeekPlainHeaders(origin string, extra map[string]string) map[string]str
 // dashboard calls valid and the executor is then refused for.
 func DeepSeekBrowserHeaders() map[string]string {
 	return deepSeekBrowserHeaders(deepSeekWebBase, nil)
-}
-
-// deepSeekTimezoneOffsetSeconds is the value `X-Client-Timezone-Offset`
-// carries: seconds west of UTC, which is what the browser sends (UTC+7 → -25200).
-func deepSeekTimezoneOffsetSeconds() int {
-	_, offsetSeconds := time.Now().Zone()
-	return -offsetSeconds
 }
 
 // deepSeekPause waits for a random part of the jitter window, or returns as
@@ -339,4 +346,3 @@ func deepSeekStealthLog(stealth deepSeekStealth, reused bool) {
 		"jitter_ms", stealth.jitter.Milliseconds(),
 	)
 }
-

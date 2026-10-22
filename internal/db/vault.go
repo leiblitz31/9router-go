@@ -58,6 +58,10 @@ var providerSpecificSecretFields = []string{
 	"openCodeGoAuthCookie",
 	"opencodeGoAuthCookie",
 	"authCookie",
+	// deepSeekCookie is the site's own session cookie for the DeepSeek Web
+	// provider. It is a credential: the WAF reads it, and it decides whether
+	// the site's document path answers the router or challenges it.
+	"deepSeekCookie",
 }
 
 // slotFields maps each sealed slot to the whitelisted data fields it holds.

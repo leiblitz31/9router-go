@@ -649,10 +649,27 @@ func TestDeepSeekMuteEnvelopeShapes(t *testing.T) {
 			wantStatus: http.StatusTooManyRequests,
 		},
 		{
-			name:       "rate limit code",
-			body:       `{"code":40002,"msg":"rate limited"}`,
-			wantKind:   deepSeekRateLimited,
+			name:       "the mute code",
+			body:       `{"code":50006,"msg":"user is muted"}`,
+			wantKind:   deepSeekMuted,
 			wantStatus: http.StatusTooManyRequests,
+		},
+		{
+			name:       "the ban code",
+			body:       `{"code":40012,"msg":"user is banned"}`,
+			wantKind:   deepSeekBanned,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "the address refusal code",
+			body:       `{"code":40029,"msg":"ip access restricted"}`,
+			wantKind:   deepSeekIPRestricted,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:    "a missing token is an auth failure, not an enforcement",
+			body:    `{"code":40002,"msg":"Missing Token"}`,
+			wantNil: true,
 		},
 		{
 			name:    "auth failure is not an enforcement",

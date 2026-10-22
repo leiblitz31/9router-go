@@ -2251,7 +2251,7 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "icon": "auto_awesome",
     "website": "https://chat.deepseek.com",
     "authType": "cookie",
-    "authHint": "Paste your userToken from chat.deepseek.com — DevTools → Application → Local Storage → userToken",
+    "authHint": "Paste your userToken from chat.deepseek.com — DevTools → Application → Local Storage → userToken — and the site's own cookie header from DevTools → Application → Cookies (the WAF reads it). The form can read both for you from a browser you are already signed in to, or open a throwaway browser for you to sign in to.",
     "noAuth": false,
     "serviceKinds": [
       "llm"

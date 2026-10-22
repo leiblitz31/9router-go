@@ -87,13 +87,18 @@ type chromiumRow struct {
 	expiresUnix int64
 }
 
-// readChromiumRows reads the Google cookies out of an open database.
-func readChromiumRows(ctx context.Context, db *sql.DB) ([]chromiumRow, error) {
+// readChromiumRows reads the cookies of one domain out of an open database.
+//
+// The domain is a LIKE pattern rather than an exact host, because Chromium
+// stores a cookie for `.example.com` and for `www.example.com` alike, and
+// the session cookie the caller is after is on one of them and not the
+// other.
+func readChromiumRows(ctx context.Context, db *sql.DB, domainPattern string) ([]chromiumRow, error) {
 	rows, err := db.QueryContext(ctx, `SELECT host_key, name, encrypted_value, value, COALESCE(has_expires, 0), COALESCE(expires_utc, 0)
-		FROM cookies WHERE host_key LIKE '%google%'`)
+		FROM cookies WHERE host_key LIKE ?`, "%"+domainPattern+"%")
 	if err != nil {
 		// An older table has no expiry columns.
-		rows, err = db.QueryContext(ctx, `SELECT host_key, name, encrypted_value, value FROM cookies WHERE host_key LIKE '%google%'`)
+		rows, err = db.QueryContext(ctx, `SELECT host_key, name, encrypted_value, value FROM cookies WHERE host_key LIKE ?`, "%"+domainPattern+"%")
 		if err != nil {
 			return nil, err
 		}

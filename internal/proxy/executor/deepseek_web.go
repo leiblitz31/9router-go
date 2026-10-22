@@ -57,7 +57,8 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 	}
 
 	options := resolveDeepSeekModelOptions(envelope.Model, envelope)
-	turn := newDeepSeekTurn(req.Client, deepSeekBaseURL(req.Config), stealth)
+	turn := newDeepSeekTurn(req.Client, deepSeekBaseURL(req.Config), stealth).
+		withBrowserFingerprint(stealth.cookie, stealth.deviceID)
 
 	// A turn that leaves in lockstep with its neighbours is not what a person
 	// typing produces, and an agent client dispatches several turns at once.
@@ -515,14 +516,26 @@ func deepSeekFailure(status int, message string) error {
 func deepSeekAuthFailure(err error, userToken string) error {
 	var apiErr *deepSeekAPIError
 	if errors.As(err, &apiErr) {
-		if apiErr.Code == deepSeekCodeAuthFailed {
+		switch apiErr.Code {
+		case deepSeekCodeAuthFailed, deepSeekCodeMissingToken:
+			// The credential is refused or absent. Drop the cached access
+			// token so the next attempt re-exchanges the credential instead
+			// of replaying a refused one.
 			deepSeekTokens.drop(userToken)
 			return deepSeekFailure(http.StatusUnauthorized, apiErr.Error())
-		}
-		if apiErr.Code == deepSeekCodeRateLimited {
+		case deepSeekCodeUserBanned:
+			// The account itself is refused. Cooling it down would only send
+			// the next turn to the same refusal, so this is reported as
+			// forbidden instead.
+			return deepSeekFailure(http.StatusForbidden, apiErr.Error())
+		case deepSeekCodeIPRestricted:
+			// The account is fine; this egress is not.
+			return deepSeekFailure(http.StatusForbidden, apiErr.Error())
+		case deepSeekCodeMuted:
 			return deepSeekFailure(http.StatusTooManyRequests, apiErr.Error())
+		default:
+			return deepSeekFailure(http.StatusBadGateway, apiErr.Error())
 		}
-		return deepSeekFailure(http.StatusBadGateway, apiErr.Error())
 	}
 	if isDeepSeekAuthError(err) {
 		deepSeekTokens.drop(userToken)

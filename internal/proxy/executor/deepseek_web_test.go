@@ -268,17 +268,19 @@ func TestForwardDeepSeekWebStreams(t *testing.T) {
 
 	// The browser fingerprint is what this provider is judged on; a regression
 	// here is a 4xx from the real site, not a test failure.
+	//
+	// The set is the one a CHAT call carries. The site's own client issues
+	// the chat calls below the interceptor that adds the `x-client-*` block,
+	// so a chat call that carried the block would be a call no browser made.
 	completionHeaders := upstream.headers[deepSeekCompletionPath]
 	for header, want := range map[string]string{
-		"X-Client-Bundle-Id": "com.deepseek.chat",
-		"X-Client-Version":   deepSeekWebClientVersion,
-		"X-Client-Platform":  "web",
-		"Origin":             server.URL,
-		"Authorization":      "Bearer access-token-1",
-		"Sec-Fetch-Mode":     "cors",
-		"Sec-Ch-Ua-Platform": `"Windows"`,
-		"X-Hif-Leim":         "attestation-leim-value",
-		"X-Hif-Dliq":         "attestation-dliq-value",
+		"Origin":         server.URL,
+		"Authorization":  "Bearer access-token-1",
+		"Sec-Fetch-Mode": "cors",
+		"X-Hif-Leim":     "attestation-leim-value",
+		"X-Hif-Dliq":     "attestation-dliq-value",
+		"Content-Type":   "application/json",
+		"Priority":       "u=1, i",
 	} {
 		if got := completionHeaders.Get(header); got != want {
 			t.Errorf("completion %s = %q, want %q", header, got, want)
@@ -287,8 +289,17 @@ func TestForwardDeepSeekWebStreams(t *testing.T) {
 	if ua := completionHeaders.Get("User-Agent"); ua != deepSeekWebUserAgent {
 		t.Errorf("completion User-Agent = %q, want the declared build %q", ua, deepSeekWebUserAgent)
 	}
-	if got := completionHeaders.Get("Cookie"); !strings.Contains(got, "HWWAFSESID=") {
-		t.Errorf("completion Cookie = %q, want the synthetic anti-bot cookie", got)
+	// The client block belongs to the settings calls, not to the chat ones.
+	for _, header := range []string{"X-Client-Bundle-Id", "X-Client-Version", "X-Client-Platform", "X-Client-Locale"} {
+		if got := completionHeaders.Get(header); got != "" {
+			t.Errorf("completion %s = %q, want it absent — the chat calls carry no client block", header, got)
+		}
+	}
+	// The client hints belong to the telemetry call, not to the chat ones.
+	for _, header := range []string{"Sec-Ch-Ua", "Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Platform"} {
+		if got := completionHeaders.Get(header); got != "" {
+			t.Errorf("completion %s = %q, want it absent — no browser sends client hints on an API call", header, got)
+		}
 	}
 
 	body := rec.Body.String()

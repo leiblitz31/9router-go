@@ -66,6 +66,18 @@ var macSafeStorageServices = map[string]string{
 // The database is copied first, because a browser writes to it while it runs
 // and a live read can see a half-written page.
 func Read(ctx context.Context, dbPath string) (*Result, error) {
+	return ReadDomain(ctx, dbPath, "google")
+}
+
+// ReadDomain reads a browser's cookie database and answers with the cookies
+// of one domain in it.
+//
+// The domain matters because a browser holds the sessions of every site the
+// operator uses, and only one of them is the credential the caller is
+// after. Reading the whole jar and picking afterwards would put every
+// session in the process's memory, which is more exposure than the task
+// needs.
+func ReadDomain(ctx context.Context, dbPath, domain string) (*Result, error) {
 	tmpDir, err := os.MkdirTemp("", "9router-cookies-")
 	if err != nil {
 		return nil, fmt.Errorf("browsercookies.Read: make a work directory: %w", err)
@@ -90,12 +102,12 @@ func Read(ctx context.Context, dbPath string) (*Result, error) {
 	}
 	defer func() { _ = db.Close() }()
 
-	rows, err := readChromiumRows(ctx, db)
+	rows, err := readChromiumRows(ctx, db, domain)
 	if err != nil {
 		return nil, fmt.Errorf("browsercookies.Read: read the rows: %w", err)
 	}
 	if len(rows) == 0 {
-		return nil, fmt.Errorf("%w: no Google cookies in %s", ErrNoDatabase, dbPath)
+		return nil, fmt.Errorf("%w: no %s cookies in %s", ErrNoDatabase, domain, dbPath)
 	}
 
 	key256, key128, keyFound := detectBestKey(ctx, rows, dbPath)
@@ -124,15 +136,46 @@ func Read(ctx context.Context, dbPath string) (*Result, error) {
 			ExpiresAt: row.expiresUnix,
 		})
 	}
-	result.Header = buildHeader(result.Cookies)
+	result.Header = buildDomainHeader(result.Cookies, domain)
 	result.Expired = ExpiringSessionCookies(result, 7*24*time.Hour)
 	if result.Header == "" && result.Failed > 0 {
-		return result, fmt.Errorf("%w: %d of the %d Google cookies in %s are sealed and the key that "+
+		return result, fmt.Errorf("%w: %d of the %d %s cookies in %s are sealed and the key that "+
 			"opens them could not be read — the browser's keyring is locked or is not installed, or the "+
 			"browser uses App-Bound encryption; sign in through a throwaway browser instead",
-			ErrNoKey, result.Failed, result.Failed+result.Decrypted+result.Plain, dbPath)
+			ErrNoKey, result.Failed, result.Failed+result.Decrypted+result.Plain, domain, dbPath)
 	}
 	return result, nil
+}
+
+// buildDomainHeader renders the session cookies of one domain as a Cookie
+// header.
+//
+// Each site names its own session cookies, and a profile holds the cookies
+// of every site the operator uses. Reading a site's cookie jar and handing
+// every cookie in it to the router would put other sites' credentials in
+// the process, so only the names the site itself uses are taken.
+func buildDomainHeader(cookies []Cookie, domain string) string {
+	switch domain {
+	case "google":
+		return buildGoogleHeader(cookies)
+	case "deepseek":
+		return buildHeader(cookies, deepSeekSessionCookieSet, deepSeekSessionCookieNames)
+	default:
+		// An unknown site gets every cookie that was read: the caller asked
+		// for that domain's cookies and nothing else was read.
+		allowed := make(map[string]bool, len(cookies))
+		order := make([]string, 0, len(cookies))
+		for _, cookie := range cookies {
+			if cookie.Value == "" {
+				continue
+			}
+			if !allowed[cookie.Name] {
+				allowed[cookie.Name] = true
+				order = append(order, cookie.Name)
+			}
+		}
+		return buildHeader(cookies, allowed, order)
+	}
 }
 
 // chromiumEpochOffsetSec is the difference between the Chromium epoch

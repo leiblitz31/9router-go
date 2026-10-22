@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	json "encoding/json/v2"
+
+	"9router/proxy/internal/proxy/executor"
 )
 
 // deepSeekProbeBody builds the users/current envelope the probe reads. The web
@@ -152,6 +154,11 @@ func TestValidateDeepSeekWeb(t *testing.T) {
 // sends. The credential is judged against those headers, so a probe that sent a
 // generic Authorization header would be testing something the real site never
 // sees.
+//
+// The set is the one a CHAT call carries — the token exchange is a chat call,
+// and the site issues the chat calls below the interceptor that adds the
+// `x-client-*` block. A probe that carried the block would be judging the
+// credential under headers the real turn never sends.
 func TestValidateDeepSeekWebSendsBrowserFingerprint(t *testing.T) {
 	calls := withProbeStub(t, func(_ int, _ capturedProbe) (int, []byte, error) {
 		return http.StatusOK, deepSeekProbeBody("access-token"), nil
@@ -169,20 +176,45 @@ func TestValidateDeepSeekWebSendsBrowserFingerprint(t *testing.T) {
 	if got := probe.headers.Get("Authorization"); got != "Bearer user-token-1" {
 		t.Errorf("Authorization = %q, want the Bearer userToken", got)
 	}
-	// The probe must send the executor's own fingerprint, including the
-	// client-attestation header family: a probe judged against a different
-	// header set says nothing about whether the real turn will be accepted.
 	for header, want := range map[string]string{
-		"X-Client-Bundle-Id": "com.deepseek.chat",
-		"X-Client-Version":   "2.3.0",
-		"X-Client-Platform":  "web",
-		"Origin":             "https://chat.deepseek.com",
-		"Sec-Fetch-Mode":     "cors",
-		"Sec-Ch-Ua-Platform": `"Windows"`,
+		"Sec-Fetch-Mode": "cors",
+		"Sec-Fetch-Site": "same-origin",
+		"Referer":        "https://chat.deepseek.com/sign_in",
+		"User-Agent":     executor.DeepSeekWebUserAgent(),
 	} {
 		if got := probe.headers.Get(header); got != want {
 			t.Errorf("probe %s = %q, want %q", header, got, want)
 		}
+	}
+	// The client block and the client hints belong to the settings and
+	// telemetry calls, not to the chat ones.
+	for _, header := range []string{"X-Client-Bundle-Id", "X-Client-Version", "X-Client-Platform", "Sec-Ch-Ua-Platform"} {
+		if got := probe.headers.Get(header); got != "" {
+			t.Errorf("probe %s = %q, want it absent — no browser sends it on a chat call", header, got)
+		}
+	}
+	// The token exchange is a GET, and the site leaves the origin off its GETs.
+	if got := probe.headers.Get("Origin"); got != "" {
+		t.Errorf("probe Origin = %q, want it absent — the token exchange is a GET", got)
+	}
+}
+
+// The site's own cookie travels with the probe when there is one: the WAF
+// reads it, and a probe that omits it judges the credential under different
+// conditions than the turn will meet.
+func TestValidateDeepSeekWebSendsTheConfiguredCookie(t *testing.T) {
+	calls := withProbeStub(t, func(_ int, _ capturedProbe) (int, []byte, error) {
+		return http.StatusOK, deepSeekProbeBody("access-token"), nil
+	})
+
+	postValidate(t, `{"provider":"deepseek-web","apiKey":"user-token-1",`+
+		`"providerSpecificData":{"deepSeekCookie":"ds_session_id=abc; aws-waf-token=def"}}`)
+
+	if len(*calls) != 1 {
+		t.Fatalf("expected one probe, got %d", len(*calls))
+	}
+	if got := (*calls)[0].headers.Get("Cookie"); !strings.Contains(got, "aws-waf-token=def") {
+		t.Errorf("probe Cookie = %q, want the site's own cookie", got)
 	}
 }
 

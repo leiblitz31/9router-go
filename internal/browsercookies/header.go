@@ -37,19 +37,43 @@ var sessionCookieSet = func() map[string]bool {
 	return m
 }()
 
+// deepSeekSessionCookieNames are the DeepSeek cookies that carry the site's
+// own session, in the canonical order.
+//
+// `aws-waf-token` is the one the WAF reads: it is the answer to the
+// challenge the WAF serves to a client it does not recognise, and a request
+// without it is answered with a challenge rather than with the site. The
+// other two are the site's own session cookies.
+var deepSeekSessionCookieNames = []string{
+	"aws-waf-token",
+	"ds_session_id",
+	"smidV2",
+}
+
+// deepSeekSessionCookieSet is the same list as a set, for the lookups.
+var deepSeekSessionCookieSet = func() map[string]bool {
+	m := make(map[string]bool, len(deepSeekSessionCookieNames))
+	for _, name := range deepSeekSessionCookieNames {
+		m[name] = true
+	}
+	return m
+}()
+
 // buildHeader renders the session cookies as a Cookie header.
 //
 // A cookie is taken from the most specific host that has it, and among
 // equals the one that lasts longest. A cookie held for `.google.com` is
 // sent to every Google host; one held for `accounts.google.com` is not, and
 // sending it there would be sending a cookie the site never set for it.
-func buildHeader(cookies []Cookie) string {
+//
+// The allow-list is the site's own: a profile holds the cookies of every
+// site the operator uses, and only the ones the site named are the session.
+func buildHeader(cookies []Cookie, allowed map[string]bool, order []string) string {
 	hostScore := func(host string) int {
-		switch host {
-		case ".google.com", "google.com":
+		if strings.HasPrefix(host, ".") {
 			return 3
 		}
-		if strings.HasSuffix(host, ".google.com") {
+		if strings.Contains(host, ".") {
 			return 2
 		}
 		return 1
@@ -58,7 +82,7 @@ func buildHeader(cookies []Cookie) string {
 	bestScore := make(map[string]int, len(cookies))
 	bestExpiry := make(map[string]int64, len(cookies))
 	for _, cookie := range cookies {
-		if !sessionCookieSet[cookie.Name] || cookie.Value == "" {
+		if !allowed[cookie.Name] || cookie.Value == "" {
 			continue
 		}
 		score := hostScore(cookie.Host)
@@ -71,12 +95,17 @@ func buildHeader(cookies []Cookie) string {
 	}
 
 	var parts []string
-	for _, name := range sessionCookieNames {
+	for _, name := range order {
 		if value, ok := best[name]; ok {
 			parts = append(parts, name+"="+value)
 		}
 	}
 	return strings.Join(parts, "; ")
+}
+
+// buildGoogleHeader renders the Google session cookies as a Cookie header.
+func buildGoogleHeader(cookies []Cookie) string {
+	return buildHeader(cookies, sessionCookieSet, sessionCookieNames)
 }
 
 // ioCopy copies a stream.

@@ -43,6 +43,13 @@ const importChromeTimeout = 60 * time.Second
 // outbound calls in this package are.
 var browserCookiesRead = browsercookies.Read
 
+// browserCookiesReadDomain reads one domain's cookies out of a browser's
+// cookie database.
+//
+// It is a variable so a test can stand in for the read, the way the other
+// outbound calls in this package are.
+var browserCookiesReadDomain = browsercookies.ReadDomain
+
 // browserCookiesFindDB locates a browser's cookie database.
 //
 // It is a variable so a test can stand in for the search, the way the other

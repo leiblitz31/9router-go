@@ -36,7 +36,11 @@ func deepSeekWebHeaders() map[string]string {
 // validateDeepSeekWeb checks a pasted userToken against /api/v0/users/current,
 // the one call that answers whether the credential can be exchanged for a
 // working session.
-func validateDeepSeekWeb(ctx context.Context, apiKey string) validateOutcome {
+//
+// The site's own session cookie is sent along when there is one: the WAF
+// reads it, and a probe that omits it judges the credential under different
+// conditions than the turn will meet.
+func validateDeepSeekWeb(ctx context.Context, apiKey string, providerData map[string]any) validateOutcome {
 	token := executor.DeepSeekUserToken(apiKey)
 	if token == "" {
 		return validateOutcome{supported: true,
@@ -44,7 +48,10 @@ func validateDeepSeekWeb(ctx context.Context, apiKey string) validateOutcome {
 	}
 
 	headers := deepSeekWebHeaders()
-	headers["Authorization"] = "Bearer " + token
+	headers["authorization"] = "Bearer " + token
+	if cookie, ok := providerData["deepSeekCookie"].(string); ok && strings.TrimSpace(cookie) != "" {
+		headers["cookie"] = strings.TrimSpace(cookie)
+	}
 
 	status, body, err := validateProbeDo(ctx, http.MethodGet, deepSeekUsersCurrentURL, headers, nil)
 	if err != nil {

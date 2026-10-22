@@ -222,7 +222,7 @@ func readSession(ctx context.Context, port int) (*Result, bool) {
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	userAgent, webSocketURL := browserEndpoint(callCtx, port)
+	userAgent, webSocketURL := browserEndpoint(callCtx, port, "https://gemini.google.com/")
 	if webSocketURL == "" {
 		return nil, false
 	}
@@ -231,14 +231,14 @@ func readSession(ctx context.Context, port int) (*Result, bool) {
 	if err != nil {
 		return nil, false
 	}
+	// cdpCall already unwraps the protocol's own `result` envelope, so the
+	// cookie list is at the top level of what comes back.
 	var payload struct {
-		Result struct {
-			Cookies []struct {
-				Name   string `json:"name"`
-				Value  string `json:"value"`
-				Domain string `json:"domain"`
-			} `json:"cookies"`
-		} `json:"result"`
+		Cookies []struct {
+			Name   string `json:"name"`
+			Value  string `json:"value"`
+			Domain string `json:"domain"`
+		} `json:"cookies"`
 	}
 	if err := json.Unmarshal(reply, &payload); err != nil {
 		return nil, false
@@ -246,7 +246,7 @@ func readSession(ctx context.Context, port int) (*Result, bool) {
 
 	seen := map[string]string{}
 	parts := make([]string, 0, 16)
-	for _, cookie := range payload.Result.Cookies {
+	for _, cookie := range payload.Cookies {
 		if !strings.HasSuffix(cookie.Domain, "google.com") || cookie.Name == "" || cookie.Value == "" {
 			continue
 		}
@@ -266,7 +266,11 @@ func readSession(ctx context.Context, port int) (*Result, bool) {
 //
 // The browser may have a page open on the site already or not, so the page
 // list is consulted first and the browser's own endpoint is the fallback.
-func browserEndpoint(ctx context.Context, port int) (userAgent, webSocketURL string) {
+//
+// sitePrefix narrows the page list to a page on the site the caller is
+// signing in to: a page on another site cannot answer for it, and the
+// browser endpoint cannot evaluate a script in a page's context at all.
+func browserEndpoint(ctx context.Context, port int, sitePrefix string) (userAgent, webSocketURL string) {
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/json/version", nil)
@@ -304,7 +308,7 @@ func browserEndpoint(ctx context.Context, port int) (userAgent, webSocketURL str
 		return version.UserAgent, version.WebSocketDebuggerURL
 	}
 	for _, target := range targets {
-		if target.Type != "page" || !strings.HasPrefix(target.URL, "https://gemini.google.com/") {
+		if target.Type != "page" || !strings.HasPrefix(target.URL, sitePrefix) {
 			continue
 		}
 		if strings.Contains(target.URL, "accounts.google.com") {
