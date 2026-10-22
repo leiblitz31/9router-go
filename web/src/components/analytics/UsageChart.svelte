@@ -139,6 +139,46 @@
 
   // One area path per series, bounded by its own cumulative band, so the areas
   // stack without overlapping.
+  // Arrow keys walk the same points the mouse reveals. A tooltip reachable only
+  // by hovering is unreadable to anyone driving the page from the keyboard, and
+  // the table below is the non-visual equivalent of the drawn series.
+  //
+  // One tab stop, not one per point: the keydown fires on the focused element,
+  // so a per-point binding always reads its own index and ArrowRight moves the
+  // tooltip without moving focus — the second press computes the same index
+  // again. Focus follows the arrow instead, and the point that is focused is
+  // the only one with tabindex 0.
+  let focusedPoint = $state(0)
+
+  function handlePointKey(event: KeyboardEvent) {
+    const index = focusedPoint
+    let next = index
+    if (event.key === 'ArrowRight') next = index + 1
+    else if (event.key === 'ArrowLeft') next = index - 1
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = stack.length - 1
+    else if (event.key === 'Escape') {
+      event.preventDefault()
+      hovered = null
+      return
+    } else return
+
+    event.preventDefault()
+    next = Math.max(0, Math.min(stack.length - 1, next))
+    focusedPoint = next
+    hovered = next
+    // Focus moves with the tooltip. The tabindex re-render lands on the next
+    // microtask, so the lookup is deferred rather than done inline.
+    const el = event.currentTarget as SVGElement
+    const svg = el.ownerSVGElement
+    svg?.querySelectorAll<SVGRectElement>('rect')?.[next]?.focus()
+  }
+
+  // The table lives inside <details>, which hides its rows visually but still
+  // builds them. An all-time window is thousands of buckets, so one <tr> and
+  // three cells per bucket is a cost a 1-vCPU box pays while the table is shut.
+  let tableOpen = $state(false)
+
   function areaPath(band: number): string {
     if (stack.length === 0) return ''
     const top = stack.map((s, i) => `${xAt(i)},${yAt(s.cumulative[band] || 0)}`).join(' L ')
@@ -171,7 +211,8 @@
         {/each}
         {#each stack as _point, i}
           <rect
-            role="presentation"
+            tabindex={i === focusedPoint ? 0 : -1}
+            aria-label="{stack[i].bucket.label}: {fmtTokens(stack[i].bucket.tokens)} tokens"
             x={xAt(i) - step / 2}
             y="0"
             width={step}
@@ -179,6 +220,12 @@
             fill="transparent"
             onmouseenter={() => (hovered = i)}
             onmouseleave={() => (hovered = null)}
+            onfocus={() => {
+              focusedPoint = i
+              hovered = i
+            }}
+            onblur={() => (hovered = null)}
+            onkeydown={handlePointKey}
           />
         {/each}
         {#if hovered !== null && stack[hovered]}
@@ -195,7 +242,13 @@
         {/if}
       </svg>
       {#if hovered !== null && stack[hovered]}
-        <div class="mt-2 rounded-[10px] border border-border bg-surface-2 px-3 py-2 text-[11px] text-text-main">
+        <!-- role=status so a screen reader hears the point the keyboard just
+             moved to; the same node is the pointer tooltip. -->
+        <div
+          role="status"
+          aria-live="polite"
+          class="mt-2 rounded-[10px] border border-border bg-surface-2 px-3 py-2 text-[11px] text-text-main"
+        >
           <div class="font-semibold text-text-muted">{stack[hovered].bucket.label}</div>
           <div class="mt-1 flex items-center justify-between gap-3">
             <span>Tokens</span>
@@ -235,5 +288,36 @@
       <span>{buckets[0]?.label}</span>
       <span>{buckets[buckets.length - 1]?.label}</span>
     </div>
+
+    <!-- The drawn areas carry no text a screen reader can read and the tooltip
+         only opens under a pointer, so the same numbers are here as a table. -->
+    <details class="text-[11px] text-text-muted" bind:open={tableOpen}>
+      <summary class="cursor-pointer select-none">View table</summary>
+      {#if tableOpen}
+        <table class="mt-2 w-full border-collapse text-left" aria-label="Usage trend table">
+          <thead>
+            <tr class="border-b border-border-subtle">
+              <th scope="col" class="py-1 pr-2 font-medium">{hourly ? 'Hour' : 'Day'}</th>
+              <th scope="col" class="py-1 pr-2 text-right font-medium">Tokens</th>
+              <th scope="col" class="py-1 text-right font-medium">Est. cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- The label is not a unique key: a daily bucket is labelled "Jan 2",
+                 so a period long enough to cross a year boundary repeats it and
+                 Svelte throws each_key_duplicate, which takes the usage page
+                 down with it. The index is the key here — the same choice the
+                 plotted points above make — and it is unique by construction. -->
+            {#each stack as point, i (i)}
+              <tr class="border-b border-border-subtle/60">
+                <th scope="row" class="py-1 pr-2 font-normal text-text-main">{point.bucket.label}</th>
+                <td class="py-1 pr-2 text-right font-mono">{fmtTokens(point.bucket.tokens)}</td>
+                <td class="py-1 text-right font-mono">~{costIn(point.bucket.cost ?? 0)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </details>
   {/if}
 </div>
