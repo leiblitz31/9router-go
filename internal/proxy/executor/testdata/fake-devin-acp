@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Fake `devin acp`: speaks just enough ACP for the executor test.
+
+Contract the test relies on:
+  * initialize        -> result
+  * session/new       -> result{sessionId}; refuses a cwd that is not an
+                         absolute existing directory
+  * session/prompt    -> session/request_permission first, and only when the
+                         client picks the allow option does it stream two
+                         agent_message_chunks and answer the prompt
+Anything else is an error, so a protocol regression fails the test instead of
+hanging it.
+"""
+import json
+import os
+import sys
+
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    return json.loads(line)
+
+
+def chunks(text):
+    for part in (text[: len(text) // 2], text[len(text) // 2 :]):
+        if part:
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": part}}},
+                }
+            )
+
+
+while True:
+    msg = read()
+    if msg is None:
+        break
+    method = msg.get("method")
+    mid = msg.get("id")
+
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": "0.3", "agentCapabilities": {}}})
+
+    elif method == "session/new":
+        cwd = (msg.get("params") or {}).get("cwd") or ""
+        if not (os.path.isabs(cwd) and os.path.isdir(cwd)):
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "bad cwd: %r" % cwd}})
+            break
+        model = (msg.get("params") or {}).get("model") or ""
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "sess-test", "model": model}})
+
+    elif method == "session/prompt":
+        prompt = ((msg.get("params") or {}).get("prompt") or [{}])[0].get("text", "")
+        if os.environ.get("FAKE_DEVIN_MODE") == "auth_required":
+            # Exactly what devin 3000.11.92 does unauthenticated: a stop
+            # notification with cause auth_required, then a JSON-RPC error.
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "_cognition.ai/agent_stopped",
+                    "params": {"cause": "auth_required", "errorMessage": "Please authenticate to continue."},
+                }
+            )
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "Please log in to use Devin."}})
+            break
+        # Prove the flattened prompt reached the agent, then ask permission.
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 900,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "sess-test",
+                    "options": [
+                        {"optionId": "opt-reject", "kind": "reject_once", "name": "Reject"},
+                        {"optionId": "opt-allow", "kind": "allow_once", "name": "Allow"},
+                    ],
+                },
+            }
+        )
+        reply = read()
+        if reply is None:
+            break
+        outcome = ((reply.get("result") or {}).get("outcome") or {})
+        if outcome.get("optionId") != "opt-allow":
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32001, "message": "permission not granted: %r" % outcome}})
+            break
+        chunks("echo[%d]: Hello, " % len(prompt))
+        chunks("world")
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        break
+
+    else:
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "unexpected method %r" % method}})
+        break

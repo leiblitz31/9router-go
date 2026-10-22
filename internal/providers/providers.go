@@ -1118,9 +1118,16 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 	},
 	"devin-cli": {
+		// ACP over stdio, not an HTTP endpoint: the pseudo-URL is what the
+		// registry publishes so the dashboard and the models catalogue render
+		// the card. NoAuth is what lets the router synthesise the virtual
+		// "noauth" connection — without it every request is refused with
+		// "no active connections for provider: devin-cli". ForwardDevinCLI
+		// spawns the local CLI and never dials this string.
 		BaseURL:    "devin://acp/stdio",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+		NoAuth:     true,
 	},
 	"kilo-gateway": {
 		BaseURL:    "https://api.kilo.ai/api/gateway/chat/completions",

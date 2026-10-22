@@ -148,7 +148,62 @@ func (r *dohResolver) resolveDialTarget(ctx context.Context, host, addr string) 
 	if err != nil {
 		return "", err
 	}
+	rememberDoHResolution(host, ip, "")
 	return net.JoinHostPort(ip, port), nil
+}
+
+// dohResolution records where a host was last sent: the address that was
+// dialed and the resolver that produced it. Without it a TLS failure on a DoH
+// path reports only the hostname, so "certificate is not valid for any names"
+// says nothing about whether the name was resolved correctly — the layer the
+// operator has to check first.
+type dohResolution struct {
+	ip       string
+	resolver string
+}
+
+const dohResolutionMaxHosts = 1024
+
+var (
+	dohResolutionMu sync.RWMutex
+	dohResolutions  = make(map[string]dohResolution)
+)
+
+// rememberDoHResolution fills in whichever half of host's last resolution the
+// caller knows: the resolver before the dial rotates a pick, the address at
+// dial time.
+func rememberDoHResolution(host, ip, resolver string) {
+	if host == "" {
+		return
+	}
+	dohResolutionMu.Lock()
+	defer dohResolutionMu.Unlock()
+	if len(dohResolutions) >= dohResolutionMaxHosts {
+		// ponytail: bounded map, drop everything rather than evict; this is
+		// diagnostic state only. Swap for an LRU if it ever needs history.
+		dohResolutions = make(map[string]dohResolution)
+	}
+	entry := dohResolutions[host]
+	if ip != "" {
+		entry.ip = ip
+	}
+	if resolver != "" {
+		entry.resolver = resolver
+	}
+	dohResolutions[host] = entry
+}
+
+// DoHResolutionFor reports the last DoH address and resolver this process
+// used for host, so an error raised after the dial can name them. ok is false
+// when host was never resolved through DoH (a literal IP, or a non-DoH path).
+func DoHResolutionFor(host string) (ip, resolver string, ok bool) {
+	dohResolutionMu.RLock()
+	defer dohResolutionMu.RUnlock()
+	entry, found := dohResolutions[host]
+	if !found || (entry.ip == "" && entry.resolver == "") {
+		return "", "", false
+	}
+	return entry.ip, entry.resolver, true
 }
 
 // ProbeDoHResolvers resolves hostname through the given resolver specs and
@@ -259,12 +314,19 @@ type dohResponse struct {
 // records it carries plus the smallest TTL among them. Private, loopback or
 // otherwise reserved answers are dropped: a DoH answer pointing homewards is
 // a rebinding attempt, not a resolution (see IsPrivateIP).
+//
+// A sinkholed or legally blocked name answers with nothing but reserved
+// addresses (cloudflare and nextdns return 0.0.0.1 for domains under a block
+// order), so the error names those addresses: "no public A records" alone
+// reads like a broken resolver and sends the operator hunting in the wrong
+// layer. The answer is never dialed either way.
 func parseDoHResponse(body []byte) ([]string, time.Duration, error) {
 	var resp dohResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, 0, fmt.Errorf("proxy.dohResolver: decode dns-json: %w", err)
 	}
 	var ips []string
+	var reserved []string
 	ttl := dohCacheMaxTTL
 	for _, a := range resp.Answer {
 		ip := net.ParseIP(a.Data)
@@ -272,6 +334,7 @@ func parseDoHResponse(body []byte) ([]string, time.Duration, error) {
 			continue // CNAME targets and AAAA records are not A dial targets.
 		}
 		if IsPrivateIP(ip) {
+			reserved = append(reserved, ip.String())
 			continue
 		}
 		ips = append(ips, ip.String())
@@ -280,6 +343,10 @@ func parseDoHResponse(body []byte) ([]string, time.Duration, error) {
 		}
 	}
 	if len(ips) == 0 {
+		if len(reserved) > 0 {
+			return nil, 0, fmt.Errorf("proxy.dohResolver: resolver answered only reserved addresses (%s): the name is sinkholed or blocked at this resolver",
+				strings.Join(reserved, ", "))
+		}
 		return nil, 0, fmt.Errorf("proxy.dohResolver: no public A records in answer")
 	}
 	return ips, ttl, nil
@@ -334,5 +401,10 @@ func (r *dohResolver) queryEndpoint(ctx context.Context, endpoint, host string) 
 	if err != nil {
 		return nil, 0, fmt.Errorf("proxy.dohResolver: read answer: %w", err)
 	}
-	return parseDoHResponse(body)
+	ips, ttl, err := parseDoHResponse(body)
+	if err != nil {
+		return nil, 0, err
+	}
+	rememberDoHResolution(host, "", endpoint)
+	return ips, ttl, nil
 }

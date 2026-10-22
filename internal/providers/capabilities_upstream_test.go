@@ -289,3 +289,24 @@ func TestOpencodeGoGlm53FlashFreeUsesReasoningEffort(t *testing.T) {
 			global.ThinkingFormat, "zai")
 	}
 }
+
+// devin-cli is reached by spawning the local CLI, not by dialling its baseUrl,
+// but the router still refuses the provider with "no active connections" unless
+// the registry marks it NoAuth: that flag is what synthesises the virtual
+// connection. A registry edit that drops it breaks every devin-cli request
+// without touching a line of executor code, so it is pinned here.
+func TestDevinCLIRegistry_IsNoAuthSoRouterInjectsConnection(t *testing.T) {
+	cfg, ok := KnownProviders["devin-cli"]
+	if !ok {
+		t.Fatalf("devin-cli missing from KnownProviders")
+	}
+	if !cfg.NoAuth {
+		t.Fatalf("devin-cli must set NoAuth: routing rejects it as \"no active connections\" otherwise")
+	}
+	if !IsNoAuthProvider("dv") {
+		t.Fatalf("the dv alias must resolve to the noAuth devin-cli provider")
+	}
+	if cfg.BaseURL != "devin://acp/stdio" {
+		t.Fatalf("baseUrl = %q, want the ACP marker devin://acp/stdio", cfg.BaseURL)
+	}
+}

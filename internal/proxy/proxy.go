@@ -240,6 +240,35 @@ func proxyURLFor(client *http.Client) string {
 	return u.String()
 }
 
+// resolutionNote reports the DoH address and resolver this process last used
+// for the host of rawURL, or ("", "") when the request never went through a
+// DoH pool. It answers "where did this request actually go" for errors that
+// are raised after the dial, where only the hostname is otherwise available.
+func resolutionNote(rawURL string) (resolved, resolver string) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return "", ""
+	}
+	ip, from, ok := DoHResolutionFor(u.Hostname())
+	if !ok {
+		return "", ""
+	}
+	return ip, from
+}
+
+// resolutionSummary renders resolutionNote's pair for an error message, and
+// still says something when the path had no DoH resolution to report.
+func resolutionSummary(resolved, resolver string) string {
+	switch {
+	case resolved != "" && resolver != "":
+		return "resolved to " + resolved + " via " + resolver
+	case resolved != "":
+		return "resolved to " + resolved
+	default:
+		return "no DoH resolution recorded"
+	}
+}
+
 // isCertificateFailure reports whether err is a TLS chain verification
 // failure — the class upstream retries with rejectUnauthorized:false. The
 // stdlib wraps the cause in a *url.Error, so errors.As unwraps to the typed
@@ -337,9 +366,16 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 		if strictTLSRequested() {
 			break
 		}
-		log.Warn("proxy", "TLS verification failed, retrying without certificate verification", "url", url, "error", err)
+		// Not silent: name the address and resolver this request was actually
+		// sent to. A certificate that is valid for no name at all usually means
+		// the dial landed somewhere other than the host that was asked for
+		// (sinkhole, block page, middlebox), and the hostname alone cannot
+		// distinguish that from a genuine re-signing proxy.
+		resolved, resolver := resolutionNote(url)
+		log.Warn("proxy", "TLS verification failed, retrying without certificate verification",
+			"url", url, "resolved", resolved, "resolver", resolver, "error", err)
 		if resp, err = replayInsecureTLS(ctx, proxyURLFor(client), method, url, headers, body); err != nil {
-			return nil, fmt.Errorf("upstream request after insecure TLS retry: %w", err)
+			return nil, fmt.Errorf("upstream request after insecure TLS retry (%s): %w", resolutionSummary(resolved, resolver), err)
 		}
 	case isProxyFailure(err, resp):
 		if resp != nil {

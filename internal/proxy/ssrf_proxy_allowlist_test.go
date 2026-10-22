@@ -254,13 +254,11 @@ func TestProxyIdentityIsUnchanged(t *testing.T) {
 		if !proxiesViaAssignment(&http.Client{Transport: tr}) {
 			t.Error("a transport with an explicit proxy pool URL must read as assigned")
 		}
-		req := &http.Request{URL: &url.URL{Scheme: "https", Host: "upstream.invalid"}}
-		got, err := tr.Proxy(req)
-		if err != nil {
-			t.Fatalf("Proxy() = %v", err)
-		}
-		if got == nil || got.String() != "http://proxy.example:3128" {
-			t.Errorf("Proxy() = %v, want the configured pool URL", got)
+		// A transport built with an explicit proxy keeps tr.Proxy nil — the
+		// uTLS dialer tunnels manually and the registry records the egress.
+		// Read it the way the data plane does instead of calling the nil func.
+		if got := proxyURLFor(&http.Client{Transport: tr}); got != "http://proxy.example:3128" {
+			t.Errorf("proxyURLFor() = %q, want the configured pool URL", got)
 		}
 	})
 

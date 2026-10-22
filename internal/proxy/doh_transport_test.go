@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,11 +36,12 @@ func TestDoHEndpoint(t *testing.T) {
 
 func TestParseDoHResponse(t *testing.T) {
 	tests := []struct {
-		name    string
-		body    string
-		wantIPs []string
-		wantTTL time.Duration
-		wantErr bool
+		name        string
+		body        string
+		wantIPs     []string
+		wantTTL     time.Duration
+		wantErr     bool
+		wantErrText string
 	}{
 		{
 			name:    "two public A records keep the smallest TTL",
@@ -74,6 +76,12 @@ func TestParseDoHResponse(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:        "sinkholed answer names the reserved address",
+			body:        `{"Status":0,"Answer":[{"name":"www.codebuddy.ai","type":5,"TTL":60,"data":"www.codebuddy.ai.eo.dnse2.com."},{"name":"www.codebuddy.ai","type":1,"TTL":60,"data":"0.0.0.1"}]}`,
+			wantErr:     true,
+			wantErrText: "reserved addresses (0.0.0.1)",
+		},
+		{
 			name:    "malformed JSON is an error",
 			body:    `not json`,
 			wantErr: true,
@@ -86,6 +94,9 @@ func TestParseDoHResponse(t *testing.T) {
 				t.Fatalf("parseDoHResponse() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if tt.wantErr {
+				if tt.wantErrText != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErrText)) {
+					t.Fatalf("parseDoHResponse() error = %v, want it to mention %q", err, tt.wantErrText)
+				}
 				return
 			}
 			if len(ips) != len(tt.wantIPs) {
@@ -227,5 +238,35 @@ func TestNewSafeTransportWithDoH(t *testing.T) {
 	}
 	if got := lookupTransportProxy(tr).kind; got != proxyKindEnv {
 		t.Errorf("transport proxy kind = %v, want proxyKindEnv (ambient proxy tunneling)", got)
+	}
+}
+
+// A TLS failure on a DoH path must be able to name the address and resolver
+// the request was dialed to; without that the log line carries only a
+// hostname and the operator cannot tell a sinkhole from a re-signing proxy.
+func TestDoHResolutionNoteNamesAddressAndResolver(t *testing.T) {
+	const host = "note.example"
+	rememberDoHResolution(host, "203.0.113.9", "https://dns.google/resolve")
+
+	ip, resolver := resolutionNote("https://" + host + "/v2/chat/completions")
+	if ip != "203.0.113.9" {
+		t.Fatalf("resolutionNote() ip = %q, want 203.0.113.9", ip)
+	}
+	if !strings.Contains(resolver, "dns.google") {
+		t.Fatalf("resolutionNote() resolver = %q, want the answering endpoint", resolver)
+	}
+
+	summary := resolutionSummary(ip, resolver)
+	for _, want := range []string{"203.0.113.9", "dns.google"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("resolutionSummary() = %q, want it to mention %q", summary, want)
+		}
+	}
+
+	if ip, resolver := resolutionNote("https://never-resolved.example/"); ip != "" || resolver != "" {
+		t.Fatalf("resolutionNote() for an unresolved host = %q/%q, want empty", ip, resolver)
+	}
+	if got := resolutionSummary("", ""); got != "no DoH resolution recorded" {
+		t.Fatalf("resolutionSummary() with no note = %q", got)
 	}
 }

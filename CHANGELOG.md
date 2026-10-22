@@ -1,5 +1,75 @@
 # Changelog
 
+## [Unreleased]
+
+### devin-cli: ACP over stdio, not a dead HTTP forward
+
+- `devin-cli` was registered with the pseudo-URL `devin://acp/stdio` and wired to
+  `ForwardOpenAI`, which POSTs to that string and dies in dial: the card, the
+  35-model catalogue and the capability table all rendered, so nothing revealed
+  that the provider had never worked. `internal/proxy/executor/devin_cli.go` now
+  spawns `devin acp` and drives ACP (JSON-RPC 2.0 on stdin/stdout):
+  `initialize` → `session/new` → `session/prompt`, answering
+  `session/request_permission` with the first "allow" option, and re-emitting
+  `agent_message_chunk` notifications as OpenAI SSE.
+- The registry entry gains `NoAuth: true`. Without it the router refuses the
+  provider with `no active connections for provider: devin-cli`, because a
+  no-auth provider's virtual connection is only synthesised for a registry row
+  that carries the flag. A test pins it: dropping the flag breaks every request
+  without touching executor code.
+- An unauthenticated host is a real error now. `devin 3000.11.92` stops the turn
+  with `_cognition.ai/agent_stopped` and `cause: "auth_required"`, streaming
+  nothing; the upstream reference only fails on `cause == "error"`, so a
+  signed-out host served an empty 200 completion. Any cause outside
+  `end_turn`/`stop`/`completed`/`success` surfaces the CLI's own message, plus
+  the `devin auth login` hint when the cause is auth.
+- Workspace: `cwd` / `working_directory` / `workdir` / `workspace` /
+  `metadata.cwd` body fields and `<cwd>…</cwd>` prompt hints are honoured only
+  when they name an existing absolute directory, else the temp dir — the agent
+  is never spawned in a directory the gateway invented. `CLI_DEVIN_BIN`
+  overrides binary discovery, `DEVIN_PERMISSION_MODE` (default `bypass`) the
+  CLI's policy.
+- Skipped on purpose: the upstream's client-tools MCP bridge (a Node `.mjs` shim
+  that exposes the caller's `tools` to the agent). Tool schemas are flattened
+  into the prompt instead, so the agent answers but never calls caller tools.
+- Verified with the ACP stub in `testdata/fake-devin-acp` (handshake, permission
+  round-trip, chunk assembly, `stream:false`, missing binary, `auth_required`)
+  and live against `devin 3000.11.92`: handshake, session creation and prompt
+  submission succeed, and the auth wall surfaces as a 502 naming
+  `devin auth login`. A real answer needs a logged-in account, which this host
+  does not have.
+- The model catalogue carries the same 35 ids the dashboard block publishes
+  (`internal/providers/registry_models.go`); without an entry `/v1/models`
+  never listed the provider, so a client could not discover a working route.
+  A no-auth provider only appears in the connected view (`?connected=1`), which
+  is how `/v1/models` is meant to behave when no connection is bound.
+
+### DoH: name a sinkholed answer, and name where a TLS retry actually went
+
+- A DoH pool whose resolver sinkholes a name (cloudflare and nextdns answer
+  `0.0.0.1` for domains under a block order) used to report
+  `proxy.dohResolver: no public A records in answer`, which reads like a broken
+  resolver and sends the operator hunting in the DNS client instead of the
+  resolver's policy. `parseDoHResponse` now names the reserved addresses it
+  dropped: `resolver answered only reserved addresses (0.0.0.1): the name is
+  sinkholed or blocked at this resolver`. The answer was never dialed — the
+  reserved-address guard already refused it — so this is diagnosis, not a
+  behaviour change on the wire. Verified live: a `cloudflare`-only pool answers
+  `502 ... reserved addresses (0.0.0.1)`, the same provider answers 200 on a
+  `google` + adguard pool.
+- The insecure-TLS replay (the fallback for middleboxes that re-sign TLS) now
+  carries provenance: `dohResolver` records the address and endpoint behind the
+  last resolution per host, and both the warning and the propagated error say
+  `resolved to <ip> via <endpoint>`. A certificate valid for no name at all is
+  the signature of a dial that landed somewhere other than the hostname asked
+  for, and the hostname alone could not tell that apart from a re-signing proxy.
+  Pinned by `TestDoHResolutionNoteNamesAddressAndResolver`.
+- `TestProxyIdentityIsUnchanged` called `tr.Proxy(req)` on a transport built
+  with an explicit proxy, whose `Proxy` field is deliberately nil (the uTLS
+  dialer tunnels manually) — it panicked, taking the whole `internal/proxy`
+  package down with it. It asserts through `proxyURLFor` now, the read the data
+  plane itself performs.
+
 ## [v1.9.14] - 2026-10-20
 
 ### Fix Settings redirect to Endpoint & Key in mobile and unauthenticated sessions
