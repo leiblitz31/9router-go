@@ -63,6 +63,7 @@ web-build:
 ## build — compile binary with version embedding
 build: web-build
 	go build -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/9router-go/
+	go build -ldflags="$(LDFLAGS)" -o opencode-go$(BINARY_SUFFIX) ./cmd/9router-go/
 
 # `PORT=20130 ./9router-go` is POSIX env-assignment prefix syntax. cmd.exe does
 # not parse it: it tried to execute a program literally named "PORT" and failed
