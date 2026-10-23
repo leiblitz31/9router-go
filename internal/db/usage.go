@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -235,18 +237,106 @@ func (r *Repo) GetUsageGroupByModelSince(since string) ([]UsageGroupRow, error) 
 	return scanUsageGroupRows(rows, "model")
 }
 
-// RequestDetailPerfRow is one latency observation from the requestDetails ring.
-type RequestDetailPerfRow struct {
-	Provider string
-	Model    string
-	Data     string
+// GetUsageTopModelSince returns the model that consumed the most tokens since
+// the cutoff, with the provider it ran on. The aggregate runs in SQL: reading
+// the window's rows into the process to fold them there cost a transfer of
+// every row in the window for two numbers.
+func (r *Repo) GetUsageTopModelSince(since string) (provider, model string, tokens int64, ok bool, err error) {
+	err = r.db.QueryRow( //nolint:noctx
+		`SELECT COALESCE(provider, ''), COALESCE(model, ''),
+		        SUM(COALESCE(promptTokens, 0) + COALESCE(completionTokens, 0))
+		   FROM usageHistory WHERE timestamp >= ?
+		  GROUP BY COALESCE(provider, ''), COALESCE(model, '')
+		  ORDER BY 3 DESC, 1, 2
+		  LIMIT 1`, since).
+		Scan(&provider, &model, &tokens)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", 0, false, nil
+	}
+	if err != nil {
+		return "", "", 0, false, fmt.Errorf("query usage top model since %s: %w", since, err)
+	}
+	return provider, model, tokens, true, nil
 }
 
-// GetRequestDetailPerf returns the stored payload of every request detail.
-// The ring is retention-bounded, so this stays cheap; it is the gateway's only
-// source of per-request latency for the node-health table.
+// GetUsageCacheHitTotalsSince returns the cached and total input tokens of the
+// window, as the cache-hit rate counts them.
+//
+// The counters live in the row's tokens JSON, so the read has to reach the
+// row; it does that in SQL instead of in the process, because the process
+// version shipped every row of the window — including the JSON payload — into
+// memory to fold it there.
+//
+// The rules mirror the ones the row-level fold used:
+//   - cached tokens are `cached_tokens`, and `cache_read_input_tokens` when
+//     the first is zero;
+//   - the input is the row's own promptTokens, and the JSON's prompt_tokens
+//     when that column is zero;
+//   - a request whose whole input is a cache read with no write is a
+//     distorted import and stays out of both sums;
+//   - the denominator is max(input, cached + writes), so a cache-exclusive
+//     row counts its cached part.
+func (r *Repo) GetUsageCacheHitTotalsSince(since string) (hit, total int64, err error) {
+	err = r.db.QueryRow( //nolint:noctx
+		`WITH raw AS (
+		   SELECT COALESCE(promptTokens, 0) AS prompt_column,
+		          CASE WHEN json_valid(tokens) THEN COALESCE(json_extract(tokens, '$.cached_tokens'), 0) ELSE 0 END AS cached_primary,
+		          CASE WHEN json_valid(tokens) THEN COALESCE(json_extract(tokens, '$.cache_read_input_tokens'), 0) ELSE 0 END AS cached_read,
+		          CASE WHEN json_valid(tokens) THEN COALESCE(json_extract(tokens, '$.cache_creation_input_tokens'), 0) ELSE 0 END AS creation,
+		          CASE WHEN json_valid(tokens) THEN COALESCE(json_extract(tokens, '$.prompt_tokens'), 0) ELSE 0 END AS prompt_json
+		     FROM usageHistory WHERE timestamp >= ?
+		 ), resolved AS (
+		   SELECT CASE WHEN cached_primary != 0 THEN cached_primary ELSE cached_read END AS cached,
+		          CASE WHEN prompt_column != 0 THEN prompt_column ELSE prompt_json END AS prompt,
+		          creation
+		     FROM raw
+		 ), counted AS (
+		   SELECT cached, prompt, creation
+		     FROM resolved
+		    WHERE cached > 0 AND prompt > 0 AND NOT (cached = prompt AND creation <= 0)
+		 )
+		 SELECT COALESCE(SUM(cached), 0),
+		        COALESCE(SUM(MAX(prompt, cached + creation)), 0)
+		   FROM counted`, since).
+		Scan(&hit, &total)
+	if err != nil {
+		return 0, 0, fmt.Errorf("query usage cache hit totals since %s: %w", since, err)
+	}
+	return hit, total, nil
+}
+
+// RequestDetailPerfRow is one latency observation from the requestDetails
+// ring. The numbers are read out of the stored payload by SQL, so the read
+// never ships the payload itself: a stored request carries the request
+// messages and the response body, and the ring holds thousands of them, so
+// fetching every payload made the node-health table scale with the size of
+// the stored traffic rather than with the number of rows.
+type RequestDetailPerfRow struct {
+	Provider         string
+	Model            string
+	TTFTMs           int64
+	TotalMs          int64
+	CompletionTokens int64
+	OutputTokens     int64
+}
+
+// requestDetailPerfSelect reads the latency and output numbers out of the
+// stored payload. json_valid guards the extraction: a row whose payload is
+// not JSON makes json_extract fail, and a broken row must read as "no
+// observation" rather than take the whole read down.
+const requestDetailPerfSelect = `
+	SELECT COALESCE(provider, ''), COALESCE(model, ''),
+	       CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.latency.ttft'), 0) ELSE 0 END,
+	       CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.latency.total'), 0) ELSE 0 END,
+	       CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.tokens.completion_tokens'), 0) ELSE 0 END,
+	       CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.tokens.output_tokens'), 0) ELSE 0 END
+	FROM requestDetails`
+
+// GetRequestDetailPerf returns the latency observation of every request
+// detail. The ring is retention-bounded, so this stays cheap; it is the
+// gateway's only source of per-request latency for the node-health table.
 func (r *Repo) GetRequestDetailPerf() ([]RequestDetailPerfRow, error) {
-	rows, err := r.db.Query(`SELECT COALESCE(provider, ''), COALESCE(model, ''), data FROM requestDetails`) //nolint:noctx
+	rows, err := r.db.Query(requestDetailPerfSelect) //nolint:noctx
 	if err != nil {
 		return nil, fmt.Errorf("query request detail perf: %w", err)
 	}
@@ -254,13 +344,59 @@ func (r *Repo) GetRequestDetailPerf() ([]RequestDetailPerfRow, error) {
 	var res []RequestDetailPerfRow
 	for rows.Next() {
 		var row RequestDetailPerfRow
-		if err := rows.Scan(&row.Provider, &row.Model, &row.Data); err != nil {
+		if err := rows.Scan(&row.Provider, &row.Model, &row.TTFTMs, &row.TotalMs,
+			&row.CompletionTokens, &row.OutputTokens); err != nil {
 			return nil, fmt.Errorf("scan request detail perf: %w", err)
 		}
 		res = append(res, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate request detail perf: %w", err)
+	}
+	return res, nil
+}
+
+// UsageChartRow is one usageHistory row as the chart needs it: the bucket
+// timestamp, the model the family split is derived from, and the token and
+// cost totals. The chart reads no other column — in particular not the tokens
+// JSON — so it gets its own projection instead of the wide one the stats
+// readers share.
+type UsageChartRow struct {
+	Timestamp        string
+	Model            string
+	PromptTokens     int
+	CompletionTokens int
+	Cost             float64
+}
+
+// usageChartSinceQuery is the chart's projection of the ledger. The order is
+// the caller's business, so the read carries no ORDER BY: the window is
+// scanned through idx_uh_ts, and sorting every row of it afterwards would
+// cost a sort of the whole window for nothing.
+const usageChartSinceQuery = `SELECT timestamp, COALESCE(model, ''),
+	       COALESCE(promptTokens, 0), COALESCE(completionTokens, 0), COALESCE(cost, 0.0)
+	FROM usageHistory
+	WHERE timestamp >= ?`
+
+// GetUsageHistoryChartSince returns the chart projection of the usage history
+// since the cutoff.
+func (r *Repo) GetUsageHistoryChartSince(cutoff string) ([]UsageChartRow, error) {
+	rows, err := r.db.Query(usageChartSinceQuery, cutoff) //nolint:noctx
+	if err != nil {
+		return nil, fmt.Errorf("query usageHistory chart since %s: %w", cutoff, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var res []UsageChartRow
+	for rows.Next() {
+		var row UsageChartRow
+		if err := rows.Scan(&row.Timestamp, &row.Model, &row.PromptTokens,
+			&row.CompletionTokens, &row.Cost); err != nil {
+			return nil, fmt.Errorf("scan usageHistory chart since %s: %w", cutoff, err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usageHistory chart since %s: %w", cutoff, err)
 	}
 	return res, nil
 }

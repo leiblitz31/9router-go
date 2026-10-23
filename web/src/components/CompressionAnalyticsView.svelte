@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, type Snippet } from 'svelte'
+  import { onDestroy, type Snippet } from 'svelte'
   import {
     api,
     type CompressionAnalyticsSummary,
@@ -95,7 +95,10 @@
     notifications.success('Exported CSV successfully')
   }
 
-  onMount(() => {
+  $effect(() => {
+    if (!isPanelVisible('compression.trend') && !isPanelVisible('compression.mode') && !isPanelVisible('compression.provider') && !isPanelVisible('compression.model') && !isPanelVisible('compression.topSavers') && !isPanelVisible('compression.receipts')) {
+      return
+    }
     loadData()
   })
 

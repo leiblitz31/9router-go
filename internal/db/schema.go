@@ -185,6 +185,19 @@ func coreSchema() []tableDef {
 				// every insert. Measured over 50,000 inserts, keeping both
 				// cost 71 us/row against 56 us/row for the composite alone.
 				"CREATE INDEX IF NOT EXISTS idx_uh_prov_tok ON usageHistory(provider, id, promptTokens, completionTokens)",
+				// The Usage page's two heaviest reads scan the trailing week of
+				// the ledger: the Overview trend chart reads every row to split
+				// it per model family, and the Details node-health table groups
+				// it per provider and per model. Both read the row's wide
+				// columns, and a usageHistory row carries the token payload in
+				// JSON, so the scan had to fetch every row of the window:
+				// measured at 6.1 s for the chart and 5.8 s + 6.4 s for the two
+				// group reads on a 1.2M-row ledger, against 97 ms for the same
+				// range counted through the index. This index carries every
+				// column those three reads need, so SQLite answers them from
+				// the index alone: 1.0 s, 1.1 s and 1.8 s on that ledger, with
+				// no row of the window read.
+				"CREATE INDEX IF NOT EXISTS idx_uh_analytics ON usageHistory(timestamp, provider, model, status, promptTokens, completionTokens, cost)",
 			},
 		},
 		{

@@ -1,7 +1,6 @@
 <script lang="ts">
   // Details-section dashboard (issue #280): activity heatmap and node health
   // above the request-details table.
-  import { onMount } from 'svelte'
   import { api, type UsageDashboardResponse, type UsageLifetime } from '../../api/client'
   import { fmtTokens } from '../../lib/compactNumber'
   import Card from '../../lib/ui/Card.svelte'
@@ -15,15 +14,6 @@
   let loading = $state(true)
   let failed = $state(false)
 
-  onMount(async () => {
-    try {
-      data = await api.getUsageDashboard()
-    } catch {
-      failed = true
-    } finally {
-      loading = false
-    }
-  })
 
   const lifetime = $derived(data?.lifetime ?? null)
 
@@ -80,10 +70,61 @@
   const detailBlocks = $derived(
     usageBlocks('details').filter((block) => !USAGE_PANEL_FIXED_POSITION[block.ids[0]])
   )
+  // A read that never answers leaves the card spinning with no way out, so
+  // the wait is bounded.
+  const DASHBOARD_TIMEOUT_MS = 20000
+
+  // The payload is read only while one of its cards is on screen. Hiding every
+  // card in Settings stops the read and its loading card; re-enabling one
+  // starts it again. The read used to run once on mount, so a section whose
+  // cards were all hidden still fetched the payload and painted a loading
+  // card over a section that draws nothing (issue #506).
+  $effect(() => {
+    if (detailBlocks.length === 0) {
+      loading = false
+      return
+    }
+    let cancelled = false
+    let settled = false
+    loading = true
+    failed = false
+    // A read that never answers leaves the card spinning with no way out, so
+    // the wait is bounded: the card says it could not be loaded.
+    const timer = setTimeout(() => {
+      if (settled || cancelled) return
+      settled = true
+      failed = true
+      loading = false
+    }, DASHBOARD_TIMEOUT_MS)
+    api
+      .getUsageDashboard()
+      .then((res) => {
+        if (cancelled || settled) return
+        settled = true
+        clearTimeout(timer)
+        data = res
+      })
+      .catch(() => {
+        if (cancelled || settled) return
+        settled = true
+        clearTimeout(timer)
+        failed = true
+      })
+      .finally(() => {
+        if (!cancelled && !settled) loading = false
+      })
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  })
 </script>
 
 <div class="flex min-w-0 flex-col gap-6">
-  {#if loading}
+  {#if detailBlocks.length === 0}
+    <!-- Every card in this stack is hidden in the arrangement: the section
+         draws nothing, so it must not paint a loading card either (#506). -->
+  {:else if loading}
     <Card padding="md">
       <div class="flex items-center justify-center gap-2 py-8 text-text-muted text-sm">
         <span class="material-symbols-outlined animate-spin text-[20px]" aria-hidden="true">progress_activity</span>

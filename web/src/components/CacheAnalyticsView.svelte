@@ -89,13 +89,20 @@
     }
   }
 
+  // The entries list is one of the panels the arrangement can hide, and only
+  // the Semantic view draws it. With it hidden the read would cost a request
+  // and the page weight of a table nobody sees (issue #506).
+  function entriesWanted(): boolean {
+    return activeView === 'semantic' && isPanelVisible('cache.entries')
+  }
+
   async function handleClearAll() {
     if (!confirm('Clear all semantic cache entries?')) return
     try {
       await api.deleteCache()
       notifications.success('Semantic cache cleared successfully')
       await loadStats()
-      await loadEntries()
+      if (entriesWanted()) await loadEntries()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       notifications.error(msg, 'Failed to clear cache')
@@ -107,7 +114,7 @@
       await api.deleteCacheEntry(id)
       notifications.success('Cache entry deleted')
       await loadStats()
-      await loadEntries()
+      if (entriesWanted()) await loadEntries()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       notifications.error(msg, 'Failed to delete entry')
@@ -122,7 +129,7 @@
       notifications.success(`Invalidated ${res.count ?? 0} entries for model ${m}`)
       invalidateModelInput = ''
       await loadStats()
-      await loadEntries()
+      if (entriesWanted()) await loadEntries()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       notifications.error(msg, 'Failed to invalidate model')
@@ -140,19 +147,19 @@
   // never reads; the reverse needs nothing extra.
   function selectView(next: CacheView) {
     activeView = next
-    if (next === 'semantic') loadEntries()
+    if (entriesWanted()) loadEntries()
   }
 
   // One refresh for both halves of the section: the entries list is what the
   // Semantic view shows, the stats what everything else on this section reads.
   function refreshAll() {
     loadStats()
-    if (activeView === 'semantic') loadEntries()
+    if (entriesWanted()) loadEntries()
   }
 
   onMount(() => {
     loadStats()
-    loadEntries()
+    if (entriesWanted()) loadEntries()
   })
 
   onDestroy(() => {

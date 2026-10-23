@@ -50,15 +50,29 @@
   const FAMILY_COLORS = ['#6366f1', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#06b6d4', '#f43f5e', '#84cc16']
   const OTHER_COLOR = '#64748b'
 
+  // A read that never answers leaves the panel spinning with no way out, so
+  // the wait is bounded: the chart says it could not be loaded, and the
+  // reader collapses and expands the panel to try again.
+  const CHART_TIMEOUT_MS = 20000
+
   $effect(() => {
     const wanted = period
     let cancelled = false
+    let settled = false
     loading = true
     failed = false
+    const timer = setTimeout(() => {
+      if (settled || cancelled) return
+      settled = true
+      failed = true
+      loading = false
+    }, CHART_TIMEOUT_MS)
     api
       .getUsageChart(wanted)
       .then((data) => {
-        if (cancelled) return
+        if (cancelled || settled) return
+        settled = true
+        clearTimeout(timer)
         buckets = Array.isArray(data) ? data : []
         // The server buckets hourly for short windows; the header label repeats
         // that fact, so it is reported rather than re-derived up there.
@@ -66,13 +80,16 @@
         loading = false
       })
       .catch(() => {
-        if (cancelled) return
+        if (cancelled || settled) return
+        settled = true
+        clearTimeout(timer)
         buckets = []
         failed = true
         loading = false
       })
     return () => {
       cancelled = true
+      clearTimeout(timer)
     }
   })
 

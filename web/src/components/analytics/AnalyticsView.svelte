@@ -66,6 +66,19 @@
       ? `Estimated cost per ${trendHourly ? 'hour' : 'day'}, stacked by model family.`
       : `Tokens per ${trendHourly ? 'hour' : 'day'}, stacked by model family.`
   )
+  // The stats read and the live stream fill the Overview's data panels: KPI
+  // cards, topology map, Recent Requests, the breakdown table, and Combo flow.
+  // The Usage trend is not one of them — it reads its own chart endpoint, and
+  // only while it is expanded — so a section that shows nothing but the trend
+  // must not poll what none of its cards draw (issue #506).
+  const OVERVIEW_LIVE_PANELS = [
+    'overview.kpi',
+    'overview.topology',
+    'overview.recent',
+    'overview.breakdown',
+    'overview.comboFlow',
+  ] as const
+  const overviewLive = $derived(OVERVIEW_LIVE_PANELS.some((id) => isPanelVisible(id)))
 
   // Choosing a section has to move the URL when that section owns one, or the
   // next reload silently drops back to Overview.
@@ -180,11 +193,16 @@
   // The moved Cache and Compression sections load their own data, so the
   // Overview's read must not run behind them.
   $effect(() => {
-    if (section === 'overview') loadStats(period)
+    if (section === 'overview' && overviewLive) loadStats(period)
   })
 
   $effect(() => {
-    if (section === 'details') loadDetails(detailsPage, period)
+    // The paged request table is one of the panels the arrangement can hide.
+    // With it hidden the section draws no rows, so the read would only cost a
+    // request and the page weight of a table nobody sees (issue #506).
+    if (section === 'details' && isPanelVisible('details.requests')) {
+      loadDetails(detailsPage, period)
+    }
   })
 
   // Loaded once: editing a combo is rare, and a reload picks up the change. The
@@ -225,6 +243,10 @@
 
   // SSE real-time updates for activeRequests, recentRequests and error notifications
   $effect(() => {
+    // The live stream fills the Overview's data panels and nothing else. With
+    // every one of them hidden, the connection would stream numbers into a
+    // page that draws none of them (issue #506).
+    if (!overviewLive) return
     let isCancelled = false
     let controller: AbortController | null = null
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null

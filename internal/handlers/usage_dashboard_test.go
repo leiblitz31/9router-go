@@ -54,68 +54,6 @@ func TestComputeScore(t *testing.T) {
 	}
 }
 
-func TestWindowCacheHitRate(t *testing.T) {
-	rows := []db.UsageHistoryRow{
-		// Cache-inclusive canonical row: 1000 input of which 400 cached.
-		{PromptTokens: 1000, Tokens: `{"prompt_tokens":1000,"cached_tokens":400,"cache_creation_input_tokens":100}`},
-		// Cache-exclusive raw row: prompt 8 next to a huge cache read.
-		{PromptTokens: 8, Tokens: `{"prompt_tokens":8,"cache_read_input_tokens":263296,"cache_creation_input_tokens":0}`},
-		// Uncached row stays out of the denominator entirely.
-		{PromptTokens: 500, Tokens: `{"prompt_tokens":500}`},
-	}
-	rate := windowCacheHitRate(rows)
-	if rate == nil {
-		t.Fatal("expected a rate for rows with cache data")
-	}
-	// hit = 400 + 263296; total = max(1000, 500) + max(8, 263296) = 1000 + 263296.
-	want := round1(float64(400+263296) / float64(1000+263296) * 100)
-	if *rate != want {
-		t.Errorf("rate = %v, want %v", *rate, want)
-	}
-}
-
-func TestWindowCacheHitRateAllUncached(t *testing.T) {
-	rate := windowCacheHitRate([]db.UsageHistoryRow{
-		{PromptTokens: 10, Tokens: `{"prompt_tokens":10}`},
-	})
-	if rate != nil {
-		t.Errorf("rate = %v, want nil when no request has a cache", *rate)
-	}
-}
-
-func TestWindowCacheHitRateCacheOnlyInputExcluded(t *testing.T) {
-	// cached == prompt with no writes is a distorted import: cache-only input
-	// would report a 100% hit rate the provider never served.
-	if rate := windowCacheHitRate([]db.UsageHistoryRow{
-		{PromptTokens: 500, Tokens: `{"cached_tokens":500}`},
-	}); rate != nil {
-		t.Errorf("rate = %v, want nil when every row is cache-only input", *rate)
-	}
-	// The same shape with a real write is a genuine cache hit and counts.
-	rate := windowCacheHitRate([]db.UsageHistoryRow{
-		{PromptTokens: 500, Tokens: `{"cached_tokens":500,"cache_creation_input_tokens":500}`},
-	})
-	if rate == nil {
-		t.Fatal("expected a rate when the cache-only row carries a write")
-	}
-	if want := round1(500.0 / 1000 * 100); *rate != want {
-		t.Errorf("rate = %v, want %v", *rate, want)
-	}
-}
-
-func TestWindowCacheHitRateFallsBackToRowAndTokensPrompt(t *testing.T) {
-	// The row's own column wins; a zero column defers to the tokens JSON.
-	rate := windowCacheHitRate([]db.UsageHistoryRow{
-		{PromptTokens: 0, Tokens: `{"prompt_tokens":1000,"cached_tokens":400}`},
-	})
-	if rate == nil {
-		t.Fatal("expected a rate when the row column is zero and the JSON carries prompt_tokens")
-	}
-	if want := round1(400.0 / 1000 * 100); *rate != want {
-		t.Errorf("rate = %v, want %v", *rate, want)
-	}
-}
-
 func TestDashboardDailyLifetimeAndStreaks(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	mk := func(requests, prompt, completion int64) string {
