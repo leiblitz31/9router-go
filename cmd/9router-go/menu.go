@@ -8,12 +8,16 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/urfave/cli/v2"
 
+	"9router/proxy/internal/config"
 	"9router/proxy/internal/daemon"
+	"9router/proxy/internal/proc"
 	"9router/proxy/internal/updater"
 )
 
@@ -67,7 +71,7 @@ func runMenu(cCtx *cli.Context) error {
 				return err
 			}
 		case "6":
-			return runTray(cCtx)
+			return startTray()
 		default:
 			return nil
 		}
@@ -122,6 +126,49 @@ func parseChoice(line string) string {
 		return "0"
 	}
 	return "0"
+}
+
+// startTray hands the tray to its own binary and returns, so the terminal is
+// free while the icon stays.
+//
+// The tray lives in cmd/9router-tray because a GUI toolkit cannot be linked
+// into this binary without breaking the CGO_ENABLED=0 cross-build for all five
+// targets (docs/specs/tray-companion-architecture.md §X2). Spawning keeps the
+// menu entry the Node CLI has ("Hide to Tray") without importing it here.
+//
+// Only the sibling binary is tried: a PATH lookup could pick up a different
+// install's tray, which would then talk to a gateway that is not this one.
+func startTray() error {
+	self, err := proc.SelfExecutable()
+	if err != nil {
+		return fmt.Errorf("tray: locate this binary: %w", err)
+	}
+	exe := filepath.Join(filepath.Dir(self), trayBinaryName())
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+	if _, err := os.Stat(exe); err != nil {
+		return fmt.Errorf("tray: %s not found next to %s — install the 9router-tray package", filepath.Base(exe), filepath.Base(self))
+	}
+	// CommandContext with a context that is never cancelled, not a deadline:
+	// this process is released immediately below and is meant to outlive the
+	// terminal, so a deadline here would kill the tray it just started.
+	cmd := exec.CommandContext(context.Background(), exe, "--port", strconv.Itoa(config.LoadConfig().Port))
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("tray: start %s: %w", filepath.Base(exe), err)
+	}
+	// Releasing lets the tray outlive this terminal, the same reason the
+	// background daemon is released rather than waited on.
+	_ = cmd.Process.Release()
+	fmt.Printf("Tray started. Right-click the icon to open the dashboard or quit.\n")
+	return nil
+}
+
+// trayBinaryName follows the same rename rule as binaryName, so an
+// `opencode-go` install looks for `opencode-go-tray`.
+func trayBinaryName() string {
+	return binaryName() + "-tray"
 }
 
 // openDashboard makes sure the daemon is up, then hands the dashboard URL to
