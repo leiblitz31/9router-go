@@ -53,3 +53,21 @@ stitch-screenshots/
 
 /opencode-go
 /opencode-go-*
+
+# Per-machine AI agent harness config. These directories hold tooling that is
+# installed locally, not project content: a committed `.claude/settings.json`
+# or `.agents/` tree makes every checkout inherit another machine's hooks.
+# The project's own instructions — CLAUDE.md and AGENTS.md — stay tracked.
+/.claude/
+/.agents/
+/.gemini/
+/.cursor/
+/.codex/
+/.continue/
+/.aider*
+/.mcp.json
+/.clinerules
+/.windsurfrules
+/GEMINI.md
+/QWEN.md
+/COPILOT.md
