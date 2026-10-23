@@ -26,6 +26,29 @@ import (
 	"9router/proxy/internal/translator"
 )
 
+// jsonErrorBody renders an error payload as JSON.
+//
+// The message is encoded by json.Marshal, never interpolated into a template.
+// An upstream failure routinely carries characters that are illegal raw inside a
+// JSON string — a URL that failed to parse embeds itself in quotes, a Windows
+// path carries backslashes — and a format string emits them verbatim. The
+// result is a body no client can parse: the first quote in the error text
+// closes the string early and the following backslash becomes a bare token,
+// which a JavaScript client reports as `JSON Parse error: Unrecognized token '\'`.
+func jsonErrorBody(message, errType string, code int) []byte {
+	body, err := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    errType,
+			"code":    code,
+		},
+	})
+	if err != nil {
+		return []byte(`{"error":{"message":"upstream error","type":"server_error","code":500}}`)
+	}
+	return body
+}
+
 // ---- Provider-specific executors ----
 
 // ForwardGrokCLI forwards to grok-cli using Responses API format.
@@ -254,7 +277,7 @@ func kiroUpstreamBody(req *Request) ([]byte, error) {
 		log.Error("executor", "kiro translation failed", "model", model, "error", err)
 		return nil, &proxy.UpstreamError{
 			StatusCode: http.StatusBadRequest,
-			Body:       []byte(fmt.Sprintf(`{"error":{"message":"kiro request could not be built: %v","type":"invalid_request_error","code":400}}`, err)),
+			Body:       jsonErrorBody(fmt.Sprintf("kiro request could not be built: %v", err), "invalid_request_error", http.StatusBadRequest),
 		}
 	}
 	return out, nil

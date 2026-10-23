@@ -1195,7 +1195,7 @@ func handleCommandcodeStream(w http.ResponseWriter, req *Request, upstream io.Re
 			code, msg := ParseCommandCodeError(event)
 			return &proxy.UpstreamError{
 				StatusCode: code,
-				Body:       []byte(fmt.Sprintf(`{"error":{"message":"%s","code":%d}}`, msg, code)),
+				Body:       jsonErrorBody(msg, "upstream_error", code),
 			}
 		}
 
