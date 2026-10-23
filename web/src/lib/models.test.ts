@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS, PROVIDER_MODELS } from './models'
+import { PROVIDER_CATALOG } from './providers'
 
 // PROVIDER_MODELS is keyed by provider id, while PROVIDER_ID_TO_ALIAS holds the
 // short display prefix (uiAlias) used to render `cmc/<model>`. The two only
@@ -71,6 +72,24 @@ describe('commandcode catalog', () => {
 
   it('keeps the upstream registry order', () => {
     expect(getModelsByProviderId('commandcode').map((m) => m.id)).toEqual(UPSTREAM_REGISTRY_ORDER)
+  })
+})
+
+// The 22 rows above are a snapshot of upstream's registry file, not of what
+// Command Code serves. Its Provider API publishes the whole catalogue on
+// /provider/v1/models — the free tiers (reflection/beam:free,
+// stealth/glyph-cluster:free, poolside/laguna-s-2.1-free) and everything
+// released after the snapshot (minimax/minimax-m3.1-flash, z-ai/glm-5.3-flash,
+// moonshotai/Kimi-K3, …). Without a modelsFetcher the dashboard has no way to
+// reach any of it: the "Suggested free models" list stays empty and "Check
+// Latest Models" never renders.
+describe('commandcode live catalog', () => {
+  it('fetches the Provider API catalogue through the free-tier filter', () => {
+    const p = PROVIDER_CATALOG.find((e) => e.id === 'commandcode')
+    expect(p?.modelsFetcher).toEqual({
+      url: 'https://api.commandcode.ai/provider/v1/models',
+      type: 'commandcode-free',
+    })
   })
 })
 

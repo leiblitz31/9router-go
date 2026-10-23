@@ -211,6 +211,37 @@ func filterNousFree(models []map[string]any) []suggestedModel {
 	return out
 }
 
+// filterCommandCodeFree keeps Command Code's free tiers. Its catalogue carries
+// no pricing block, so a zero-credit model is signalled only by a trailing
+// ":free" or "-free" on the id — reflection/beam:free, stealth/glyph-cluster:free
+// and poolside/laguna-s-2.1-free are the ones live today. The same convention
+// filterOpencodeFree reads, without its dead-id table: Command Code has never
+// published an id that answers "unavailable".
+func filterCommandCodeFree(models []map[string]any) []suggestedModel {
+	out := []suggestedModel{}
+	for _, m := range models {
+		id := getString(m, "id")
+		if id == "" {
+			continue
+		}
+		if !strings.HasSuffix(id, ":free") && !strings.HasSuffix(id, "-free") {
+			continue
+		}
+		name := getString(m, "name")
+		if name == "" {
+			name = id
+		}
+		sm := suggestedModel{ID: id, Name: name}
+		if clen, ok := getFloat(m, "context_length"); ok {
+			n := int64(clen)
+			sm.ContextLength = &n
+		}
+		out = append(out, sm)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
 // contextLengthOf reads an optional context window for sorting.
 func contextLengthOf(m suggestedModel) int64 {
 	if m.ContextLength == nil {
@@ -244,6 +275,8 @@ func HandleSuggestedModels(w http.ResponseWriter, r *http.Request) {
 		filter = filterMinimaxCode
 	case "nous-free":
 		filter = filterNousFree
+	case "commandcode-free":
+		filter = filterCommandCodeFree
 	default:
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "Unknown filter type")
 		return

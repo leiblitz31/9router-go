@@ -8,6 +8,57 @@ import (
 	"testing"
 )
 
+// TestSuggestedModelsCommandCodeFree covers the Command Code free-tier filter.
+// The feed is the real /provider/v1/models shape: a flat `data` array whose
+// entries carry `context_length` but no pricing block, so the ":free"/"-free"
+// id suffix is the only signal. beam:free is the one the operator noticed
+// missing; the paid minimax rows prove the filter is not a passthrough.
+func TestSuggestedModelsCommandCodeFree(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"object":"list","data":[
+			{"id":"reflection/beam:free","name":"Beam 1.0","context_length":1048576,"supported_endpoints":["/chat/completions"]},
+			{"id":"stealth/glyph-cluster:free","name":"Glyph Cluster","context_length":262144},
+			{"id":"poolside/laguna-s-2.1-free","name":"Laguna S 2.1","context_length":262144},
+			{"id":"minimax/minimax-m3.1-flash","name":"MiniMax M3.1 Flash","context_length":1000000},
+			{"id":"MiniMaxAI/MiniMax-M3","name":"MiniMax M3","context_length":1000000},
+			{"id":"claude-sonnet-5-5","name":"Claude Sonnet 5.5","context_length":1000000}
+		]}`))
+	}))
+	defer feed.Close()
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/providers/suggested-models?url="+url.QueryEscape(feed.URL)+"&type=commandcode-free", nil)
+	rec := httptest.NewRecorder()
+	HandleSuggestedModels(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data []suggestedModel `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	want := []string{"poolside/laguna-s-2.1-free", "reflection/beam:free", "stealth/glyph-cluster:free"}
+	got := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		got = append(got, m.ID)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected %v, got %v", want, got)
+		}
+	}
+	// Sorted by id, so the second row carries beam's context window.
+	if out.Data[1].ContextLength == nil || *out.Data[1].ContextLength != 1048576 {
+		t.Fatalf("expected beam contextLength 1048576, got %v", out.Data[1].ContextLength)
+	}
+}
+
 func TestSuggestedModelsOpencodeFree(t *testing.T) {
 	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

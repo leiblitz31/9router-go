@@ -1184,6 +1184,7 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "icon": "smart_toy",
     "website": "https://commandcode.ai",
     "notice": {"text":"Use your CommandCode CLI API key (starts with user_...) from ~/.commandcode/auth.json or commandcode.ai/studio.","apiKeyUrl":"https://commandcode.ai/studio"},
+    "modelsFetcher": {"url":"https://api.commandcode.ai/provider/v1/models","type":"commandcode-free"},
     "noAuth": false,
     "serviceKinds": [
       "llm"

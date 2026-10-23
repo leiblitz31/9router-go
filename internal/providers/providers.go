@@ -156,6 +156,14 @@ var modelsListURL = map[string]string{
 	// SumoPod exposes the standard OpenAI /v1/models catalogue (auth required,
 	// same contract as tokenharbor/dahl).
 	"sumopod": "https://ai.sumopod.com/v1/models",
+	// Command Code publishes its whole Provider API catalogue on the standard
+	// OpenAI /v1/models shape, keyless: every id it sells, the free tiers
+	// included (reflection/beam:free, stealth/glyph-cluster:free,
+	// poolside/laguna-s-2.1-free) and the paid ones added since the registry
+	// snapshot (minimax/minimax-m3.1-flash, z-ai/glm-5.3-flash, …). The
+	// registry catalog is a fixed 22-model list, so without this entry the
+	// dashboard cannot discover anything the snapshot predates.
+	"commandcode": "https://api.commandcode.ai/provider/v1/models",
 }
 
 // modelsListHeaders carries the extra headers one live-catalogue endpoint
