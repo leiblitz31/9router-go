@@ -602,7 +602,12 @@ func cloudflareAccountFromBaseURL(baseURL string) string {
 	}
 	rest := baseURL[idx+len(marker):]
 	if end := strings.Index(rest, "/"); end >= 0 {
-		return rest[:end]
+		rest = rest[:end]
+	}
+	if rest == "{accountId}" {
+		// Registry placeholder, filled per connection at request time; it is
+		// not an account id.
+		return ""
 	}
 	return rest
 }

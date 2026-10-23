@@ -703,6 +703,20 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 	// rewrite must not lose it, so it is re-applied on the final config.
 	baseCfg.ProviderID = provider
 
+	// Fill the {accountId} placeholder a registry URL may carry (Cloudflare
+	// Workers AI names the account in the path) from the selected connection:
+	// the id lives in providerSpecificData, the same field the dashboard's
+	// connection test reads. Without this the placeholder went upstream
+	// verbatim, so every cf/* chat request 404'd while the connection test —
+	// which does substitute — stayed green.
+	if connData != nil && strings.Contains(baseCfg.BaseURL, "{accountId}") {
+		if accountID, ok := connData.ProviderSpecificData["accountId"].(string); ok {
+			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+				baseCfg.BaseURL = strings.Replace(baseCfg.BaseURL, "{accountId}", trimmed, 1)
+			}
+		}
+	}
+
 	// Check if this connection uses an Edge Relay Proxy Pool (Vercel, Cloudflare, Deno)
 	if connData != nil {
 		var relayURL string
