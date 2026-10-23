@@ -15,6 +15,13 @@ import (
 type GeminiStreamState struct {
 	MessageStartSent     bool
 	MessageId            string
+	// SessionID is the conversation this stream belongs to, taken from the
+	// client's session header. A thought signature is only valid for the call
+	// it was issued for, so the store is namespaced by the conversation that
+	// produced it rather than by the per-response MessageId — two parallel
+	// conversations on one account mint the same tool_call ids often enough
+	// that a global key replays the other one's signature.
+	SessionID            string
 	Model                string
 	Usage                *OpenAIUsage
 	FinishReason         string
@@ -154,6 +161,14 @@ type GeminiStreamChunk struct {
 
 // TranslateOpenAIToGemini converts an OpenAI-compatible request body to Gemini native format.
 func TranslateOpenAIToGemini(openaiBody []byte) ([]byte, error) {
+	return TranslateOpenAIToGeminiWithSession(openaiBody, "")
+}
+
+// TranslateOpenAIToGeminiWithSession is TranslateOpenAIToGemini for a request
+// that carries a conversation id. sessionID scopes the thought-signature
+// lookup, so a signature stored by another conversation on the same account is
+// never replayed here.
+func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]byte, error) {
 	var oreq struct {
 		Model               string         `json:"model"`
 		Messages            jsontext.Value `json:"messages"`
@@ -286,7 +301,7 @@ func TranslateOpenAIToGemini(openaiBody []byte) ([]byte, error) {
 				}
 				ts := extractThoughtSig(tc.ID)
 				if ts == "" {
-					ts = GetGeminiThoughtSignature(tc.ID, "", oreq.Model)
+					ts = GetGeminiThoughtSignature(tc.ID, sessionID, oreq.Model)
 				}
 				if ts == "" && !firstFunctionCallSeen {
 					ts = DefaultThinkingSignature
@@ -778,7 +793,15 @@ func TranslateGeminiChunkToOpenAI(chunk []byte, state *GeminiStreamState) ([]byt
 						sig = state.LastThoughtSignature
 					}
 					if sig != "" {
-						StoreGeminiThoughtSignature(id, sig, state.MessageId, state.Model)
+						// Keyed by the conversation, not by this response's id:
+						// the response id changes on every turn, so it could
+						// never be looked up on the next one, and the lookup
+						// fell back to a global key another conversation shares.
+						storeSession := state.SessionID
+						if storeSession == "" {
+							storeSession = state.MessageId
+						}
+						StoreGeminiThoughtSignature(id, sig, storeSession, state.Model)
 						id += "__ts__" + sig
 					}
 					delta["tool_calls"] = []map[string]any{

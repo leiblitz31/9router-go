@@ -536,6 +536,9 @@ func EnsureCoreSchema(db *sql.DB) error {
 	if err := EnsureLedgerTables(db); err != nil {
 		return err
 	}
+	if err := EnsureThoughtSignatureTables(db); err != nil {
+		return err
+	}
 	if err := EnsureAdditiveColumns(db); err != nil {
 		return err
 	}

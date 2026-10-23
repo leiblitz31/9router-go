@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"9router/proxy/internal/constants"
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/translator"
@@ -55,7 +56,7 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 		sendBody = wrapped
 	} else {
 		// Translate OpenAI → Gemini native
-		geminiBody, err := translator.TranslateOpenAIToGemini(body)
+		geminiBody, err := translator.TranslateOpenAIToGeminiWithSession(body, handlerutil.GetSessionID(ctx))
 		if err != nil {
 			return nil, fmt.Errorf("translate to Gemini: %w", err)
 		}
