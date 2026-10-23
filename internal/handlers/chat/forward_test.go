@@ -290,6 +290,10 @@ func TestForwardRequest_StreamSetsAcceptHeader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.HeaderContentType, constants.ContentTypeEventStream)
 		w.WriteHeader(http.StatusOK)
+		// A content chunk first: a stream that opens with the usage trailer and
+		// nothing else carries no answer, and the peek now refuses it as the
+		// empty turn it is.
+		w.Write([]byte("data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n"))
 		w.Write([]byte("data: {\"id\":\"x\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":6}}}\n\ndata: [DONE]\n\n"))
 	}))
 	defer srv.Close()
