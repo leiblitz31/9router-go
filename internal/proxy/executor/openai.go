@@ -344,11 +344,13 @@ func jsonResponse(ctx context.Context, w http.ResponseWriter, upstream io.Reader
 		}
 		if err != nil || translated == nil {
 			log.Error("executor", "json translate error", "error", err)
-			// Fall back to original response
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write(body)
-			return nil
+			// A Claude client cannot read a Chat Completions body. Serving it
+			// under a 200 hands the client JSON that is not a Message — the
+			// "HTTP 200 … body is JSON but not a Message" report. Fail as an
+			// upstream error so the router can fall back, same as the retired
+			// chat path (handlers/chat/forward.go).
+			return proxy.UpstreamFailure(http.StatusBadGateway,
+				"upstream response could not be translated to Claude format")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
