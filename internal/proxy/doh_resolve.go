@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // DNS-over-HTTPS resolution for "doh" proxy pools (see doh_transport.go).
@@ -95,6 +97,10 @@ type dohResolver struct {
 	mu        sync.Mutex
 	cache     map[string]*dohCacheEntry
 	rotate    atomic.Uint64
+	// flights collapses concurrent misses for one host into a single query
+	// (see resolveA). keyPrefix namespaces those keys by resolver identity.
+	flights   singleflight.Group
+	keyPrefix string
 }
 
 // newDoHResolver builds a resolver for one or more specs (aliases or
@@ -131,25 +137,41 @@ func newDoHResolver(specs ...string) *dohResolver {
 			},
 		},
 		cache: make(map[string]*dohCacheEntry),
+		// Namespaces this resolver's singleflight keys: two pools naming
+		// different resolvers must never share one in-flight answer.
+		keyPrefix: strings.Join(endpoints, "\x00"),
 	}
 }
 
-// resolveDialTarget maps addr ("host:port") to "ip:port" using DoH. A literal
-// IP host passes through untouched.
-func (r *dohResolver) resolveDialTarget(ctx context.Context, host, addr string) (string, error) {
+// resolveDialTargets maps addr ("host:port") to every "ip:port" the DoH
+// answer carries, in rotation order, so the dialer can fail over from a dead
+// record to the next. A literal IP host passes through untouched.
+//
+// Returning the whole answer rather than one pick is what makes a multi-homed
+// provider usable: a CDN or load balancer routinely publishes addresses that
+// this network cannot reach (observed live: 5 of 8 kiro runtime records and 1
+// of 2 kilo records answered the CONNECT with 502). Picking one at random
+// turned that into a coin flip on every request, and each losing flip cost the
+// full CONNECT timeout before the request failed outright.
+func (r *dohResolver) resolveDialTargets(ctx context.Context, host, addr string) ([]string, error) {
 	if net.ParseIP(host) != nil {
-		return addr, nil
+		return []string{addr}, nil
 	}
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "", fmt.Errorf("proxy.dohResolver: invalid addr %q: %w", addr, err)
+		return nil, fmt.Errorf("proxy.dohResolver: invalid addr %q: %w", addr, err)
 	}
-	ip, err := r.pickIP(ctx, host)
+	ips, err := r.resolveA(ctx, host)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	rememberDoHResolution(host, ip, "")
-	return net.JoinHostPort(ip, port), nil
+	start := r.advanceCursor(host)
+	targets := make([]string, 0, len(ips))
+	for i := range ips {
+		ip := ips[(start+uint64(i))%uint64(len(ips))]
+		targets = append(targets, net.JoinHostPort(ip, port))
+	}
+	return targets, nil
 }
 
 // dohResolution records where a host was last sent: the address that was
@@ -234,34 +256,78 @@ func probeDoHResolvers(ctx context.Context, resolver *dohResolver, hostname stri
 	return time.Since(start).Milliseconds(), nil
 }
 
+// advanceCursor returns this host's next rotation offset and advances it, so
+// successive dials start at different records the way round-robin DNS would.
+func (r *dohResolver) advanceCursor(host string) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := r.cache[host]
+	if e == nil {
+		return 0
+	}
+	idx := e.next
+	e.next++
+	return idx
+}
+
 // pickIP returns one public A record for host, rotating across the cached
 // records so a multi-homed target spreads load the way round-robin DNS would.
+// The dial path does not use it — see resolveDialTargets, which returns every
+// record so a dead one can be skipped.
 func (r *dohResolver) pickIP(ctx context.Context, host string) (string, error) {
 	ips, err := r.resolveA(ctx, host)
 	if err != nil {
 		return "", err
 	}
-	r.mu.Lock()
-	var idx uint64
-	if e := r.cache[host]; e != nil {
-		idx = e.next
-		e.next++
-	}
-	r.mu.Unlock()
-	return ips[idx%uint64(len(ips))], nil
+	return ips[r.advanceCursor(host)%uint64(len(ips))], nil
 }
 
 // resolveA returns host's public A records, from cache when fresh.
+//
+// Concurrent misses for one host collapse into a single query. Without that,
+// a burst of requests to the same provider — the ordinary shape of a retry
+// storm or a dashboard's parallel probes — multiplied into one DoH query per
+// request, and the resolvers answered the pile-up by timing out every attempt:
+// observed live as six concurrent requests to one host failing with
+// "context deadline exceeded" on all four resolvers while the same host
+// answered in ~1.2s on its own.
 func (r *dohResolver) resolveA(ctx context.Context, host string) ([]string, error) {
 	if ips, ok := r.cached(host); ok {
 		return ips, nil
 	}
-	ips, ttl, err := r.query(ctx, host)
+	v, err, _ := r.flights.Do(r.flightKey(host), func() (any, error) {
+		if ips, ok := r.cached(host); ok {
+			return ips, nil
+		}
+		// The query outlives whichever caller happened to start it: a shared
+		// answer must not be torn down because the leader's client hung up,
+		// which would fail every waiter behind it (the same failure the live
+		// catalog flight had to fix). It is still bounded — by dohQueryTimeout
+		// here and by the per-endpoint cap inside query.
+		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dohQueryTimeout)
+		defer cancel()
+		ips, ttl, err := r.query(queryCtx, host)
+		if err != nil {
+			return nil, err
+		}
+		r.store(host, ips, ttl)
+		return ips, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	r.store(host, ips, ttl)
-	return ips, nil
+	ips, _ := v.([]string)
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("proxy.dohResolver: no public A records in answer")
+	}
+	return append([]string(nil), ips...), nil
+}
+
+// flightKey namespaces one host's in-flight lookup by the resolver's endpoint
+// set, so a query started through cloudflare is never handed to a caller
+// asking through a different pool.
+func (r *dohResolver) flightKey(host string) string {
+	return r.keyPrefix + "\x00" + host
 }
 
 func (r *dohResolver) cached(host string) ([]string, bool) {

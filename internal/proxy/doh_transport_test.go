@@ -3,9 +3,11 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -159,20 +161,20 @@ func TestDoHResolverQueryAndCache(t *testing.T) {
 		t.Errorf("DoH server hits = %d, want 1 (second resolve must come from cache)", got)
 	}
 
-	target, err := resolver.resolveDialTarget(ctx, "example.com", "example.com:443")
+	targets, err := resolver.resolveDialTargets(ctx, "example.com", "example.com:443")
 	if err != nil {
-		t.Fatalf("resolveDialTarget() error: %v", err)
+		t.Fatalf("resolveDialTargets() error: %v", err)
 	}
-	if target != "203.0.113.10:443" {
-		t.Errorf("resolveDialTarget() = %q, want 203.0.113.10:443", target)
+	if len(targets) != 1 || targets[0] != "203.0.113.10:443" {
+		t.Errorf("resolveDialTargets() = %v, want [203.0.113.10:443]", targets)
 	}
 
-	literal, err := resolver.resolveDialTarget(ctx, "203.0.113.99", "203.0.113.99:443")
+	literal, err := resolver.resolveDialTargets(ctx, "203.0.113.99", "203.0.113.99:443")
 	if err != nil {
-		t.Fatalf("resolveDialTarget() literal IP error: %v", err)
+		t.Fatalf("resolveDialTargets() literal IP error: %v", err)
 	}
-	if literal != "203.0.113.99:443" {
-		t.Errorf("resolveDialTarget() literal = %q, want passthrough", literal)
+	if len(literal) != 1 || literal[0] != "203.0.113.99:443" {
+		t.Errorf("resolveDialTargets() literal = %v, want the single passthrough", literal)
 	}
 }
 
@@ -268,5 +270,277 @@ func TestDoHResolutionNoteNamesAddressAndResolver(t *testing.T) {
 	}
 	if got := resolutionSummary("", ""); got != "no DoH resolution recorded" {
 		t.Fatalf("resolutionSummary() with no note = %q", got)
+	}
+}
+
+// TestDoHResolveDialTargetsReturnsEveryRecord pins the multi-address contract
+// the dial path depends on.
+//
+// A DoH answer is a set, and a multi-homed provider routinely publishes
+// addresses this network cannot reach (observed live: 5 of 8 kiro runtime
+// records and 1 of 2 kilo records answered the proxy's CONNECT with 502).
+// Returning a single pick turned every request into a coin flip; returning the
+// whole answer is what lets dialTunnel walk past a dead record.
+func TestDoHResolveDialTargetsReturnsEveryRecord(t *testing.T) {
+	resolver, _ := newTestDoHResolver(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		fmt.Fprint(w, `{"Status":0,"Answer":[
+			{"name":"multi.example","type":1,"TTL":300,"data":"203.0.113.1"},
+			{"name":"multi.example","type":1,"TTL":300,"data":"203.0.113.2"},
+			{"name":"multi.example","type":1,"TTL":300,"data":"203.0.113.3"}]}`)
+	})
+
+	targets, err := resolver.resolveDialTargets(context.Background(), "multi.example", "multi.example:443")
+	if err != nil {
+		t.Fatalf("resolveDialTargets() error: %v", err)
+	}
+	if len(targets) != 3 {
+		t.Fatalf("resolveDialTargets() = %v, want all 3 records", targets)
+	}
+	for _, want := range []string{"203.0.113.1:443", "203.0.113.2:443", "203.0.113.3:443"} {
+		found := false
+		for _, got := range targets {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("resolveDialTargets() = %v, missing %q", targets, want)
+		}
+	}
+
+	// Rotation still moves: successive calls must not always start at the same
+	// record, or a dead first entry would be retried by every request.
+	first := targets[0]
+	rotated := false
+	for i := 0; i < 3; i++ {
+		next, err := resolver.resolveDialTargets(context.Background(), "multi.example", "multi.example:443")
+		if err != nil {
+			t.Fatalf("resolveDialTargets() call %d: %v", i, err)
+		}
+		if next[0] != first {
+			rotated = true
+		}
+	}
+	if !rotated {
+		t.Errorf("resolveDialTargets() always starts at %q, want the cursor to rotate", first)
+	}
+
+	// A literal IP still passes through untouched, exactly once.
+	literal, err := resolver.resolveDialTargets(context.Background(), "203.0.113.99", "203.0.113.99:443")
+	if err != nil {
+		t.Fatalf("resolveDialTargets() literal IP error: %v", err)
+	}
+	if len(literal) != 1 || literal[0] != "203.0.113.99:443" {
+		t.Errorf("resolveDialTargets() literal = %v, want the single passthrough", literal)
+	}
+}
+
+// TestDoHResolveACollapsesConcurrentMisses pins the singleflight around the
+// DoH query.
+//
+// A burst of requests to one provider (a retry storm, a dashboard's parallel
+// probes) used to fire one DoH query per request. The resolvers answered the
+// pile-up by timing out every attempt: observed live as six concurrent requests
+// to one host failing with "context deadline exceeded" on all four resolvers
+// while the same host answered in ~1.2s on its own.
+func TestDoHResolveACollapsesConcurrentMisses(t *testing.T) {
+	var hits atomic.Int64
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	resolver, _ := newTestDoHResolver(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		// Hold the first query open so the other callers are guaranteed to
+		// arrive while it is still in flight.
+		<-release
+		w.Header().Set("Content-Type", "application/dns-json")
+		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"burst.example","type":1,"TTL":300,"data":"203.0.113.7"}]}`)
+	})
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, errs[idx] = resolver.resolveA(context.Background(), "burst.example")
+		}(i)
+	}
+
+	<-entered
+	// Give the followers time to join the flight before releasing the leader.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("caller %d: resolveA() error = %v", i, err)
+		}
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("DoH queries = %d, want 1 (concurrent misses must collapse)", got)
+	}
+}
+
+// TestDoHResolveAFlightSurvivesLeaderCancellation pins that a shared lookup is
+// not torn down when the caller who started it disconnects — the failure the
+// live catalog flight already had to fix. Without WithoutCancel here, one
+// cancelled client fails every waiter queued behind it.
+func TestDoHResolveAFlightSurvivesLeaderCancellation(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	resolver, _ := newTestDoHResolver(t, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/dns-json")
+		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"cancel.example","type":1,"TTL":300,"data":"203.0.113.8"}]}`)
+	})
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := resolver.resolveA(leaderCtx, "cancel.example")
+		leaderDone <- err
+	}()
+
+	<-entered
+	cancelLeader()
+	time.Sleep(50 * time.Millisecond)
+
+	followerDone := make(chan error, 1)
+	go func() {
+		_, err := resolver.resolveA(context.Background(), "cancel.example")
+		followerDone <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	<-leaderDone
+	if err := <-followerDone; err != nil {
+		t.Fatalf("follower resolveA() error = %v, want the shared query to survive the leader's cancellation", err)
+	}
+}
+
+// TestDoHDialFailsOverAcrossRecords pins the dial-side half of the fix: when a
+// DoH answer carries several records and the first cannot be tunneled to, the
+// dial must try the next one instead of failing the request.
+//
+// This is the exact shape that broke kiro, kilo and cline through a DoH pool:
+// a multi-homed provider publishes records the network cannot reach, and
+// dialing only the first pick failed every request that drew a dead record.
+func TestDoHDialFailsOverAcrossRecords(t *testing.T) {
+	// The fake proxy refuses one address and accepts the other, which is what
+	// the ambient egress proxy does with an unreachable CDN record.
+	var refused, accepted atomic.Int64
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.Contains(r.Host, "203.0.113.1:") {
+			refused.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		accepted.Add(1)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		// Hold the tunnel open just long enough for the dialer to return it.
+		time.Sleep(50 * time.Millisecond)
+	}))
+	defer proxySrv.Close()
+
+	// Both records look public; only the second is accepted by the fake proxy.
+	resolver, _ := newTestDoHResolver(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		fmt.Fprint(w, `{"Status":0,"Answer":[
+			{"name":"failover.example","type":1,"TTL":300,"data":"203.0.113.1"},
+			{"name":"failover.example","type":1,"TTL":300,"data":"203.0.113.2"}]}`)
+	})
+
+	// The test proxy is on loopback; the SSRF guard would otherwise refuse to
+	// dial it. This is the same exemption an operator's local proxy gets.
+	t.Setenv("ALLOW_PRIVATE_NETWORKING", "1")
+
+	d := &utlsDialer{explicitProxyURL: proxySrv.URL, doh: resolver}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	conn, err := d.dialPlainContext(ctx, "tcp", "failover.example:443")
+	if err != nil {
+		t.Fatalf("dialPlainContext() = %v, want it to fail over past the refused record", err)
+	}
+	conn.Close()
+
+	if refused.Load() == 0 {
+		t.Error("the unreachable record was never attempted; the test proves nothing")
+	}
+	if accepted.Load() == 0 {
+		t.Error("the reachable record was never attempted")
+	}
+}
+
+// TestDoHDialRecordsTheAddressThatAccepted pins that the diagnostic note names
+// the record the request actually went to.
+//
+// Once the dial fails over between records, the address dialed is no longer the
+// address the resolver was asked about. A later TLS failure that reported the
+// first candidate would send the operator to the wrong host.
+func TestDoHDialRecordsTheAddressThatAccepted(t *testing.T) {
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Host, "203.0.113.1:") {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		time.Sleep(50 * time.Millisecond)
+	}))
+	defer proxySrv.Close()
+
+	resolver, _ := newTestDoHResolver(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		fmt.Fprint(w, `{"Status":0,"Answer":[
+			{"name":"note-dial.example","type":1,"TTL":300,"data":"203.0.113.1"},
+			{"name":"note-dial.example","type":1,"TTL":300,"data":"203.0.113.2"}]}`)
+	})
+	t.Setenv("ALLOW_PRIVATE_NETWORKING", "1")
+
+	d := &utlsDialer{explicitProxyURL: proxySrv.URL, doh: resolver}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, err := d.dialPlainContext(ctx, "tcp", "note-dial.example:443")
+	if err != nil {
+		t.Fatalf("dialPlainContext() = %v", err)
+	}
+	conn.Close()
+
+	ip, _, ok := DoHResolutionFor("note-dial.example")
+	if !ok {
+		t.Fatal("no DoH resolution recorded, want the address that accepted")
+	}
+	// The cursor starts at the first record, which the fake proxy refuses, so
+	// the dial must have failed over to the second and recorded that one.
+	if ip != "203.0.113.2" {
+		t.Errorf("recorded %q, want 203.0.113.2 (the record that accepted)", ip)
 	}
 }

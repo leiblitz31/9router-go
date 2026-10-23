@@ -40,6 +40,12 @@ import (
 // transportProxyKind describes how a transport reaches the network.
 type transportProxyKind int
 
+// dohDialAttemptTimeout bounds one address attempt when a DoH answer carries
+// more than one record. A healthy CONNECT through the ambient proxy measured
+// 0.4–1.9s here, so this leaves generous headroom while still handing the next
+// record a turn instead of letting one stalled address consume the request.
+const dohDialAttemptTimeout = 8 * time.Second
+
 const (
 	proxyKindNone transportProxyKind = iota
 	proxyKindEnv
@@ -137,34 +143,86 @@ func (d *utlsDialer) dialPlainContext(ctx context.Context, network, addr string)
 
 // dialTunnel opens a TCP connection to addr, tunneling through a proxy first
 // when one is configured for the target host.
+//
+// With DoH in play the resolver answers with every A record, and the dial walks
+// them in rotation order until one accepts. A multi-homed provider routinely
+// publishes addresses this network cannot reach — observed live: 5 of 8 kiro
+// runtime records and 1 of 2 kilo records answered the proxy's CONNECT with 502
+// — and dialing only the first pick made every request a coin flip that cost a
+// full CONNECT timeout when it lost.
 func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string) (net.Conn, error) {
 	proxyURL := d.resolveProxy(host)
 	dialer := NewSafeDialer()
-	target := addr
+
+	targets := []string{addr}
 	if d.doh != nil {
-		resolved, err := d.doh.resolveDialTarget(ctx, host, addr)
+		resolved, err := d.doh.resolveDialTargets(ctx, host, addr)
 		if err != nil {
 			return nil, err
 		}
-		target = resolved
+		targets = resolved
 	}
+
 	if proxyURL == "" {
-		return dialer.DialContext(ctx, network, target)
+		var lastErr error
+		for _, target := range targets {
+			conn, err := dialer.DialContext(ctx, network, target)
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, lastErr
 	}
+
 	pu, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("proxy.utlsDialer: invalid proxy URL: %w", err)
 	}
 	proxyAddr := canonicalProxyAddr(pu)
-	conn, err := dialer.DialContext(ctx, network, proxyAddr)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for _, target := range targets {
+		// One dead record must not consume the caller's whole budget: with a
+		// single target the caller's deadline stands, but when there are more
+		// records to try each attempt is capped so the next one still gets a
+		// turn. dohDialAttemptTimeout is generous next to a healthy CONNECT
+		// (observed 0.4–1.9s) and short next to a request timeout.
+		attemptCtx := ctx
+		cancel := func() {}
+		if len(targets) > 1 {
+			attemptCtx, cancel = context.WithTimeout(ctx, dohDialAttemptTimeout)
+		}
+		conn, err := dialer.DialContext(attemptCtx, network, proxyAddr)
+		if err != nil {
+			cancel()
+			lastErr = err
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		if err := proxyConnect(attemptCtx, conn, target, pu); err != nil {
+			cancel()
+			_ = conn.Close()
+			lastErr = err
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		cancel()
+		// Name the address that actually accepted, not the one that was asked
+		// for: after a failover those differ, and a later TLS error has to
+		// report where the request really went.
+		if dialHost, _, splitErr := net.SplitHostPort(target); splitErr == nil {
+			rememberDoHResolution(host, dialHost, "")
+		}
+		return conn, nil
 	}
-	if err := proxyConnect(ctx, conn, target, pu); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return conn, nil
+	return nil, lastErr
 }
 
 // resolveProxy returns the proxy URL for targetHost, or "" for direct.
