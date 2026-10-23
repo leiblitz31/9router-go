@@ -821,7 +821,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	// Cursor empty-turn recovery (#4690): a 200 with no completion on a long
 	// session is retried once on a tail-only frame before failing the turn.
 	if fwdErr != nil && provider == "cursor" {
-		fwdErr = h.retryCursorEmptyTurn(ctx, w, providerCfg, apiKey, pipedBody, isStream, translateResponse, metrics, httpClient, fwdErr)
+		fwdErr = h.retryCursorEmptyTurn(ctx, w, providerCfg, apiKey, pipedBody, isStream, translateResponse, metrics, httpClient, fwdErr, provider)
 	}
 
 	// Codex answers an exhausted 5h/7d window with a 429 carrying

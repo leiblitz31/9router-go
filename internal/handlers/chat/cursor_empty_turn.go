@@ -131,7 +131,7 @@ func (h *ChatHandler) retryCursorEmptyTurn(
 	ctx context.Context, w http.ResponseWriter,
 	cfg *providers.ProviderConfig, apiKey string, body []byte,
 	isStream bool, translateResponse bool, metrics *streamMetrics,
-	httpClient *http.Client, firstErr error,
+	httpClient *http.Client, firstErr error, provider string,
 ) error {
 	if isStream || ctx.Err() != nil || !isCursorEmptyTurnError(firstErr) {
 		return firstErr
@@ -151,7 +151,7 @@ func (h *ChatHandler) retryCursorEmptyTurn(
 			}
 		}
 		log.Warn("fallback", "cursor empty turn, retrying tail-only", "attempt", attempt+1)
-		err = h.forwardRequest(ctx, w, cfg, apiKey, tail, isStream, translateResponse, metrics, httpClient)
+		err = h.forwardRequest(ctx, w, cfg, apiKey, tail, isStream, translateResponse, metrics, httpClient, provider)
 		if err == nil || !isCursorEmptyTurnError(err) {
 			return err
 		}

@@ -152,7 +152,7 @@ func TestCursorEmptyTurnRecovery(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	firstErr := internalproxy.UpstreamFailure(http.StatusBadGateway, "upstream answered 200 without a completion: the first choice carries no content, tool call or reasoning")
-	if err := h.retryCursorEmptyTurn(t.Context(), rec, cfg, "k", body, false, false, &streamMetrics{}, nil, firstErr); err != nil {
+	if err := h.retryCursorEmptyTurn(t.Context(), rec, cfg, "k", body, false, false, &streamMetrics{}, nil, firstErr, "cursor"); err != nil {
 		t.Fatalf("tail-only retry must recover: %v", err)
 	}
 	if calls.Load() != 1 {
@@ -179,7 +179,7 @@ func TestCursorEmptyTurnShortSessionNoRetry(t *testing.T) {
 	firstErr := internalproxy.UpstreamFailure(http.StatusBadGateway, "upstream answered 200 without a completion: the first choice carries no content, tool call or reasoning")
 	rec := httptest.NewRecorder()
 	cfg := &providers.ProviderConfig{BaseURL: "http://127.0.0.1:1"}
-	if err := h.retryCursorEmptyTurn(t.Context(), rec, cfg, "k", body, false, false, &streamMetrics{}, nil, firstErr); err != firstErr {
+	if err := h.retryCursorEmptyTurn(t.Context(), rec, cfg, "k", body, false, false, &streamMetrics{}, nil, firstErr, "cursor"); err != firstErr {
 		t.Errorf("short session must surface the original error untried, got %v", err)
 	}
 }
