@@ -242,6 +242,8 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Post("/api/combos", dashH.HandleCreateCombo)
 	r.Post("/api/combos/auto-free", dashH.HandleAutoFreeCombo)
 	r.Post("/api/combos/auto-family", dashH.HandleAutoFamilyCombos)
+	r.Get("/api/combos/presets", dashH.HandleGetComboPresets)
+	r.Post("/api/combos/presets", dashH.HandleCreateComboPresets)
 	r.Put("/api/combos/{id}", dashH.HandleUpdateCombo)
 	r.Delete("/api/combos/{id}", dashH.HandleDeleteCombo)
 

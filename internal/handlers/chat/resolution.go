@@ -300,18 +300,6 @@ func (h *ChatHandler) resolveModel(modelStr string) (*ModelInfo, error) {
 		}
 	}
 
-	// Codex-only GPT model slugs (open-sse/services/model.js MODEL_PREFIX_
-	// PROVIDERS): these exist on backend-api/codex/models but not on the OpenAI
-	// API, so a bare id from the Codex CLI's own picker used to fall through to
-	// openai and 404 for anyone holding only a Codex OAuth account (#4405).
-	// The rules sit ahead of the generic gpt-* fallback; plain gpt-4* / gpt-3.5*
-	// / gpt-4o* stay on openai.
-	//
-	// Outside the Repo guard so it resolves with nil Repo / an empty DB.
-	if codexOnlyModelSlug(modelStr) {
-		return &ModelInfo{Provider: "codex", Model: modelStr}, nil
-	}
-
 	// 3. Check if it's a combo name
 	if h.Repo != nil {
 		combo, err := h.Repo.GetComboByName(modelStr)
@@ -341,6 +329,24 @@ func (h *ChatHandler) resolveModel(modelStr string) (*ModelInfo, error) {
 				}
 			}
 		}
+	}
+
+	// Codex-only GPT model slugs (open-sse/services/model.js MODEL_PREFIX_
+	// PROVIDERS): these exist on backend-api/codex/models but not on the OpenAI
+	// API, so a bare id from the Codex CLI's own picker used to fall through to
+	// openai and 404 for anyone holding only a Codex OAuth account (#4405).
+	// The rules sit ahead of the generic gpt-* fallback; plain gpt-4* / gpt-3.5*
+	// / gpt-4o* stay on openai.
+	//
+	// After step 3 deliberately: a stored combo owns the bare id it is named
+	// after, exactly as upstream orders it (src/sse/services/model.js resolves
+	// the combo before the prefix inference). The cursor presets seed combos
+	// named `gpt-5.2-codex` / `gpt-5.3-codex`, and running this rule first made
+	// them served-yet-unrouteable.
+	//
+	// Outside the Repo guard so it resolves with nil Repo / an empty DB.
+	if codexOnlyModelSlug(modelStr) {
+		return &ModelInfo{Provider: "codex", Model: modelStr}, nil
 	}
 
 	// 3.5 Check if it's a bare provider alias (e.g., "ag" -> "antigravity")
