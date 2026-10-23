@@ -551,7 +551,6 @@ func init() {
 		"poolside/laguna-xs-2.1:free":      {Tools: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 262144, MaxOutput: 32768},
 		"stealth/missingno":                {Tools: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 262144, MaxOutput: 131072},
 	}
-	providerCapabilities["ns"] = providerCapabilities["nous"]
 
 	// `cx` is the alias codex publishes under, so it serves the same catalog
 	// upstream does (open-sse/providers/capabilities.js:

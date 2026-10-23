@@ -1,8 +1,10 @@
 package providers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -245,12 +247,157 @@ func NormalizeNousFreeModels(payload any) []NousCatalogModel {
 	return normalized
 }
 
+// ShouldApplyNousAttribution checks whether a target URL qualifies for Nous
+// attribution tags: scheme must be "https", hostname must match
+// NousAttributionHostname, and path must match NousAttributionChatCompletionsPath
+// (or the /v1 base path that normalizes to it).
+func ShouldApplyNousAttribution(rawURL string) bool {
+	if rawURL == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "https" {
+		return false
+	}
+	if u.Hostname() != NousAttributionHostname {
+		return false
+	}
+	p := strings.TrimRight(u.Path, "/")
+	if p == "/v1" {
+		p = "/v1/chat/completions"
+	}
+	return p == NousAttributionChatCompletionsPath
+}
+
+// ApplyNousThinking translates thinking/reasoning parameters into Nous's wire
+// dialect for models declaring ThinkingFormat: "nous":
+//   - When reasoning is enabled, emits nested {"reasoning": {"enabled": true, "effort": ...}}
+//     where effort is preserved, or "medium" for auto mode.
+//   - When thinking is disabled ("none" or "off"), omits the reasoning object
+//     if the model can disable thinking.
+//   - Removes top-level reasoning_effort and other thinking control fields.
+//   - If no thinking was requested, leaves the body untouched.
+//   - Only applies when provider is "nous" (or its alias "ns") to prevent
+//     cross-provider mutation (AGENTS.md §3.A).
+func ApplyNousThinking(body []byte, provider string) []byte {
+	// Strictly scope to the nous provider (and its alias "ns") to prevent
+	// cross-provider leakage where a non-Nous provider serving a model with
+	// a matching ID would incorrectly get the Nous dialect applied.
+	if provider != "nous" && provider != "ns" {
+		return body
+	}
+
+	if !bytes.Contains(body, []byte("reasoning")) &&
+		!bytes.Contains(body, []byte("thinking")) &&
+		!bytes.Contains(body, []byte("output_config")) &&
+		!bytes.Contains(body, []byte("(")) {
+		return body
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
+		return body
+	}
+
+	rawModel, _ := raw["model"].(string)
+	cleanModel, suffix := splitThinkingSuffix(rawModel)
+	modelForCaps := strings.TrimPrefix(cleanModel, "nous/")
+	caps := GetCapabilitiesForModel(provider, modelForCaps)
+	if caps.ThinkingFormat != "nous" {
+		return body
+	}
+
+	var intent string
+	if suffix != "" {
+		intent = strings.Trim(suffix, "()")
+		raw["model"] = cleanModel
+	} else if oc, ok := raw["output_config"].(map[string]any); ok && oc["effort"] != nil {
+		intent, _ = oc["effort"].(string)
+	} else if re, ok := raw["reasoning_effort"].(string); ok && re != "" {
+		intent = re
+	} else if r, ok := raw["reasoning"].(map[string]any); ok {
+		if eff, ok := r["effort"].(string); ok && eff != "" {
+			intent = eff
+		} else if enabled, ok := r["enabled"].(bool); ok {
+			if !enabled {
+				intent = "none"
+			} else {
+				intent = "enabled"
+			}
+		}
+	} else if t, ok := raw["thinking"].(map[string]any); ok {
+		if typ, ok := t["type"].(string); ok {
+			if strings.EqualFold(typ, "disabled") {
+				intent = "none"
+			} else if strings.EqualFold(typ, "adaptive") || strings.EqualFold(typ, "enabled") {
+				intent = "auto"
+			}
+		}
+	} else if et, ok := raw["enable_thinking"].(bool); ok {
+		if !et {
+			intent = "none"
+		} else {
+			intent = "auto"
+		}
+	}
+
+	if intent == "" {
+		return body
+	}
+
+	delete(raw, "reasoning_effort")
+	delete(raw, "thinking")
+	delete(raw, "output_config")
+	delete(raw, "enable_thinking")
+	delete(raw, "thinking_budget")
+	delete(raw, "reasoning")
+
+	intentLower := strings.ToLower(strings.TrimSpace(intent))
+	none := intentLower == "none" || intentLower == "off"
+	canDisable := caps.ThinkingCanDisable == nil || *caps.ThinkingCanDisable
+
+	if none && canDisable {
+		// Omit reasoning
+	} else {
+		var level string
+		switch {
+		case intentLower == "auto":
+			level = "medium"
+		case none && !canDisable:
+			level = "minimal"
+		case intentLower != "enabled":
+			level = intentLower
+		}
+
+		reasoning := map[string]any{"enabled": true}
+		if level != "" {
+			reasoning["effort"] = level
+		}
+		raw["reasoning"] = reasoning
+	}
+
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
 // ApplyNousAttribution tags API-key requests with 9router attribution tags,
 // preserving any caller-provided tags and removing empty tags.
 func ApplyNousAttribution(body []byte) []byte {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return body
+	}
+
+	if rawTags, exists := req["tags"]; exists && rawTags != nil {
+		if _, ok := rawTags.([]any); !ok {
+			return body
+		}
 	}
 
 	var existingTags []string

@@ -182,4 +182,165 @@ func TestNousAttribution(t *testing.T) {
 			t.Errorf("empty tags not removed: %v", tags)
 		}
 	})
+
+	t.Run("preserves malformed caller tags for upstream validation", func(t *testing.T) {
+		for _, raw := range []string{
+			`{"model":"stepfun/step-5-preview:free","messages":[{"role":"user","content":"hi"}],"tags":"user=alice"}`,
+			`{"model":"stepfun/step-5-preview:free","messages":[{"role":"user","content":"hi"}],"tags":42}`,
+			`{"model":"stepfun/step-5-preview:free","messages":[{"role":"user","content":"hi"}],"tags":{"user":"alice"}}`,
+		} {
+			out := ApplyNousAttribution([]byte(raw))
+			if string(out) != raw {
+				t.Errorf("expected malformed tags preserved unchanged: got %s, want %s", string(out), raw)
+			}
+		}
+	})
+}
+
+func TestShouldApplyNousAttribution(t *testing.T) {
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{url: "https://api.example.test/v1", want: false},
+		{url: "https://inference-api.nousresearch.com.evil.test/v1", want: false},
+		{url: "https://user@evil.test/v1", want: false},
+		{url: "http://inference-api.nousresearch.com/v1", want: false},
+		{url: "not-a-url", want: false},
+		{url: "https://inference-api.nousresearch.com/v1", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got := ShouldApplyNousAttribution(tt.url)
+			if got != tt.want {
+				t.Errorf("ShouldApplyNousAttribution(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyNousThinking(t *testing.T) {
+	t.Run("reasoning level set to high", func(t *testing.T) {
+		body := []byte(`{"model":"meituan/longcat-2.0:free","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`)
+		out := ApplyNousThinking(body, "nous")
+
+		var req map[string]any
+		if err := json.Unmarshal(out, &req); err != nil {
+			t.Fatalf("failed to unmarshal output: %v", err)
+		}
+		if _, exists := req["reasoning_effort"]; exists {
+			t.Errorf("expected reasoning_effort removed, but was present in %s", out)
+		}
+		reasoning, ok := req["reasoning"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected nested reasoning object in %s", out)
+		}
+		if enabled, _ := reasoning["enabled"].(bool); !enabled {
+			t.Errorf("expected reasoning.enabled=true, got %v", reasoning["enabled"])
+		}
+		if effort, _ := reasoning["effort"].(string); effort != "high" {
+			t.Errorf("expected reasoning.effort=high, got %v", reasoning["effort"])
+		}
+	})
+
+	t.Run("auto mode maps to medium effort", func(t *testing.T) {
+		body := []byte(`{"model":"stepfun/step-5-preview:free","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"auto"}`)
+		out := ApplyNousThinking(body, "nous")
+
+		var req map[string]any
+		if err := json.Unmarshal(out, &req); err != nil {
+			t.Fatalf("failed to unmarshal output: %v", err)
+		}
+		if _, exists := req["reasoning_effort"]; exists {
+			t.Errorf("expected reasoning_effort removed, but was present in %s", out)
+		}
+		reasoning, ok := req["reasoning"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected nested reasoning object in %s", out)
+		}
+		if enabled, _ := reasoning["enabled"].(bool); !enabled {
+			t.Errorf("expected reasoning.enabled=true, got %v", reasoning["enabled"])
+		}
+		if effort, _ := reasoning["effort"].(string); effort != "medium" {
+			t.Errorf("expected reasoning.effort=medium, got %v", reasoning["effort"])
+		}
+	})
+
+	t.Run("thinking disabled omits reasoning", func(t *testing.T) {
+		body := []byte(`{"model":"meituan/longcat-2.0:free","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`)
+		out := ApplyNousThinking(body, "nous")
+
+		var req map[string]any
+		if err := json.Unmarshal(out, &req); err != nil {
+			t.Fatalf("failed to unmarshal output: %v", err)
+		}
+		if _, exists := req["reasoning_effort"]; exists {
+			t.Errorf("expected reasoning_effort removed, but was present in %s", out)
+		}
+		if _, exists := req["reasoning"]; exists {
+			t.Errorf("expected reasoning omitted when disabled, but got %v", req["reasoning"])
+		}
+	})
+
+	t.Run("non-nous model untouched", func(t *testing.T) {
+		body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`)
+		out := ApplyNousThinking(body, "nous")
+
+		var req map[string]any
+		if err := json.Unmarshal(out, &req); err != nil {
+			t.Fatalf("failed to unmarshal output: %v", err)
+		}
+		if effort, _ := req["reasoning_effort"].(string); effort != "high" {
+			t.Errorf("expected reasoning_effort unchanged for non-nous model, got %v", req["reasoning_effort"])
+		}
+		if _, exists := req["reasoning"]; exists {
+			t.Errorf("expected reasoning not added for non-nous model, but got %v", req["reasoning"])
+		}
+	})
+
+	t.Run("no thinking intent leaves request untouched", func(t *testing.T) {
+		body := []byte(`{"model":"meituan/longcat-2.0:free","messages":[{"role":"user","content":"hi"}]}`)
+		out := ApplyNousThinking(body, "nous")
+		if string(out) != string(body) {
+			t.Errorf("expected body untouched when no thinking intent: got %s, want %s", out, body)
+		}
+	})
+
+	t.Run("non-nous provider does not apply thinking dialect", func(t *testing.T) {
+		body := []byte(`{"model":"meituan/longcat-2.0:free","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`)
+		out := ApplyNousThinking(body, "openai-compatible-chat-x")
+
+		var req map[string]any
+		if err := json.Unmarshal(out, &req); err != nil {
+			t.Fatalf("failed to unmarshal output: %v", err)
+		}
+		if effort, _ := req["reasoning_effort"].(string); effort != "high" {
+			t.Errorf("expected reasoning_effort unchanged for non-nous provider, got %v", req["reasoning_effort"])
+		}
+		if _, exists := req["reasoning"]; exists {
+			t.Errorf("expected reasoning not added for non-nous provider, but got %v", req["reasoning"])
+		}
+	})
+}
+
+func TestNousAlias_Deduplicated(t *testing.T) {
+	// providerCapabilities and ProviderModels must not have duplicate "ns" entries
+	if _, exists := providerCapabilities["ns"]; exists {
+		t.Error("providerCapabilities['ns'] must be dropped as ns is an alias")
+	}
+	if _, exists := ProviderModels["ns"]; exists {
+		t.Error("ProviderModels['ns'] must be dropped as ns is an alias")
+	}
+	// "ns" alias must still resolve to "nous" and access its models & capabilities
+	if got := ResolveAlias("ns"); got != "nous" {
+		t.Errorf("ResolveAlias('ns') = %q, want 'nous'", got)
+	}
+	models := GetProviderModels("ns")
+	if len(models) == 0 {
+		t.Error("GetProviderModels('ns') returned no models")
+	}
+	caps := GetCapabilitiesForModel("nous", "meituan/longcat-2.0:free")
+	if caps.ThinkingFormat != "nous" {
+		t.Errorf("GetCapabilitiesForModel('nous') thinkingFormat = %q, want 'nous'", caps.ThinkingFormat)
+	}
 }

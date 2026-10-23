@@ -38,6 +38,7 @@ func (h *ChatHandler) forwardRequest(
 	// directly for every provider without a custom executor — the assigned
 	// pool would look bound in the dashboard and never be used.
 	httpClient *http.Client,
+	provider string,
 ) error {
 	// A nil client means the caller had no connection context; the shared one
 	// is the only sensible default.
@@ -67,8 +68,9 @@ func (h *ChatHandler) forwardRequest(
 			}
 		}
 	}
-	// Nous Portal attribution tags (upstream NOUS_ATTRIBUTION / PR #4770)
-	if strings.Contains(cfg.BaseURL, providers.NousAttributionHostname) {
+	// Nous Portal thinking dialect and attribution tags (upstream NOUS_ATTRIBUTION / PR #4770 / thinkingUnified)
+	body = providers.ApplyNousThinking(body, provider)
+	if apiKey != "" && providers.ShouldApplyNousAttribution(cfg.BaseURL) {
 		body = providers.ApplyNousAttribution(body)
 	}
 	resp, err := internalproxy.ForwardOpenAI(ctx, httpClient, cfg, apiKey, body, isStream)
