@@ -207,7 +207,11 @@ func newSafeDialerForProxy(allow *proxyAllowlist) *net.Dialer {
 			if allow.allows(address, host) {
 				return nil
 			}
-			ip := net.ParseIP(host)
+			// netguard.ParseIP strips an IPv6 zone. net.ParseIP answers nil
+			// for "::1%lo", and the nil branch below is "not an address, let
+			// it through" — so a zoned literal dialled a loopback or metadata
+			// target this hook exists to refuse.
+			ip := netguard.ParseIP(host)
 			if ip != nil {
 				if ip.IsLoopback() && IsLoopbackAllowed(ctx) {
 					return nil

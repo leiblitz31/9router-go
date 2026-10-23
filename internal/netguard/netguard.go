@@ -13,7 +13,26 @@
 // here; the stdlib predicates answer the rest.
 package netguard
 
-import "net"
+import (
+	"net"
+	"strings"
+)
+
+// ParseIP answers the address a literal host names, ignoring an IPv6 zone.
+//
+// net.ParseIP reports nil for a zoned literal ("::1%lo", "fd00:ec2::254%eth0"),
+// so a caller that treats nil as "not an address" skips its check and lets the
+// literal through. A zone names the interface a packet leaves by — it changes
+// which link the packet uses, never where it is going. Every guard in this
+// repository therefore has to read the two forms the same way, which is what
+// this function is for; use it instead of net.ParseIP on a host taken from a
+// URL or a dial address.
+func ParseIP(host string) net.IP {
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	return net.ParseIP(host)
+}
 
 // cidrBlocks are the ranges net.IP's own methods do not cover. They are
 // separate from the built-in predicates because Go's IsPrivate() answers only
