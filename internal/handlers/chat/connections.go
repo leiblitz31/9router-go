@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -30,22 +31,38 @@ var CredentialFallbacks = map[string]string{
 	"clinepass":     "cline",
 }
 
-func (h *ChatHandler) ResolveProviderProxyPoolID(provider string) string {
-	return h.ResolveProviderProxyPoolIDWithExclusions(provider, nil)
+// errNoUsablePool is the routing verdict for "rotation is configured but every
+// active pool is excluded". It is not a client error: the attempt drops its
+// pool binding and goes direct, which is what lets the failover loop keep
+// going instead of turning the exhausted rotation into a hard failure.
+var errNoUsablePool = errors.New("no usable proxy pool")
+
+// excludedFrom reads the exclusion set callers pass as an optional variadic.
+func excludedFrom(excludePools []map[string]bool) map[string]bool {
+	if len(excludePools) == 0 {
+		return nil
+	}
+	return excludePools[0]
 }
 
-// ResolveProviderProxyPoolIDWithExclusions resolves the proxy pool ID for a
-// provider, filtering out pools in excludeIDs. Upstream decolua/9router#4998:
-// when rotating proxy pools for no-auth providers, failed pools must be
-// excluded from rotation so the next candidate is tried instead of surfacing
-// the error immediately.
-func (h *ChatHandler) ResolveProviderProxyPoolIDWithExclusions(provider string, excludeIDs []string) string {
+// ResolveProviderProxyPoolID returns the provider-level pool one attempt should
+// use. excludePools carries the pools already refused during this turn, so a
+// rotated attempt never lands back on an egress that just failed.
+func (h *ChatHandler) ResolveProviderProxyPoolID(provider string, excludePools ...map[string]bool) string {
+	id, _ := h.resolveProviderProxyPoolID(provider, excludedFrom(excludePools))
+	return id
+}
+
+// resolveProviderProxyPoolID is ResolveProviderProxyPoolID with the sentinel:
+// errNoUsablePool means the pool binding was dropped on purpose (direct
+// attempt), not that the provider is unusable.
+func (h *ChatHandler) resolveProviderProxyPoolID(provider string, excluded map[string]bool) (string, error) {
 	if h.Repo == nil {
-		return ""
+		return "", nil
 	}
 	settings, err := h.Repo.GetSettings()
 	if err != nil || settings == nil || settings.ProviderStrategies == nil {
-		return ""
+		return "", nil
 	}
 	var singleID, rotate string
 	for _, p := range providerStrategyKeys(provider) {
@@ -61,62 +78,23 @@ func (h *ChatHandler) ResolveProviderProxyPoolIDWithExclusions(provider string, 
 	// Pool rotation is a NoAuth-provider feature: the provider card offers it
 	// only inside its `isNoAuth` block, and there `rotateStrategy` holds a POOL
 	// rotation. On a keyed provider the same key holds ACCOUNT rotation, so
-	// honouring it here would send that provider's egress through pools its
-	// operator never configured.
-	if rotate != "" && providers.IsNoAuthProvider(provider) {
-		if id := h.rotatedActiveProxyPoolWithExclusions(provider, rotate, excludeIDs); id != "" {
-			return id
+	// honouring it by default would send that provider's egress through pools
+	// its operator never configured. The exception is a live exclusion set: the
+	// loop only fills it after an OpenCode free-tier refusal, and rotating to
+	// the next egress is exactly the fix for that refusal.
+	if rotate != "" && (providers.IsNoAuthProvider(provider) || len(excluded) > 0) {
+		id, rotErr := h.rotatedActiveProxyPoolWithin(provider, rotate, excluded)
+		if rotErr != nil {
+			return "", rotErr
+		}
+		if id != "" {
+			return id, nil
 		}
 	}
-	// A pinned single pool that was excluded must not be used (upstream #4998:
-	// `else if (pickedId && (excludeSet.has(`proxy:${pickedId}`) || ...)) return null`).
-	// Upstream #5046 narrows that return for no-auth providers: a pinned pool
-	// excluded after a fallbackable error fails over to the next healthy active
-	// pool instead of failing the request outright — one blocked relay IP must
-	// not hard-fail the provider while other configured pools are healthy. The
-	// pin stays the first choice while it is healthy, the failover target is
-	// always another proxy (never direct egress), and "" is returned only once
-	// every active pool is excluded. Keyed providers keep the #4998 behaviour:
-	// pool exclusions are a no-auth mechanism (see the rotation gate above).
-	if singleID != "" && isExcludedProxyPool(singleID, excludeIDs) {
-		if providers.IsNoAuthProvider(provider) {
-			if id := h.nextActiveProxyPoolWithExclusions(excludeIDs); id != "" {
-				log.Warn("connections", "pinned proxy pool excluded, failing over",
-					"provider", provider, "pinnedPool", singleID, "failoverPool", id)
-				return id
-			}
-		}
-		return ""
+	if excluded[singleID] {
+		return "", errNoUsablePool
 	}
-	return singleID
-}
-
-// nextActiveProxyPoolWithExclusions returns the first active pool (in
-// ActivePoolIDs order: active pools carrying a URL, creation order) that is
-// not in excludeIDs, or "" when every active pool is excluded. Upstream
-// #5046: the exclusion set is per-request and grows with each failed attempt,
-// so a chain of dead pools walks the list with no extra state.
-func (h *ChatHandler) nextActiveProxyPoolWithExclusions(excludeIDs []string) string {
-	if h.Repo == nil {
-		return ""
-	}
-	for _, id := range h.Repo.ActivePoolIDs() {
-		if !isExcludedProxyPool(id, excludeIDs) {
-			return id
-		}
-	}
-	return ""
-}
-
-// isExcludedProxyPool reports whether a pool ID is in the exclusion set,
-// matching both the bare ID and the `proxy:${id}` tagged form (upstream #4998).
-func isExcludedProxyPool(poolID string, excludeIDs []string) bool {
-	for _, id := range excludeIDs {
-		if id == poolID || id == "proxy:"+poolID {
-			return true
-		}
-	}
-	return false
+	return singleID, nil
 }
 
 // poolRotationCursors holds one round-robin cursor per provider. A single
@@ -131,62 +109,42 @@ var poolRotationCursors sync.Map // map[string]*atomic.Uint64
 // A pool with no URL is excluded upstream: it cannot serve a request, and
 // selecting it would hand a share of the traffic to a pool the resolver then
 // refuses.
-func (h *ChatHandler) rotatedActiveProxyPool(provider, strategy string) string {
-	return h.rotatedActiveProxyPoolWithExclusions(provider, strategy, nil)
+func (h *ChatHandler) rotatedActiveProxyPool(provider, strategy string, excludePools ...map[string]bool) string {
+	id, _ := h.rotatedActiveProxyPoolWithin(provider, strategy, excludedFrom(excludePools))
+	return id
 }
 
-// rotatedActiveProxyPoolWithExclusions picks the next pool excluding failed
-// pools in excludeIDs. Upstream decolua/9router#4998: when all pools are
-// excluded, returns "" so the caller can return null instead of leaking to
-// direct egress.
-func (h *ChatHandler) rotatedActiveProxyPoolWithExclusions(provider, strategy string, excludeIDs []string) string {
+// rotatedActiveProxyPoolWithin is rotatedActiveProxyPool with the exclusion set
+// applied before the cursor moves: an excluded pool is never a candidate, so
+// the rotation walks only egresses this turn has not tried yet.
+func (h *ChatHandler) rotatedActiveProxyPoolWithin(provider, strategy string, excluded map[string]bool) (string, error) {
 	if h.Repo == nil {
-		return ""
+		return "", nil
 	}
 	ids := h.Repo.ActivePoolIDs()
 	if len(ids) == 0 {
-		return ""
+		return "", nil
 	}
-	// Filter out excluded pools (upstream #4998).
-	var eligible []string
-	for _, id := range ids {
-		if !isExcludedProxyPool(id, excludeIDs) {
-			eligible = append(eligible, id)
+	if len(excluded) > 0 {
+		usable := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if !excluded[id] {
+				usable = append(usable, id)
+			}
 		}
-	}
-	if len(eligible) == 0 {
-		return ""
+		if len(usable) == 0 {
+			return "", errNoUsablePool
+		}
+		ids = usable
 	}
 	if strings.ToLower(strings.TrimSpace(strategy)) == "random" {
-		return eligible[rand.IntN(len(eligible))]
+		return ids[rand.IntN(len(ids))], nil
 	}
 	// Keyed on the resolved alias so `oc` and `opencode` share one cursor: they
 	// are the same provider and must advance together.
 	cursor, _ := poolRotationCursors.LoadOrStore(providers.ResolveAlias(provider), new(atomic.Uint64))
 	idx := cursor.(*atomic.Uint64).Add(1) - 1
-	return eligible[idx%uint64(len(eligible))]
-}
-
-// proxyPoolDisplayName returns the human-readable name of a proxy pool for
-// logging, or "" if the pool cannot be found (upstream #4998 uses
-// `resolvedProxy.proxyPool?.name`).
-func (h *ChatHandler) proxyPoolDisplayName(poolID string) string {
-	if h.Repo == nil {
-		return ""
-	}
-	pool, err := h.Repo.GetProxyPool(poolID)
-	if err != nil || pool == nil {
-		return ""
-	}
-	return pool.Name
-}
-
-// truncateID shortens an ID for display, keeping at most n characters.
-func truncateID(id string, n int) string {
-	if len(id) <= n {
-		return id
-	}
-	return id[:n]
+	return ids[idx%uint64(len(ids))], nil
 }
 
 // providerStrategyKeys lists the settings keys a provider's pool may be stored
@@ -261,20 +219,20 @@ func proxyPoolCounterpart(provider string) string {
 
 // GetBestConnection retrieves the highest-priority active connection for a provider.
 // When connectionID is non-empty, it fetches that specific connection directly.
-func (h *ChatHandler) GetBestConnection(provider string, connectionID string, excludeIDs []string, model string) (*models.ProviderConnection, *ConnectionData, error) {
-	return h.getBestConnection(provider, connectionID, excludeIDs, model)
+func (h *ChatHandler) GetBestConnection(provider string, connectionID string, excludeIDs []string, model string, excludePools ...map[string]bool) (*models.ProviderConnection, *ConnectionData, error) {
+	return h.getBestConnection(provider, connectionID, excludeIDs, model, excludePools...)
 }
 
 // GetBestConnectionWithContext is the context-aware variant of GetBestConnection.
-func (h *ChatHandler) GetBestConnectionWithContext(ctx context.Context, provider string, connectionID string, excludeIDs []string, model string) (*models.ProviderConnection, *ConnectionData, error) {
-	return h.getBestConnectionWithContext(ctx, provider, connectionID, excludeIDs, model)
+func (h *ChatHandler) GetBestConnectionWithContext(ctx context.Context, provider string, connectionID string, excludeIDs []string, model string, excludePools ...map[string]bool) (*models.ProviderConnection, *ConnectionData, error) {
+	return h.getBestConnectionWithContext(ctx, provider, connectionID, excludeIDs, model, excludePools...)
 }
 
-func (h *ChatHandler) getBestConnection(provider string, connectionID string, excludeIDs []string, model string) (*models.ProviderConnection, *ConnectionData, error) {
-	return h.getBestConnectionWithContext(context.Background(), provider, connectionID, excludeIDs, model)
+func (h *ChatHandler) getBestConnection(provider string, connectionID string, excludeIDs []string, model string, excludePools ...map[string]bool) (*models.ProviderConnection, *ConnectionData, error) {
+	return h.getBestConnectionWithContext(context.Background(), provider, connectionID, excludeIDs, model, excludePools...)
 }
 
-func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider string, connectionID string, excludeIDs []string, model string) (*models.ProviderConnection, *ConnectionData, error) {
+func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider string, connectionID string, excludeIDs []string, model string, excludePools ...map[string]bool) (*models.ProviderConnection, *ConnectionData, error) {
 	if model != "" && !h.Repo.IsProviderAvailable(provider, model) {
 		log.Warn("health", "unhealthy provider", "provider", provider, "model", model)
 	}
@@ -339,25 +297,10 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 				connData := &ConnectionData{
 					AccessToken: "public",
 				}
-				// Upstream decolua/9router#4998: tag proxy-backed virtual
-				// connections with their pool ID (`proxy:${poolId}`) so a
-				// failed pool can be excluded from rotation on retry, instead
-				// of surfacing the error immediately.
-				poolID := h.ResolveProviderProxyPoolIDWithExclusions(provider, excludeIDs)
-				connData.ProxyPoolID = poolID
-				connID := "noauth"
+				connData.ProxyPoolID = h.ResolveProviderProxyPoolID(provider, excludePools...)
 				publicName := "Public"
-				if poolID != "" {
-					connID = "proxy:" + poolID
-					// Use the pool name for human-readable logging (upstream #4998).
-					if poolName := h.proxyPoolDisplayName(poolID); poolName != "" {
-						publicName = poolName
-					} else {
-						publicName = "Proxy (" + truncateID(poolID, 8) + ")"
-					}
-				}
 				conn := &models.ProviderConnection{
-					ID:       connID,
+					ID:       "noauth",
 					Provider: provider,
 					Name:     &publicName,
 					IsActive: 1,
@@ -505,7 +448,7 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 	// provider itself. It used to be read only for the synthesized no-auth
 	// connection, so a stored connection carrying its own key went out
 	// directly — the assignment the dashboard shows was never dialled.
-	h.applyProviderProxyPool(&connData, provider)
+	h.applyProviderProxyPool(&connData, provider, excludePools...)
 
 	return conn, &connData, nil
 }
@@ -531,12 +474,22 @@ func (h *ChatHandler) connectionModelBlocked(c *models.ProviderConnection, provi
 }
 
 // applyProviderProxyPool binds a provider-level pool to a connection that has
-// none of its own. An explicit per-connection binding always wins.
-func (h *ChatHandler) applyProviderProxyPool(connData *ConnectionData, provider string) {
-	if connData == nil || connData.ProxyPoolID != "" {
+// none of its own. An explicit per-connection binding wins unless that pool is
+// in the turn's exclusion set: the bound egress just refused, so retrying it
+// would loop. With every pool excluded the binding is dropped and the attempt
+// goes direct (errNoUsablePool), which keeps the failover loop moving.
+func (h *ChatHandler) applyProviderProxyPool(connData *ConnectionData, provider string, excludePools ...map[string]bool) {
+	if connData == nil {
 		return
 	}
-	if poolID := h.ResolveProviderProxyPoolID(provider); poolID != "" {
+	excluded := excludedFrom(excludePools)
+	if connData.ProxyPoolID != "" {
+		if !excluded[connData.ProxyPoolID] {
+			return
+		}
+		connData.ProxyPoolID = ""
+	}
+	if poolID := h.ResolveProviderProxyPoolID(provider, excludePools...); poolID != "" {
 		connData.ProxyPoolID = poolID
 	}
 }
@@ -695,26 +648,6 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 
 	if baseCfg == nil {
 		return nil, fmt.Errorf("provider %q has no baseUrl in connection data and is not in KnownProviders", provider)
-	}
-
-	// Stamp the node id on every config: a few rules key off the node SHAPE
-	// rather than the upstream host (the Nous attribution rule only applies to
-	// a custom `openai-compatible-*` node). Clones below inherit it, but a relay
-	// rewrite must not lose it, so it is re-applied on the final config.
-	baseCfg.ProviderID = provider
-
-	// Fill the {accountId} placeholder a registry URL may carry (Cloudflare
-	// Workers AI names the account in the path) from the selected connection:
-	// the id lives in providerSpecificData, the same field the dashboard's
-	// connection test reads. Without this the placeholder went upstream
-	// verbatim, so every cf/* chat request 404'd while the connection test —
-	// which does substitute — stayed green.
-	if connData != nil && strings.Contains(baseCfg.BaseURL, "{accountId}") {
-		if accountID, ok := connData.ProviderSpecificData["accountId"].(string); ok {
-			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-				baseCfg.BaseURL = strings.Replace(baseCfg.BaseURL, "{accountId}", trimmed, 1)
-			}
-		}
 	}
 
 	// Check if this connection uses an Edge Relay Proxy Pool (Vercel, Cloudflare, Deno)
