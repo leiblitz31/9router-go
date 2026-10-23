@@ -1144,6 +1144,11 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	"daoxe": {
+		BaseURL:    "https://api.daoxe.com/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	"bazaarlink": {
 		BaseURL:    "https://bazaarlink.ai/api/v1/chat/completions",
 		AuthHeader: "Authorization",
@@ -1179,6 +1184,16 @@ var KnownProviders = map[string]ProviderConfig{
 	},
 	"morph": {
 		BaseURL:    "https://api.morphllm.com/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
+	"nan": {
+		BaseURL:    "https://api.nan.builders/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
+	"openadapter": {
+		BaseURL:    "https://api.openadapter.in/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},

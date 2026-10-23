@@ -562,6 +562,32 @@ func init() {
 	// PROVIDER_CAPABILITIES["minimax-code-global"] = PROVIDER_CAPABILITIES["minimax-code"]).
 	providerCapabilities["minimax-code-global"] = providerCapabilities["minimax-code"]
 
+	// DaoXE (daoxe) — OpenAI-compatible free tier
+	providerCapabilities["daoxe"] = map[string]Capabilities{
+		"gpt-4o":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
+		"gpt-4o-mini":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
+		"gpt-3.5-turbo": {Tools: true},
+	}
+
+	// NaN.Builders (nanbuilders) — OpenAI-compatible free tier
+	providerCapabilities["nanbuilders"] = map[string]Capabilities{
+		"gpt-4o":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
+		"gpt-4o-mini":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
+		"gpt-3.5-turbo": {Tools: true},
+	}
+
+	// OpenAdapter (openadapter) — OpenAI-compatible free tier
+	providerCapabilities["openadapter"] = map[string]Capabilities{
+		"gpt-4o":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
+		"gpt-4o-mini":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
+		"gpt-3.5-turbo": {Tools: true},
+	}
+
+	// Aliases share the same capabilities catalog
+	providerCapabilities["dx"] = providerCapabilities["daoxe"]
+	providerCapabilities["nan"] = providerCapabilities["nanbuilders"]
+	providerCapabilities["oad"] = providerCapabilities["openadapter"]
+
 	initPatternIndex()
 }
 

@@ -627,6 +627,21 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "daoxe",
+    "name": "DaoXE",
+    "category": "freeTier",
+    "alias": "dx",
+    "color": "#10B981",
+    "icon": "auto_awesome",
+    "website": "https://daoxe.com",
+    "notice": {"apiKeyUrl":"https://daoxe.com/token"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
     "id": "coqui",
     "name": "Coqui TTS",
     "category": "freeTier",
@@ -700,6 +715,36 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "icon": "login",
     "website": "https://kilo.ai",
     "notice": {"apiKeyUrl":"https://kilo.ai/dashboard?tab=apiKeys"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
+    "id": "nan",
+    "name": "NaN.Builders",
+    "category": "freeTier",
+    "alias": "nan",
+    "color": "#06B6D4",
+    "icon": "construction",
+    "website": "https://nan.builders",
+    "notice": {"apiKeyUrl":"https://cloud.nan.builders"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
+    "id": "openadapter",
+    "name": "OpenAdapter",
+    "category": "freeTier",
+    "alias": "oad",
+    "color": "#8B5CF6",
+    "icon": "hub",
+    "website": "https://openadapter.dev",
+    "notice": {"apiKeyUrl":"https://dashboard.openadapter.in"},
     "authType": "apikey",
     "noAuth": false,
     "serviceKinds": [
