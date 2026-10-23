@@ -877,6 +877,38 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Qwen 2.5 Coder 32B Instruct"
     },
     {
+      "id": "@cf/qwen/qwen3.8-27b",
+      "name": "Qwen 3.8 27B"
+    },
+    {
+      "id": "@cf/zai-org/glm-5.2",
+      "name": "GLM 5.2"
+    },
+    {
+      "id": "@cf/moonshotai/kimi-k2.7-code",
+      "name": "Kimi K2.7 Code"
+    },
+    {
+      "id": "@cf/openai/gpt-oss-120b",
+      "name": "GPT-OSS 120B"
+    },
+    {
+      "id": "@cf/google/gemma-4-26b-a4b-it",
+      "name": "Gemma 4 26B A4B IT"
+    },
+    {
+      "id": "@cf/meta/llama-4-scout-17b-16e-instruct",
+      "name": "Llama 4 Scout 17B 16E Instruct"
+    },
+    {
+      "id": "@cf/nvidia/nemotron-3-120b-a12b",
+      "name": "Nemotron 3 120B A12B"
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro"
+    },
+    {
       "id": "@cf/black-forest-labs/flux-2-klein-9b",
       "name": "FLUX.2 Klein 9B",
       "params": [
