@@ -133,6 +133,11 @@ func (h *DashboardHandler) saveCustomModelsBatch(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// A bulk import is the path an operator uses to pull a whole /models list,
+	// so it is the one most likely to hand a rule new members. One pass covers
+	// the whole batch; it runs after the write is answered.
+	h.reconcileSmartCombosBestEffort(r.Context(), "models imported")
+
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"added":   added,

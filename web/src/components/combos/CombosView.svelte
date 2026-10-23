@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Layers } from 'lucide-svelte'
-  import { api, type Combo, type ProviderConnection, type ProviderNode } from '../../api/client'
+  import { api, type Combo, type ProviderConnection, type ProviderNode, type SmartRule } from '../../api/client'
   import {
     clearJudgeModel,
     comboStrategyOptions,
@@ -206,14 +206,14 @@
     comboSaveError = ''
   }
 
-  async function handleSaveCombo(name: string, models: string[]) {
+  async function handleSaveCombo(name: string, models: string[], matchRules: SmartRule[]) {
     isSavingCombo = true
     comboSaveError = ''
     try {
       if (editingCombo) {
-        await api.updateCombo(editingCombo.id, { name, models })
+        await api.updateCombo(editingCombo.id, { name, models, matchRules })
       } else {
-        await api.createCombo({ name, models, strategy: 'fallback' })
+        await api.createCombo({ name, models, strategy: 'fallback', matchRules })
       }
       closeModal()
       onRefresh()
@@ -224,6 +224,28 @@
       console.error('Failed to save combo:', e)
     } finally {
       isSavingCombo = false
+    }
+  }
+
+  // Applying the rules on demand covers what no model write announces: a
+  // catalogue sync that published new models, or a restore.
+  let isReconciling = $state(false)
+  let reconcileNote = $state('')
+  async function handleReconcile() {
+    isReconciling = true
+    reconcileNote = ''
+    try {
+      const res = await api.reconcileCombos()
+      const parts: string[] = [`${res.reconciled} combo${res.reconciled === 1 ? '' : 's'} updated`]
+      if (res.added?.length) parts.push(`+${res.added.length} added`)
+      if (res.removed?.length) parts.push(`-${res.removed.length} removed`)
+      reconcileNote = parts.join(' · ')
+      onRefresh()
+    } catch (e) {
+      reconcileNote = e instanceof Error ? e.message : String(e)
+      console.error('Failed to reconcile combos:', e)
+    } finally {
+      isReconciling = false
     }
   }
 
@@ -340,6 +362,14 @@
 
 <div class="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
   <CombosHeader onCreateClick={openCreateModal} />
+  <div class="flex flex-wrap items-center justify-end gap-2">
+    <Button onclick={handleReconcile} variant="ghost" size="sm" loading={isReconciling}>
+      Reconcile rules
+    </Button>
+    {#if reconcileNote}
+      <span class="text-[11px] text-text-muted">{reconcileNote}</span>
+    {/if}
+  </div>
 
   <!-- Upstream selection bar: the count is on the checkbox, and the bulk
        actions only exist while something is selected, so the destructive

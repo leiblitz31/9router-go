@@ -1,4 +1,4 @@
-import type { Combo } from '../../api/client'
+import type { Combo, SmartRule, SmartRulePreview } from '../../api/client'
 
 export interface ComboStrategyInfo {
   fallbackStrategy?: string
@@ -201,4 +201,74 @@ export function parseCapacityAdapterSettings(ca: Record<string, unknown> | undef
       models: Array.isArray(a?.models) ? (a.models as string[]) : [],
     },
   }
+}
+
+/**
+ * Every matching mode a rule can carry, with the hint the editor shows beside
+ * the pattern. The hints are the contract: a glob's `*` spans `/`, a keyword is
+ * a substring, and a regex needs its `re:` prefix.
+ */
+export const SMART_RULE_MODES = [
+  {
+    value: 'glob',
+    label: 'Glob',
+    hint: 'Whole id, case-insensitive. * spans "/" — kenari/deepseek*'
+  },
+  { value: 'keyword', label: 'Keyword', hint: 'Case-insensitive substring — deepseek' },
+  { value: 'regex', label: 'Regex', hint: 'Prefix with re:, matched whole — re:^kenari/deepseek-v\\d+$' }
+] as const
+
+/** Mirrors internal/combos/smart.DefaultMaxMembers. */
+export const DEFAULT_SMART_RULE_MAX_MEMBERS = 20
+
+/**
+ * Read a combo's stored rules. An absent, malformed or non-array column reads
+ * as no rules: the combo still routes on its stored models, and a broken column
+ * must not take the editor down with it.
+ */
+export function parseSmartRules(raw: string | undefined | null): SmartRule[] {
+  if (!raw) return []
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(decoded)) return []
+  const out: SmartRule[] = []
+  decoded.forEach((entry, i) => {
+    const r = entry as Record<string, unknown>
+    if (!r || typeof r !== 'object' || typeof r.pattern !== 'string' || !r.pattern.trim()) return
+    out.push({
+      id: typeof r.id === 'string' && r.id ? r.id : `r${i + 1}`,
+      pattern: r.pattern,
+      mode: r.mode === 'keyword' || r.mode === 'regex' ? r.mode : 'glob',
+      effect: r.effect === 'exclude' ? 'exclude' : 'include',
+      enabled: r.enabled !== false,
+      maxMembers: typeof r.maxMembers === 'number' && r.maxMembers >= 0 ? r.maxMembers : DEFAULT_SMART_RULE_MAX_MEMBERS,
+      allKinds: r.allKinds === true,
+      resolved: Array.isArray(r.resolved) ? (r.resolved as string[]) : [],
+      excluded: Array.isArray(r.excluded) ? (r.excluded as string[]) : []
+    })
+  })
+  return out
+}
+
+/** One line describing what a rule does, and what the preview measured. */
+export function smartRuleSummary(rule: SmartRule, preview?: SmartRulePreview): string {
+  const verb = rule.effect === 'exclude' ? 'Removes' : 'Adds'
+  const cap = rule.maxMembers > 0 ? `max ${rule.maxMembers}` : 'no cap'
+  if (!preview) return `${verb} · ${cap}`
+  const matches = `${preview.applied} of ${preview.matched} match${preview.matched === 1 ? '' : 'es'}`
+  return preview.capped ? `${verb} ${matches} · capped at ${rule.maxMembers}` : `${verb} ${matches} · ${cap}`
+}
+
+/** How many rules a combo carries, for the card badge. */
+export function smartRuleCount(combo: Combo): number {
+  return parseSmartRules(combo.matchRules).length
+}
+
+/** Whether a member is owned by a rule rather than pinned by the operator. */
+export function isAutoMember(combo: Combo, model: string): boolean {
+  return Array.isArray(combo.autoMembers) && combo.autoMembers.includes(model)
 }

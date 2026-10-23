@@ -129,6 +129,10 @@ func (h *DashboardHandler) HandleSaveCustomModel(w http.ResponseWriter, r *http.
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// A newly registered model is picked up by any rule whose pattern selects
+	// it, which is the whole point of the feature: the operator never opens the
+	// Combos page to add it.
+	h.reconcileSmartCombosBestEffort(r.Context(), "model saved")
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
@@ -152,6 +156,10 @@ func (h *DashboardHandler) HandleDeleteCustomModel(w http.ResponseWriter, r *htt
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The model is gone, so every combo a rule put it into must drop it. This
+	// runs after the delete is answered: the operator's write already
+	// succeeded, and a membership update must never turn it into a retry.
+	h.reconcileSmartCombosBestEffort(r.Context(), "model deleted")
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
@@ -217,6 +225,10 @@ func (h *DashboardHandler) HandleDeleteProviderModels(w http.ResponseWriter, r *
 
 	sort.Strings(removedModels)
 	sort.Strings(removedAliases)
+	// A whole node's models just stopped existing, so every combo a rule put
+	// them into must drop them. Same best-effort rule as the single delete: the
+	// operator's write is already answered.
+	h.reconcileSmartCombosBestEffort(r.Context(), "provider models deleted")
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":         "ok",
 		"provider":       provider,
@@ -318,6 +330,9 @@ func (h *DashboardHandler) HandleSaveDisabledModels(w http.ResponseWriter, r *ht
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// A model the operator switched off leaves every combo it was in, and one
+	// they switch back on is picked up again by the rule that owns it.
+	h.reconcileSmartCombosBestEffort(r.Context(), "models disabled")
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":         "ok",

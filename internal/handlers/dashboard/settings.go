@@ -587,7 +587,7 @@ func (h *DashboardHandler) exportDatabase(ctx context.Context) (*databaseExport,
 	}
 
 	if out.Combos, err = selectRows(tx,
-		`SELECT id, name, kind, models, createdAt, updatedAt FROM combos`); err != nil {
+		`SELECT id, name, kind, models, matchRules, createdAt, updatedAt FROM combos`); err != nil {
 		return nil, err
 	}
 	for _, row := range out.Combos {
@@ -805,9 +805,13 @@ func (h *DashboardHandler) importDatabase(ctx context.Context, payload map[strin
 		if err != nil {
 			models = []byte("[]")
 		}
+		rules, err := json.Marshal(c["matchRules"])
+		if err != nil || string(rules) == "null" {
+			rules = []byte("[]")
+		}
 		if _, err := tx.Exec(
-			`INSERT OR REPLACE INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)`,
-			c["id"], c["name"], stringDefault(c["kind"], nil), string(models),
+			`INSERT OR REPLACE INTO combos(id, name, kind, models, matchRules, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+			c["id"], c["name"], stringDefault(c["kind"], nil), string(models), string(rules),
 			stringDefault(c["createdAt"], nowISO()), stringDefault(c["updatedAt"], nowISO()),
 		); err != nil {
 			return nil, err

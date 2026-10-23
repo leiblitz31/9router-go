@@ -361,6 +361,13 @@ var goOnlyColumns = [][3]string{
 	{"providerNodes", "queueTimeoutMs", "INTEGER DEFAULT 0"},
 	{"providerNodes", "quotaResetId", "INTEGER DEFAULT 0"},
 	{"providerNodes", "contractExpiresAt", "TEXT DEFAULT ''"},
+	// Smart select combo: the pattern rules that keep a combo's membership in
+	// step with the models the gateway knows about. A JSON array of rule
+	// objects; "[]" means no rules, which is what every combo written before
+	// the feature holds. It is bookkeeping the resolver never reads — the
+	// models column stays the wire contract — so upstream, which declares
+	// neither the column nor the concept, ignores it.
+	{"combos", "matchRules", "TEXT DEFAULT '[]'"},
 }
 
 // keiRouterTables are Go-only tables for KeiRouter port features.

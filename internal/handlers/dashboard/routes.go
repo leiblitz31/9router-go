@@ -92,6 +92,10 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Get("/combos/presets", h.HandleGetComboPresets)
 		r.Post("/combos/presets", h.HandleCreateComboPresets)
 		r.Put("/combos/{id}", h.HandleUpdateCombo)
+		// Smart select combo: dry-run a rule list, and apply every combo's rules
+		// on demand. The automatic half runs on each model write.
+		r.Post("/combos/reconcile", h.HandleReconcileSmartCombos)
+		r.Post("/combos/{id}/smart/preview", h.HandleComboSmartPreview)
 		r.Delete("/combos/{id}", h.HandleDeleteCombo)
 
 		// Proxy Pools

@@ -372,6 +372,11 @@ func (h *DashboardHandler) HandleDeleteProviderNode(w http.ResponseWriter, r *ht
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The node's models stop resolving the moment the row is gone, so every
+	// combo a rule put them into must drop them. The candidate builder treats
+	// an alias with no node behind it as not live, which is what makes this
+	// pass remove exactly those members.
+	h.reconcileSmartCombosBestEffort(r.Context(), "provider node deleted")
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
 }
 
