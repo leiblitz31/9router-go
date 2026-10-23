@@ -849,7 +849,14 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	firstBody, firstMap := conceal(false)
 
 	cfg := *req.Config
-	targetURL := opencodeChatURL(cfg.BaseURL)
+	var targetURL string
+	if isRelayConfig(&cfg) {
+		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
+		cfg.StaticHeaders["x-relay-path"] = "/inference/v1/chat/completions"
+		targetURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
+	} else {
+		targetURL = opencodeChatURL(cfg.BaseURL)
+	}
 	rawHeaders := cfg.StaticHeaders
 
 	ctx := req.Ctx

@@ -799,8 +799,58 @@ func stripKimchiReasoningContent(body map[string]any) {
 	}
 }
 
+// openAIMessageKeys are standard message object fields accepted by OpenAI Chat Completions
+// and compatible upstreams like OpenCode and DeepSeek. Any foreign key (such as "reasoning",
+// "reasoning_details", "thinking", "thought", "annotations", etc.) is rejected by upstream
+// validators with HTTP 400 (e.g. "Unrecognized request argument supplied: messages[2].reasoning.").
+var openAIMessageKeys = map[string]struct{}{
+	"role":              {},
+	"content":           {},
+	"name":              {},
+	"tool_calls":        {},
+	"tool_call_id":      {},
+	"function_call":     {},
+	"refusal":           {},
+	"audio":             {},
+	"reasoning_content": {},
+}
+
+func extractMessageReasoning(m map[string]any) string {
+	for _, key := range []string{"reasoning", "thinking", "thought"} {
+		if s, ok := m[key].(string); ok && len(s) > 0 {
+			return s
+		}
+	}
+	return ""
+}
+
+func sanitizeOpenAIMessageKeys(m map[string]any) bool {
+	changed := false
+	for k := range m {
+		if _, ok := openAIMessageKeys[k]; !ok {
+			delete(m, k)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func normalizeTopLevelReasoning(reqMap map[string]any) bool {
+	rMap, ok := reqMap["reasoning"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if eff, ok := rMap["effort"].(string); ok && eff != "" && reqMap["reasoning_effort"] == nil {
+		reqMap["reasoning_effort"] = eff
+	}
+	delete(reqMap, "reasoning")
+	return true
+}
+
 // InjectReasoningContent ensures assistant messages in request body have reasoning_content
-// injected (e.g. " " placeholder) for providers like opencode, deepseek, or kimi models.
+// injected (e.g. " " placeholder) for providers like opencode, deepseek, or kimi models,
+// and strips foreign/unsupported keys (such as "reasoning", "thinking", "thought") that cause
+// upstream schema validation errors (e.g. "Unrecognized request argument supplied: messages[2].reasoning.").
 func InjectReasoningContent(body []byte, provider string) []byte {
 	var reqMap map[string]any
 	if err := json.Unmarshal(body, &reqMap); err != nil {
@@ -815,39 +865,55 @@ func InjectReasoningContent(body []byte, provider string) []byte {
 	modelStr, _ := reqMap["model"].(string)
 	modelLower := strings.ToLower(modelStr)
 
-	isDeepSeek := strings.Contains(modelLower, "deepseek") || provider == "opencode" || provider == "opencode-go"
+	isOpenCode := provider == "opencode" || provider == "opencode-go" || provider == "opencode-zen"
+	isDeepSeek := strings.Contains(modelLower, "deepseek") || isOpenCode
 	isKimi := strings.HasPrefix(modelLower, "kimi-")
 
 	if !isDeepSeek && !isKimi {
 		return body
 	}
 
-	changed := false
+	changed := normalizeTopLevelReasoning(reqMap)
+
 	for i, m := range msgs {
 		msgMap, ok := m.(map[string]any)
 		if !ok {
 			continue
 		}
+
 		role, _ := msgMap["role"].(string)
-		if role != "assistant" {
-			continue
-		}
+		if role == "assistant" {
+			rc, _ := msgMap["reasoning_content"].(string)
+			if rc == "" {
+				rc = extractMessageReasoning(msgMap)
+			}
 
-		rc, hasRC := msgMap["reasoning_content"].(string)
-		if hasRC && len(rc) > 0 {
-			continue
-		}
+			if sanitizeOpenAIMessageKeys(msgMap) {
+				changed = true
+			}
 
-		if isKimi {
-			toolCalls, hasTC := msgMap["tool_calls"].([]any)
-			if !hasTC || len(toolCalls) == 0 {
-				continue
+			if isKimi {
+				toolCalls, hasTC := msgMap["tool_calls"].([]any)
+				if !hasTC || len(toolCalls) == 0 {
+					msgs[i] = msgMap
+					continue
+				}
+			}
+
+			if rc == "" {
+				rc = " "
+			}
+			if currRC, _ := msgMap["reasoning_content"].(string); currRC != rc {
+				msgMap["reasoning_content"] = rc
+				changed = true
+			}
+			msgs[i] = msgMap
+		} else {
+			if sanitizeOpenAIMessageKeys(msgMap) {
+				changed = true
+				msgs[i] = msgMap
 			}
 		}
-
-		msgMap["reasoning_content"] = " "
-		msgs[i] = msgMap
-		changed = true
 	}
 
 	if !changed {
