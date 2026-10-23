@@ -1520,6 +1520,17 @@ export const api = {
     request<{ success: boolean }>(`/api/models/custom/${encodeURIComponent(key)}`, {
       method: 'DELETE',
     }),
+  /**
+   * Removes every model one provider node carries (imported custom models plus
+   * the aliases pointing at them) in a single request — the undo for
+   * "Import from /models", which writes hundreds of rows. Catalog models that
+   * ship with the build are not stored per node and are left alone.
+   */
+  deleteProviderModels: (provider: string) =>
+    request<{ status: string; provider: string; removedModels: string[]; removedAliases: string[]; count: number }>(
+      `/api/providers/${encodeURIComponent(provider)}/models`,
+      { method: 'DELETE' }
+    ),
   saveDisabledModels: (provider: string, modelIds: string[]) =>
     request<{ success: boolean }>(`/api/models/disabled/${encodeURIComponent(provider)}`, {
       method: 'PUT',

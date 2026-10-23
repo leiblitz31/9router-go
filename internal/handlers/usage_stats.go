@@ -92,6 +92,10 @@ type ProviderUsageItem struct {
 	CompletionTokens int64   `json:"completionTokens"`
 	CachedTokens     int64   `json:"cachedTokens"`
 	Cost             float64 `json:"cost"`
+	// LastUsed is the newest request timestamp in the bucket. A daily window
+	// cannot fill it (a usageDaily row is keyed by date and carries no time),
+	// so the dashboard renders it blank there rather than inventing midnight.
+	LastUsed string `json:"lastUsed,omitempty"`
 }
 
 type ModelUsageItem struct {

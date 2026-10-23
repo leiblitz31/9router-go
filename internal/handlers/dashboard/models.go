@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
+	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
 )
 
@@ -155,6 +157,92 @@ func (h *DashboardHandler) HandleDeleteCustomModel(w http.ResponseWriter, r *htt
 		"status": "ok",
 		"key":    key,
 	})
+}
+
+// HandleDeleteProviderModels handles DELETE /api/providers/{id}/models.
+//
+// Removes every model one provider node carries, so an operator who imported a
+// whole /models list can undo it in one request instead of deleting the rows one
+// at a time. A node's models live in two places — the imported ones under kv
+// customModels, and any legacy alias pointing at one of them — and both are
+// removed, which is exactly what deleting the rows individually did. Models
+// owned by another node and the catalog models that ship with the build are
+// untouched: the catalog is not stored per node and cannot be deleted here.
+func (h *DashboardHandler) HandleDeleteProviderModels(w http.ResponseWriter, r *http.Request) {
+	provider := getURLParam(r, "id")
+	if unescaped, err := url.PathUnescape(provider); err == nil && unescaped != "" {
+		provider = unescaped
+	}
+	if provider == "" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing provider")
+		return
+	}
+
+	kv, err := h.Repo.GetKVScope("customModels")
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	removedModels := make([]string, 0, len(kv))
+	for key, value := range kv {
+		if !customModelBelongsToProvider(key, value, provider) {
+			continue
+		}
+		if err := h.Repo.DeleteKV("customModels", key); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		removedModels = append(removedModels, key)
+	}
+
+	// Aliases are resolved from the same kv table but a different scope, so they
+	// are swept separately. A read failure here is not fatal: the custom models
+	// are already gone, and reporting a partial sweep is better than leaving the
+	// caller to guess which half ran.
+	removedAliases := []string{}
+	if aliases, err := h.Repo.GetModelAliases(); err == nil {
+		prefix := provider + "/"
+		for alias, full := range aliases {
+			if !strings.HasPrefix(full, prefix) {
+				continue
+			}
+			if err := h.Repo.DeleteKV("modelAliases", string(alias)); err != nil {
+				handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			removedAliases = append(removedAliases, string(alias))
+		}
+	}
+
+	sort.Strings(removedModels)
+	sort.Strings(removedAliases)
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":         "ok",
+		"provider":       provider,
+		"removedModels":  removedModels,
+		"removedAliases": removedAliases,
+		"count":          len(removedModels) + len(removedAliases),
+	})
+}
+
+// customModelBelongsToProvider decides whether one kv customModels row belongs to
+// a provider node.
+//
+// The key is not always a discriminator: the import path writes
+// "<providerAlias>|<id>|<type>" while the single-model form can write a bare id,
+// so the key's first segment is checked first and the stored providerAlias field
+// is the fallback. A row that matches neither is left alone rather than guessed
+// at — removing another provider's models is not recoverable from here.
+func customModelBelongsToProvider(key, value, provider string) bool {
+	if alias, _, ok := strings.Cut(key, "|"); ok && alias == provider {
+		return true
+	}
+	var cm db.CustomModel
+	if err := json.Unmarshal([]byte(value), &cm); err != nil {
+		return false
+	}
+	return cm.ProviderAlias == provider
 }
 
 // HandleGetDisabledModels handles GET /api/models/disabled.

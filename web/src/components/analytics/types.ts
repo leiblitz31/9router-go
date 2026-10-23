@@ -5,7 +5,7 @@ export type PeriodPreset = 'today' | '24h' | '7d' | '30d' | '60d' | 'all'
 // A custom entry is "<n>d" or "<n>h"; the server parses both, so the selector is
 // not limited to the presets below.
 export type Period = PeriodPreset | (string & {})
-export type TableView = 'model' | 'account' | 'apiKey' | 'endpoint'
+export type TableView = 'model' | 'provider' | 'account' | 'apiKey' | 'endpoint'
 export type ViewMode = 'costs' | 'tokens'
 
 // ViewOption names one entry of a section's sub-view picker. The option carries
@@ -155,6 +155,7 @@ export function normalizeCustomPeriod(input: string): PeriodPreset | null {
 
 export const TABLE_OPTIONS: { value: TableView; label: string }[] = [
   { value: 'model', label: 'Usage by Model' },
+  { value: 'provider', label: 'Usage by Provider' },
   { value: 'account', label: 'Usage by Account' },
   { value: 'apiKey', label: 'Usage by API Key' },
   { value: 'endpoint', label: 'Usage by Endpoint' },
