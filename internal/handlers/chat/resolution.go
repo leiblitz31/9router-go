@@ -229,6 +229,18 @@ func (h *ChatHandler) resolveModel(modelStr string) (*ModelInfo, error) {
 	// Strip [1m] context marker before resolution (PR #3691)
 	modelStr = stripModelContextMarker(modelStr)
 
+	// Cloudflare Workers AI ids are scoped: "@cf/<vendor>/<model>" is the
+	// full upstream id, scope included. Clients that copy the id from
+	// Cloudflare send it without this router's "cf/" prefix (a Hermes model
+	// pick does exactly that), and the generic split below would read the
+	// provider as "@cf" — which does not exist — and the model shorn of its
+	// scope, so the request died with "no active connections for provider:
+	// @cf". The scope is the provider's own namespace, not a name heuristic:
+	// resolve it here with the model untouched.
+	if strings.HasPrefix(modelStr, "@cf/") {
+		return &ModelInfo{Provider: "cloudflare-ai", Model: modelStr}, nil
+	}
+
 	// 1. Standard format: "provider/model"
 	if strings.Contains(modelStr, "/") {
 		parts := strings.SplitN(modelStr, "/", 2)
