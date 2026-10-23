@@ -2,14 +2,13 @@ import assert from 'node:assert'
 import { describe, it } from 'node:test'
 import type { Combo, ProviderConnection, ProviderNode } from '../../api/client'
 import {
-  getDeactivatedProviderIds,
   resolveFilteredCombos,
   resolveFilteredGroups,
   resolveModelPickerGroups,
 } from './pickerData'
 
 describe('pickerData', () => {
-  it('includes active providers and no-auth providers, hides fully-deactivated ones', () => {
+  it('includes connected providers and no-auth providers regardless of isActive', () => {
     const connections: ProviderConnection[] = [
       {
         id: 'conn-1',
@@ -45,9 +44,7 @@ describe('pickerData', () => {
     assert.strictEqual(agGroup.models[0].value.startsWith('ag/'), true)
 
     const ccGroup = groups.find((g) => g.id === 'claude')
-    // Upstream parity (da1756a8): a provider whose every connection is
-    // deactivated is hidden from the picker.
-    assert.strictEqual(ccGroup, undefined)
+    assert.ok(ccGroup)
 
     const ocGroup = groups.find((g) => g.id === 'opencode')
     assert.ok(ocGroup)
@@ -321,41 +318,66 @@ describe('pickerData', () => {
     )
   })
 
-  it('getDeactivatedProviderIds: all-off provider hidden, mixed stays, zero-conn untouched', () => {
-    const deactivated = getDeactivatedProviderIds([
-      { provider: 'node-a', isActive: 0 },
-      { provider: 'node-a', isActive: 0 },
-      { provider: 'node-b', isActive: 0 },
-      { provider: 'node-b', isActive: 1 },
-      { provider: 'node-c', isActive: false },
-    ])
-    assert.strictEqual(deactivated.has('node-a'), true)
-    assert.strictEqual(deactivated.has('node-b'), false)
-    assert.strictEqual(deactivated.has('node-c'), true)
-    assert.strictEqual(deactivated.has('local-ollama'), false)
-    assert.strictEqual(getDeactivatedProviderIds([]).size, 0)
-    assert.strictEqual(getDeactivatedProviderIds(null).size, 0)
+  it('filters groups with negation: !gpt excludes gpt models under OpenAI group even when group matches', () => {
+    const connections: ProviderConnection[] = [
+      {
+        id: 'conn-oai',
+        provider: 'openai',
+        authType: 'apikey',
+        name: 'OpenAI',
+        email: null,
+        priority: 1,
+        isActive: 1,
+        data: '{}',
+        createdAt: '',
+        updatedAt: '',
+      },
+    ]
+    const groups = resolveModelPickerGroups(connections, [])
+    const oaiGroup = groups.find((g) => g.id === 'openai')
+    assert.ok(oaiGroup)
+    assert.ok(oaiGroup.models.some((m) => m.id.includes('gpt')))
+    assert.ok(oaiGroup.models.some((m) => m.id.includes('o1')))
+
+    // Search !gpt: OpenAI group matches "!gpt" (doesn't contain gpt), but all gpt models should be excluded!
+    const filtered = resolveFilteredGroups(groups, '!gpt', 'combo')
+    const filteredOai = filtered.find((g) => g.id === 'openai')
+    assert.ok(filteredOai, 'OpenAI group should remain because o1 models exist')
+    assert.strictEqual(
+      filteredOai.models.some((m) => m.id.includes('gpt')),
+      false,
+      'gpt models must be excluded'
+    )
+    assert.ok(
+      filteredOai.models.some((m) => m.id.includes('o1')),
+      'o1 models must remain'
+    )
   })
 
-  it('narrows a provider to enabledModels when an active connection lists them', () => {
-    const conn = (over: Record<string, unknown>): ProviderConnection => ({
-      id: 'c',
-      provider: 'deepseek',
-      authType: 'apikey',
-      name: null,
-      email: null,
-      priority: null,
-      isActive: 1,
-      data: '{}',
-      createdAt: '',
-      updatedAt: '',
-      providerSpecificData: { enabledModels: ['deepseek-chat'] },
-      ...over,
-    })
-    const groups = resolveModelPickerGroups([conn({})], [])
-    const ds = groups.find((g) => g.id === 'deepseek')
-    assert.ok(ds)
-    assert.ok(ds.models.length > 0)
-    assert.ok(ds.models.every((m) => m.id === 'deepseek-chat'))
+  it('filters combos with negation: !haiku excludes combo-haiku', () => {
+    const combos: Combo[] = [
+      {
+        id: 'c1',
+        name: 'combo-sonnet',
+        kind: null,
+        models: JSON.stringify(['anthropic/claude-3-5-sonnet']),
+        strategy: 'fallback',
+        createdAt: '',
+        updatedAt: '',
+      },
+      {
+        id: 'c2',
+        name: 'combo-haiku',
+        kind: null,
+        models: JSON.stringify(['anthropic/claude-3-5-haiku']),
+        strategy: 'fallback',
+        createdAt: '',
+        updatedAt: '',
+      },
+    ]
+
+    const filtered = resolveFilteredCombos(combos, undefined, '!haiku', 'combo')
+    assert.strictEqual(filtered.length, 1)
+    assert.strictEqual(filtered[0].name, 'combo-sonnet')
   })
 })

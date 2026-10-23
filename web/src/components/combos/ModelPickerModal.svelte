@@ -15,7 +15,7 @@
   } from './pickerData'
   import { EMPTY_PICKER_EXTRAS, loadPickerExtras, type ResolvedPickerExtras } from './pickerExtras'
   import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
-  import { matchesSearch, parseSearchQuery } from './modelSearchFilter'
+  import { parseSearchQuery } from '../../lib/modelSearchFilter'
 
   interface Props {
     isOpen: boolean
@@ -30,10 +30,6 @@
     deprecations?: Record<string, unknown>
     currentComboName?: string
     addedModelValues?: string[]
-    /** Per-provider wildcard entries (`provider/*`); combo pages leave it off. */
-    allowProviderWildcard?: boolean
-    /** Narrow the picker to one provider id; empty shows all. */
-    providerFilter?: string
     onSelect: (modelValue: string) => void
     onDeselect?: (modelValue: string) => void
     onClose: () => void
@@ -51,8 +47,6 @@
     deprecations,
     currentComboName,
     addedModelValues = [],
-    allowProviderWildcard = false,
-    providerFilter = '',
     onSelect,
     onDeselect,
     onClose,
@@ -85,20 +79,9 @@
     })
   )
   let filteredCombos = $derived(
-    resolveFilteredCombos(combos, currentComboName, searchQuery, target),
+    resolveFilteredCombos(combos, currentComboName, searchQuery, target)
   )
-  let providerGroups = $derived(
-    providerFilter ? groups.filter((g) => g.id === providerFilter) : groups,
-  )
-  // Upstream parity (da1756a8): exclusion (!token/-token) + /regex/ search via
-  // the shared filter; a group-name hit keeps the whole group visible.
-  let filteredGroups = $derived(
-    resolveFilteredGroups(providerGroups, searchQuery, target, parsedQuery),
-  )
-  let visibleValues = $derived(filteredGroups.flatMap((g) => g.models.map((m) => m.value)))
-  let visibleUnadded = $derived(visibleValues.filter((v) => !addedModelValues.includes(v)))
-  let visibleAdded = $derived(visibleValues.filter((v) => addedModelValues.includes(v)))
-
+  let filteredGroups = $derived(resolveFilteredGroups(groups, searchQuery, target))
 
   function handleToggle(val: string) {
     if (addedModelValues.includes(val)) {
@@ -110,6 +93,10 @@
     } else {
       onSelect(val)
     }
+  }
+
+  function clearSearch() {
+    searchQuery = ''
   }
 </script>
 
@@ -171,34 +158,28 @@
           <Search class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
           <input
             type="text"
-            placeholder="Search... (!exclude, /regex/)"
+            placeholder="Search models (e.g. claude -haiku, !embed, /regex/)..."
             bind:value={searchQuery}
-            class="w-full bg-surface border border-border rounded pl-8 pr-3 py-1.5 text-xs text-text-main placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+            class="w-full bg-surface border border-border rounded pl-8 pr-24 py-1.5 text-xs text-text-main placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-brand-500/50"
           />
-        </div>
-        {#if filteredGroups.length > 0 && (visibleUnadded.length > 0 || visibleAdded.length > 0)}
-          <div class="mt-2 flex items-center gap-2">
-            {#if visibleUnadded.length > 0}
-              <button
-                type="button"
-                onclick={() => visibleUnadded.forEach((v) => onSelect(v))}
-                class="rounded border border-border px-2 py-1 text-[11px] text-text-muted hover:border-brand-500 hover:text-text-main transition-colors cursor-pointer"
-              >
-                Select All ({visibleUnadded.length})
-              </button>
+          <div class="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+            {#if parsedQuery.isRegex}
+              <span class="text-[10px] px-1 py-0.2 rounded bg-brand-500/10 text-brand-500 font-mono font-medium">regex</span>
+            {:else if parsedQuery.negativeTerms.length > 0}
+              <span class="text-[10px] px-1 py-0.2 rounded bg-amber-500/10 text-amber-500 font-mono font-medium">!exclude</span>
             {/if}
-            {#if visibleAdded.length > 0}
+            {#if searchQuery}
               <button
                 type="button"
-                onclick={() =>
-                  visibleAdded.forEach((v) => (onDeselect ? onDeselect(v) : onSelect(v)))}
-                class="rounded border border-border px-2 py-1 text-[11px] text-text-muted hover:border-brand-500 hover:text-text-main transition-colors cursor-pointer"
+                onclick={clearSearch}
+                aria-label="Clear search"
+                class="p-1 rounded text-text-muted hover:text-text-main hover:bg-surface-2 transition-colors"
               >
-                Deselect All ({visibleAdded.length})
+                <X class="w-3.5 h-3.5" />
               </button>
             {/if}
           </div>
-        {/if}
+        </div>
       </div>
 
       <!-- Categories & Models List -->
@@ -225,8 +206,6 @@
 
         <!-- Provider sections -->
         {#each filteredGroups as group (group.id)}
-          {@const wildcardValue = `${group.id}/*`}
-          {@const isWildcardAdded = allowProviderWildcard && addedModelValues.includes(wildcardValue)}
           <div>
             <div class="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-surface py-0.5 z-10">
               <ProviderArtwork
@@ -234,25 +213,9 @@
                 alt={group.name}
                 class="w-3.5 h-3.5 object-contain rounded-sm text-[9px] leading-none font-semibold"
               />
-              {#if allowProviderWildcard}
-                <button
-                  type="button"
-                  onclick={() => handleToggle(wildcardValue)}
-                  title={isWildcardAdded
-                    ? `Click to remove wildcard ${wildcardValue}`
-                    : `Click to allow all models from ${group.name} (${wildcardValue})`}
-                  class="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs font-medium transition-colors cursor-pointer {isWildcardAdded
-                    ? 'border-brand-500 bg-brand-500/10 text-brand-500'
-                    : 'border-transparent text-brand-500 hover:border-brand-500/20 hover:bg-brand-500/10'}"
-                >
-                  <span>{formatEmailLabel(group.name, $emailPrivacy)}</span>
-                  <span class="font-mono text-[10px] text-text-muted">{wildcardValue}</span>
-                </button>
-              {:else}
-                <span class="text-xs font-medium text-brand-500">
-                  {formatEmailLabel(group.name, $emailPrivacy)}
-                </span>
-              {/if}
+              <span class="text-xs font-medium text-brand-500">
+                {formatEmailLabel(group.name, $emailPrivacy)}
+              </span>
               <span class="text-[10px] text-text-muted">
                 ({group.models.length})
               </span>
