@@ -298,7 +298,8 @@ func opencodeClosureError(provider, model string, err error) error {
 		"error": map[string]any{
 			"message": fmt.Sprintf(
 				"OpenCode's free tier is not serving requests right now. This is an upstream condition rather than a problem with your request or credentials. Retry in about %ds, or use a paid %s key or another provider.",
-				retryAfterSeconds, provider),
+				retryAfterSeconds, provider,
+			),
 			"type": "free_tier_unavailable",
 			"code": http.StatusServiceUnavailable,
 		},
@@ -1049,6 +1050,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	}
 	return fwdErr
 }
+
 func isClientCanceled(ctx context.Context, err error) bool {
 	if ctx != nil && ctx.Err() != nil {
 		return true
@@ -1089,7 +1091,8 @@ func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeN
 			if origTokens > 0 {
 				savedPct = (savedTokens * 100) / origTokens
 			}
-			log.Info("token_saver", "RTK compressed tool output",
+			log.Info(
+				"token_saver", "RTK compressed tool output",
 				"orig_est", origTokens,
 				"compressed_est", compressedTokens,
 				"saved_est", savedTokens,
@@ -1231,7 +1234,10 @@ func extractErrorText(body []byte) string {
 	return ""
 }
 
-var resetsInRegex = regexp.MustCompile(`(?i)resets?\s+in\s+([0-9hms\.]+)`)
+var (
+	resetsInRegex           = regexp.MustCompile(`(?i)resets?\s+in\s+([0-9hms\.]+)`)
+	codebuddyResetDateRegex = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?`)
+)
 
 const (
 	minResetCooldown = 5 * time.Second
@@ -1281,6 +1287,31 @@ func extractResetDuration(body []byte) (time.Duration, bool) {
 		raw := strings.TrimRight(string(matches[1]), ".")
 		if dur, err := time.ParseDuration(raw); err == nil && dur > 0 {
 			return clampResetDuration(dur), true
+		}
+	}
+
+	// 3. CodeBuddy date-time pattern (e.g. 2026-09-28 14:30:00 or with UTC offset)
+	if matches := codebuddyResetDateRegex.FindSubmatch(body); len(matches) > 2 {
+		dateStr := string(matches[1])
+		timeStr := string(matches[2])
+		tzOffset := "+08:00"
+		if len(matches) > 3 && len(matches[3]) > 0 {
+			tz := string(matches[3])
+			if !strings.Contains(tz, ":") {
+				if num, err := strconv.Atoi(tz); err == nil {
+					tzOffset = fmt.Sprintf("+%02d:00", num)
+				}
+			} else if !strings.HasPrefix(tz, "+") && !strings.HasPrefix(tz, "-") {
+				tzOffset = "+" + tz
+			} else {
+				tzOffset = tz
+			}
+		}
+		if tm, err := time.Parse(time.RFC3339, fmt.Sprintf("%sT%s%s", dateStr, timeStr, tzOffset)); err == nil {
+			dur := time.Until(tm)
+			if dur > 0 {
+				return clampResetDuration(dur), true
+			}
 		}
 	}
 
