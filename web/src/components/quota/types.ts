@@ -355,10 +355,23 @@ export function calculatePercentage(used?: number, total?: number): number {
   return Math.round(((total - used) / total) * 100)
 }
 
-export function getRemainingPercentage(quota: Partial<NormalizedQuota>): number {
-  if (quota?.remaining !== undefined) return Math.max(0, Math.round(quota.remaining))
-  if (quota?.remainingPercentage !== undefined) return Math.round(quota.remainingPercentage)
-  return calculatePercentage(quota?.used, quota?.total)
+/**
+ * Remaining share of a quota row, or null when the row does not say.
+ *
+ * A quota that reports none of `remaining`, `remainingPercentage` or a finite
+ * `used`/`total` pair is *unknown*, not exhausted. Folding it into `0` painted
+ * it red — the same picture as a drained account — so the caller gets null and
+ * renders "—" instead of inventing a number.
+ */
+export function getRemainingPercentage(quota: Partial<NormalizedQuota>): number | null {
+  if (Number.isFinite(quota?.remaining)) return Math.max(0, Math.round(quota.remaining as number))
+  if (Number.isFinite(quota?.remainingPercentage)) {
+    return Math.round(quota.remainingPercentage as number)
+  }
+  if (Number.isFinite(quota?.used) && Number.isFinite(quota?.total)) {
+    return calculatePercentage(quota.used, quota.total)
+  }
+  return null
 }
 
 // ─── Quota visibility (hide/show rows, persisted via /api/settings) ─────────

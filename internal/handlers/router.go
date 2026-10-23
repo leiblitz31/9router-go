@@ -428,7 +428,14 @@ func mountOAuthRoutes(r interface {
 
 // SetupServerRouter mounts public endpoints (/health, /api/hello) and
 // API-key protected routes (all engine + admin routes) on the chi router.
-func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
+//
+// It returns the engine's chat handler: the one SetupRoutes built and the
+// dashboard group is mounted on. The auto-ping scheduler sends its pings
+// through that same instance, so a ping resolves credentials, refreshes OAuth
+// and picks an executor the way real traffic does. Returning it is what keeps
+// the gateway from building a second handler for the scheduler — see the
+// warning on SetupRoutes about the two PersistentStores.
+func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) *chat.ChatHandler {
 	// Public (unauthenticated) endpoints
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
@@ -600,4 +607,5 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	})
 
 	SetupConsoleLogRoutes(r, repo)
+	return engineChatH
 }

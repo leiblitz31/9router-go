@@ -270,6 +270,16 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 				ineligible = false
 			}
 		}
+		if ineligible && isProbe && reason == "disabled" {
+			// A probe is pinned to ONE account on purpose: a scheduled ping exists
+			// to start that account's quota window. Dropping the pin let the
+			// strategy answer with a different, active connection, so the ping
+			// spent a healthy account's window and left the disabled one exactly
+			// as closed as it was. Upstream never pings an inactive account at
+			// all (quotaAutoPing.js filters isActive: true), so this refuses
+			// rather than redirects.
+			return nil, nil, fmt.Errorf("connection %s is disabled; a probe is not redirected to another account", connectionID)
+		}
 		if ineligible {
 			log.Warn("connections", "pinned connection ineligible, falling back to strategy",
 				"provider", provider, "conn", conn.ID, "reason", reason)

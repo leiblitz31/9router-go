@@ -113,6 +113,16 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 	// normalized here: a cost surface must never read a NaN rate (currency.go).
 	applyDisplayCurrencyUpdate(updates)
 
+	// Auto-ping schedules are merged against the stored value rather than
+	// written through: a client that sends only `connections` would otherwise
+	// delete every schedule, and one that sends only `schedules` would wipe
+	// every switch. Refused here, before the write, so a bad payload leaves
+	// the settings row untouched.
+	if err := h.mergeAutoPingSchedules(updates); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	if err := h.Repo.UpdateSettingsRaw(updates); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
