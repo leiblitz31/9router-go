@@ -490,3 +490,47 @@ func TestForwardOpencodeZen_FreeModelTakesInferenceGate(t *testing.T) {
 		})
 	}
 }
+
+// A free-tier id on the messages lane travels through the same stealth-capable
+// forwarder as the other free lanes: the /inference/v1 prefix, the public
+// credential, the v2 cli identity, and the read/shell fingerprint. It used to
+// take the plain DoRequest path, which the gate refuses on a direct dial — the
+// request only passed when an edge relay made the call.
+func TestForwardZenMessages_FreeLaneTakesTheStealthForwarder(t *testing.T) {
+	probe := newZenProbe(t, zenMessagesReply)
+	rec := httptest.NewRecorder()
+	req := &Request{
+		Ctx:      context.Background(),
+		Client:   probe.server.Client(),
+		Config:   zenConfig(probe),
+		APIKey:   "sk-zen",
+		Body:     []byte(`{"model":"claude-sonnet-4-6-free","max_tokens":256,"system":"be brief","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+		IsStream: true,
+	}
+	if err := forwardZenMessages(rec, req, "claude-sonnet-4-6-free", true, providers.FormatClaude); err != nil {
+		t.Fatalf("forwardZenMessages: %v", err)
+	}
+	if probe.path != "/inference/v1/messages" {
+		t.Errorf("expected the inference messages lane, got %q", probe.path)
+	}
+	if probe.auth != "Bearer public" {
+		t.Errorf("expected the public credential, got %q", probe.auth)
+	}
+	if probe.body["system"] != "be brief" {
+		t.Errorf("a native Claude body must not be rewritten, got %v", probe.body)
+	}
+	tools, _ := probe.body["tools"].([]any)
+	for _, name := range []string{"read", "shell"} {
+		found := false
+		for _, tool := range tools {
+			tm, _ := tool.(map[string]any)
+			fn, _ := tm["function"].(map[string]any)
+			if fn["name"] == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing v2 fingerprint tool %q: %v", name, probe.body)
+		}
+	}
+}

@@ -827,3 +827,71 @@ func responsesEventStream(text string) string {
 		"event: response.completed\n" +
 		`data: {"type":"response.completed"}` + "\n\n"
 }
+
+// Two hint-less requests on one connection must share one upstream session:
+// the free tier accounts its quota per session, so a fresh id per request
+// burns through it and surfaces as 429 FreeUsageLimitError with a growing
+// retry-after (decolua/9router stableSessionId; dsh-our-free-model
+// sessionForConversation).
+func TestForwardOpencode_StableSessionPerConnection(t *testing.T) {
+	var sessions []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions = append(sessions, r.Header.Get("x-opencode-session"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg_1","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := &providers.ProviderConfig{BaseURL: srv.URL}
+	for range 2 {
+		rec := httptest.NewRecorder()
+		req := &Request{
+			Client:       srv.Client(),
+			Config:       cfg,
+			ConnectionID: "conn-stable-1",
+			Body:         []byte(`{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}`),
+		}
+		if err := ForwardOpencode(rec, req); err != nil {
+			t.Fatalf("ForwardOpencode failed: %v", err)
+		}
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 upstream requests, got %d", len(sessions))
+	}
+	if sessions[0] == "" || sessions[0] != sessions[1] {
+		t.Errorf("expected one stable session per connection, got %q then %q", sessions[0], sessions[1])
+	}
+	if !proxy.OpenCodeSessionRegex.MatchString(sessions[0]) ||
+		!proxy.OpenCodeSessionDescendingRegex.MatchString(sessions[0][4:16]) {
+		t.Errorf("session %q is not a canonical descending id", sessions[0])
+	}
+}
+
+// A caller that suppresses tools with tool_choice "none" must not have that
+// field forwarded: the v2 inference gate answers it with 403 FreeTierError
+// (upstream opencodeFingerprint.js; measured by dsh-our-free-model).
+func TestForwardOpencode_DropsCallerToolChoiceNone(t *testing.T) {
+	var sent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		sent = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg_1","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	rec := httptest.NewRecorder()
+	req := &Request{
+		Client: srv.Client(),
+		Config: &providers.ProviderConfig{BaseURL: srv.URL},
+		Body:   []byte(`{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}],"tool_choice":"none"}`),
+	}
+	if err := ForwardOpencode(rec, req); err != nil {
+		t.Fatalf("ForwardOpencode failed: %v", err)
+	}
+	if strings.Contains(sent, "tool_choice") {
+		t.Errorf("tool_choice none reached the gate: %s", sent)
+	}
+}

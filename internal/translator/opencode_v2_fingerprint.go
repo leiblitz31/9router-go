@@ -68,10 +68,12 @@ func openCodeV2FabricatedToolDefinition(name string) (description string, parame
 //     appended afterwards so they keep strict:false;
 //   - on the chat lane caller tools keep their shape but gain a default
 //     object schema when missing, so no stub schema reaches the gate;
-//   - tool_choice passes through untouched, except on the Responses lane,
-//     where an explicit choice becomes "auto" on auto-only models (the
-//     upstream forceAutoToolChoiceModels quirk) and a forced function choice
-//     naming no declared tool is dropped.
+//   - tool_choice "none" is dropped on every lane: the gate answers that
+//     field with 403 FreeTierError (upstream opencodeFingerprint.js; measured
+//     by dsh-our-free-model 2026-10-16). On the Responses lane an explicit
+//     choice becomes "auto" on auto-only models (the upstream
+//     forceAutoToolChoiceModels quirk), a forced function choice naming no
+//     declared tool is dropped, and an absent choice defaults to "auto".
 //
 // flat is true for Responses API bodies and false for Chat Completions.
 func ConcealOpenCodeV2FingerprintTools(body []byte, flat bool, forceAutoChoice bool) ([]byte, map[string]string) {
@@ -429,13 +431,26 @@ func dropNamelessOpenCodeV2FunctionCalls(request map[string]any) {
 }
 
 // normalizeOpenCodeV2ToolChoice ports the upstream tool_choice handling
-// (open-sse/executors/opencode.js): the Responses lane rewrites any explicit
-// choice to "auto" on auto-only models (the forceAutoToolChoiceModels quirk)
-// and drops a forced function choice naming no declared tool. Anything else —
-// including "none" and the chat lane — passes through untouched, exactly like
-// upstream. It reports whether the choice was dropped, so the caller does not
-// refill the slot with a default.
+// (open-sse/executors/opencode.js + open-sse/utils/opencodeFingerprint.js):
+// the Responses lane rewrites any explicit choice to "auto" on auto-only
+// models (the forceAutoToolChoiceModels quirk) and drops a forced function
+// choice naming no declared tool.
+//
+// A "none" choice is dropped on every lane, in both spellings the wire formats
+// use. Upstream documents the gate answering tool_choice "none" with 403
+// FreeTierError and only ever defaults the Responses lane to "auto";
+// dsh-our-free-model measured the same on 2026-10-16 and strips it
+// unconditionally, because a caller's none — a continuation path suppressing
+// tools — would otherwise fail the whole request. Tool suppression lives in
+// the prompt, not in this field.
+//
+// It reports whether a forced function choice was dropped, so the caller does
+// not refill that slot with a default; a stripped "none" is not such a drop,
+// so the Responses lane still refills "auto".
 func normalizeOpenCodeV2ToolChoice(request map[string]any, flat, forceAutoChoice bool, validNames map[string]bool) bool {
+	if choice, present := request["tool_choice"]; present && isOpenCodeNoneToolChoice(choice) {
+		delete(request, "tool_choice")
+	}
 	if !flat {
 		return false
 	}
@@ -463,6 +478,20 @@ func normalizeOpenCodeV2ToolChoice(request map[string]any, flat, forceAutoChoice
 			delete(request, "tool_choice")
 			return true
 		}
+	}
+	return false
+}
+
+// isOpenCodeNoneToolChoice reports whether a tool_choice value asks for no
+// tools, in either spelling the wire formats use: the string "none" or the
+// object form {"type":"none"}.
+func isOpenCodeNoneToolChoice(choice any) bool {
+	switch c := choice.(type) {
+	case string:
+		return strings.EqualFold(strings.TrimSpace(c), "none")
+	case map[string]any:
+		t, _ := c["type"].(string)
+		return strings.EqualFold(strings.TrimSpace(t), "none")
 	}
 	return false
 }

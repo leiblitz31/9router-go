@@ -118,15 +118,19 @@ func TestConcealOpenCodeV2CanonicalizesHarnessShapes(t *testing.T) {
 		}
 	})
 
-	t.Run("tool_choice passes through untouched, like upstream", func(t *testing.T) {
+	t.Run("tool_choice none is dropped on every lane", func(t *testing.T) {
+		// The gate answers tool_choice "none" with 403 FreeTierError (upstream
+		// opencodeFingerprint.js; measured by dsh-our-free-model 2026-10-16),
+		// so a caller's none must never be forwarded — in either spelling the
+		// wire formats use.
 		for _, tc := range []struct {
 			name, body string
 			flat       bool
 			want       any
 		}{
-			{"chat none string", `{"messages":[],"tool_choice":"none"}`, false, "none"},
-			{"chat none object", `{"messages":[],"tool_choice":{"type":"none"}}`, false, map[string]any{"type": "none"}},
-			{"responses none string", `{"input":[],"tool_choice":"none"}`, true, "none"},
+			{"chat none string", `{"messages":[],"tool_choice":"none"}`, false, nil},
+			{"chat none object", `{"messages":[],"tool_choice":{"type":"none"}}`, false, nil},
+			{"responses none string", `{"input":[],"tool_choice":"none"}`, true, "auto"},
 			{"responses auto object", `{"input":[],"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}`, true, map[string]any{"type": "auto"}},
 			{"chat forced function", `{"messages":[],"tool_choice":{"type":"function","function":{"name":"Task"}}}`, false, "preserved"},
 		} {
@@ -137,6 +141,10 @@ func TestConcealOpenCodeV2CanonicalizesHarnessShapes(t *testing.T) {
 					t.Fatal(err)
 				}
 				switch want := tc.want.(type) {
+				case nil:
+					if _, ok := got["tool_choice"]; ok {
+						t.Errorf("tool_choice=%v, want it dropped (the gate answers none with 403): %s", got["tool_choice"], out)
+					}
 				case string:
 					if want == "preserved" {
 						if _, ok := got["tool_choice"].(map[string]any); !ok {
@@ -145,7 +153,7 @@ func TestConcealOpenCodeV2CanonicalizesHarnessShapes(t *testing.T) {
 						return
 					}
 					if got["tool_choice"] != want {
-						t.Errorf("tool_choice=%v, want %q (upstream never rewrites it): %s", got["tool_choice"], want, out)
+						t.Errorf("tool_choice=%v, want %q: %s", got["tool_choice"], want, out)
 					}
 				default:
 					choice, ok := got["tool_choice"].(map[string]any)

@@ -264,64 +264,51 @@ func forwardZenChat(w http.ResponseWriter, req *Request, cleanModel, sourceForma
 		body = converted
 	}
 	body = InjectReasoningContent(body, "opencode-zen")
+	// Keyed /zen/v1 requests for free-tier ids 403 ("free tier can only be
+	// used from within OpenCode"), so those travel exactly like free-executor
+	// requests: v2 fingerprint, inference endpoint, public credentials.
 	free := isOpencodeFreeModel(cleanModel)
+	var zenToolNameMap map[string]string
+	if free {
+		body, zenToolNameMap = translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+	} else {
+		body, zenToolNameMap = translator.ConcealFingerprintTools(body)
+	}
+	req.Ctx = translator.WithToolNameMap(req.Ctx, zenToolNameMap)
+	w = NewToolNameRestoringWriter(w, zenToolNameMap)
+
 	// Upstream rejects stream:false on the free-tier gate even for a keyed lane.
 	body = withJSONFields(body, map[string]any{"stream": true, "model": cleanModel})
 
 	cfg := *req.Config
-	var targetURL string
 	if isRelayConfig(&cfg) {
 		// The relay stamps the destination in its headers, so the lane
 		// decision belongs in x-relay-path, not in the URL we dial.
 		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
 		cfg.StaticHeaders["x-relay-path"] = zenRelayPath(req.Config, cleanModel, "/chat/completions")
-		targetURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
+		cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
 	} else {
-		targetURL = zenBaseURL(&cfg, cleanModel) + "/chat/completions"
+		cfg.BaseURL = zenBaseURL(&cfg, cleanModel) + "/chat/completions"
 	}
+	cfg.StaticHeaders = zenHeaders(&cfg, opencodeSessionHint(req, free), true, free)
 
-	var resp *http.Response
-	var toolNameMap map[string]string
-	if free {
-		// Free-tier lane: v2 fingerprint, inference endpoint, public
-		// credentials, with reactive 403 self-heal (fresh session + full
-		// tool profile retry). DoRequest, not ForwardOpenAI: the CLI sends
-		// Accept: */* even when streaming and ForwardOpenAI would clobber
-		// it with text/event-stream.
-		conceal := func(full bool) ([]byte, map[string]string) {
-			if full {
-				return translator.ConcealOpenCodeV2FullGateTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel), cleanModel)
-			}
-			return translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+	// The retry wraps the transport choice: a repeat must re-dial through
+	// whichever stack the first attempt used, because the free tier only
+	// answers the stealth client and a plain-HTTP repeat would fail for a
+	// different reason than the refusal it is retrying.
+	resp, err := forwardOpenCode(reqCtx(req), func() (*http.Response, error) {
+		if free {
+			return forwardOpencodeRequest(reqCtx(req), req.Client, &cfg, req.APIKey, body, true)
 		}
-		firstBody, firstMap := conceal(false)
-		send := func(session string, b []byte) (*http.Response, error) {
-			headers := zenHeaders(&cfg, session, true, true)
-			return proxy.DoRequest(reqCtx(req), req.Client, "POST", targetURL, headers, b)
-		}
-		var err error
-		resp, toolNameMap, _, err = opencodeGateRequest(send, req.SessionID, firstBody, firstMap,
-			func() ([]byte, map[string]string) { return conceal(true) })
-		if err != nil {
-			return fmt.Errorf("ForwardOpencodeZen: %w", err)
-		}
-	} else {
-		var concealed []byte
-		concealed, toolNameMap = translator.ConcealFingerprintTools(body)
-		cfg.StaticHeaders = zenHeaders(&cfg, req.SessionID, true, false)
-		cfg.BaseURL = targetURL
-		var err error
-		resp, err = proxy.ForwardOpenAI(reqCtx(req), req.Client, &cfg, req.APIKey, concealed, true)
-		if err != nil {
-			return fmt.Errorf("ForwardOpencodeZen: %w", err)
-		}
+		return proxy.ForwardOpenAI(reqCtx(req), req.Client, &cfg, req.APIKey, body, true)
+	})
+	if err != nil {
+		return fmt.Errorf("ForwardOpencodeZen: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := upstreamStatusError(resp); err != nil {
 		return err
 	}
-	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
-	w = NewToolNameRestoringWriter(w, toolNameMap)
 
 	if req.IsStream {
 		return execSSEStream(w, resp.Body, req)
@@ -357,62 +344,44 @@ func forwardZenResponses(w http.ResponseWriter, req *Request, cleanModel, source
 	// Same free-tier rule as the chat lane above: v2 fingerprint and public
 	// credentials behind the inference gate, quartet cloaking otherwise.
 	free := isOpencodeFreeModel(cleanModel)
-
-	cfg := *req.Config
-	var targetURL string
-	if isRelayConfig(&cfg) {
-		// The relay stamps the destination in its headers, so the lane
-		// decision belongs in x-relay-path, not in the URL we dial.
-		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
-		cfg.StaticHeaders["x-relay-path"] = zenRelayPath(req.Config, cleanModel, zenResponsesPath)
-		targetURL = strings.TrimRight(cfg.BaseURL, "/") + zenResponsesPath
-	} else {
-		targetURL = zenBaseURL(&cfg, cleanModel) + zenResponsesPath
-	}
-
-	ctx := reqCtx(req)
-	var resp *http.Response
 	var toolNameMap map[string]string
 	if free {
-		// Free-tier lane with reactive 403 self-heal (fresh session + full
-		// tool profile retry). DoRequest, not ForwardOpenAI: the CLI sends
-		// Accept: */* even when streaming and ForwardOpenAI would clobber
-		// it with text/event-stream.
-		conceal := func(full bool) ([]byte, map[string]string) {
-			if full {
-				return translator.ConcealOpenCodeV2FullGateTools(body, true, isOpenCodeAutoToolChoiceModel(cleanModel), cleanModel)
-			}
-			return translator.ConcealOpenCodeV2FingerprintTools(body, true, isOpenCodeAutoToolChoiceModel(cleanModel))
-		}
-		firstBody, firstMap := conceal(false)
-		send := func(session string, b []byte) (*http.Response, error) {
-			headers := zenHeaders(&cfg, session, req.IsStream, true)
-			return proxy.DoRequest(ctx, req.Client, "POST", targetURL, headers, b)
-		}
-		resp, toolNameMap, _, err = opencodeGateRequest(send, req.SessionID, firstBody, firstMap,
-			func() ([]byte, map[string]string) { return conceal(true) })
-		if err != nil {
-			return fmt.Errorf("ForwardOpencodeZen (responses): %w", err)
-		}
+		body, toolNameMap = translator.ConcealOpenCodeV2FingerprintTools(body, true, isOpenCodeAutoToolChoiceModel(cleanModel))
 	} else {
-		var concealed []byte
-		concealed, toolNameMap = translator.ConcealFingerprintTools(body)
-		// zenHeaders reads from the copy so the relay headers just set survive.
-		cfg.StaticHeaders = zenHeaders(&cfg, req.SessionID, req.IsStream, false)
-		cfg.BaseURL = targetURL
-		resp, err = proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, concealed, req.IsStream)
-		if err != nil {
-			return fmt.Errorf("ForwardOpencodeZen (responses): %w", err)
-		}
-	}
-	defer resp.Body.Close()
-	if err := upstreamStatusError(resp); err != nil {
-		return err
+		body, toolNameMap = translator.ConcealFingerprintTools(body)
 	}
 	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
 	w = NewToolNameRestoringWriter(w, toolNameMap)
 	if sourceFormat == providers.FormatOpenAIResponses {
 		req.ToolNameMap = mergeToolNameMaps(req.ToolNameMap, toolNameMap)
+	}
+
+	cfg := *req.Config
+	if isRelayConfig(&cfg) {
+		// The relay stamps the destination in its headers, so the lane
+		// decision belongs in x-relay-path, not in the URL we dial.
+		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
+		cfg.StaticHeaders["x-relay-path"] = zenRelayPath(req.Config, cleanModel, zenResponsesPath)
+		cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/") + zenResponsesPath
+	} else {
+		cfg.BaseURL = zenBaseURL(&cfg, cleanModel) + zenResponsesPath
+	}
+	// zenHeaders reads from the copy so the relay headers just set survive.
+	cfg.StaticHeaders = zenHeaders(&cfg, opencodeSessionHint(req, free), req.IsStream, free)
+
+	ctx := reqCtx(req)
+	resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+		if free {
+			return forwardOpencodeRequest(ctx, req.Client, &cfg, req.APIKey, body, req.IsStream)
+		}
+		return proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, body, req.IsStream)
+	})
+	if err != nil {
+		return fmt.Errorf("ForwardOpencodeZen (responses): %w", err)
+	}
+	defer resp.Body.Close()
+	if err := upstreamStatusError(resp); err != nil {
+		return err
 	}
 
 	if req.IsStream {
@@ -452,7 +421,7 @@ func forwardZenMessages(w http.ResponseWriter, req *Request, cleanModel string, 
 		headers["Authorization"] = "Bearer public"
 	}
 	headers["anthropic-version"] = "2023-06-01"
-	for k, v := range zenHeaders(req.Config, req.SessionID, req.IsStream, free) {
+	for k, v := range zenHeaders(req.Config, opencodeSessionHint(req, free), req.IsStream, free) {
 		switch strings.ToLower(k) {
 		case "authorization", "x-api-key", "content-type", "accept":
 			continue
@@ -470,7 +439,22 @@ func forwardZenMessages(w http.ResponseWriter, req *Request, cleanModel string, 
 	}
 
 	ctx := reqCtx(req)
-	resp, err := proxy.DoRequest(ctx, req.Client, "POST", messagesURL, headers, body)
+	var (
+		resp *http.Response
+		err  error
+	)
+	if free {
+		// The free tier answers only the stealth stack on a direct dial: a
+		// plain Go request is refused with 403 FreeTierError while the same
+		// bytes through an edge relay pass, so the free lane must not take
+		// the plain path (forwardOpencodeGoFree had the same hole).
+		msgCfg := *req.Config
+		msgCfg.BaseURL = messagesURL
+		msgCfg.StaticHeaders = headers
+		resp, err = forwardOpencodeRequest(ctx, req.Client, &msgCfg, "public", body, req.IsStream)
+	} else {
+		resp, err = proxy.DoRequest(ctx, req.Client, "POST", messagesURL, headers, body)
+	}
 	if err != nil {
 		return fmt.Errorf("ForwardOpencodeZen (messages): %w", err)
 	}

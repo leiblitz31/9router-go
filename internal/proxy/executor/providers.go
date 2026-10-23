@@ -332,25 +332,6 @@ func parseDataURIMime(uri string) string {
 	return "image/png"
 }
 
-// blockText flattens OpenAI message content (string or block array) to plain text.
-func blockText(v any) string {
-	switch c := v.(type) {
-	case string:
-		return c
-	case []any:
-		var b strings.Builder
-		for _, part := range c {
-			if pm, ok := part.(map[string]any); ok {
-				if txt, ok := pm["text"].(string); ok {
-					b.WriteString(txt)
-				}
-			}
-		}
-		return b.String()
-	}
-	return ""
-}
-
 func toCommandcodeImageBlock(part map[string]any) map[string]any {
 	pType, _ := part["type"].(string)
 	if pType == "image_url" {
@@ -454,72 +435,10 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 		}
 	}
 
-	// Tools: upstream validates Anthropic-shaped definitions ({name, input_schema}).
-	// OpenAI's {"type":"function","function":{…}} is rejected with
-	// 400 "expected string, received undefined at params.tools[0].name".
-	if rawTools, ok := params["tools"].([]any); ok {
-		tools := make([]any, 0, len(rawTools))
-		for _, rt := range rawTools {
-			tm, ok := rt.(map[string]any)
-			if !ok {
-				continue
-			}
-			if fn, ok := tm["function"].(map[string]any); ok {
-				name, _ := fn["name"].(string)
-				if name == "" {
-					continue
-				}
-				out := map[string]any{"name": name}
-				if d, _ := fn["description"].(string); d != "" {
-					out["description"] = d
-				}
-				if p, ok := fn["parameters"]; ok && p != nil {
-					out["input_schema"] = p
-				} else {
-					out["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
-				}
-				tools = append(tools, out)
-				continue
-			}
-			if _, ok := tm["name"].(string); ok { // already Anthropic-shaped / provider tool
-				tools = append(tools, tm)
-			}
-		}
-		if len(tools) == 0 {
-			delete(params, "tools")
-			delete(params, "tool_choice")
-		} else {
-			params["tools"] = tools
-		}
-	}
-
-	// tool_choice: upstream takes Anthropic strings only ("auto"/"any"/{type:"tool",name}).
-	switch tc := params["tool_choice"].(type) {
-	case string:
-		switch tc {
-		case "required":
-			params["tool_choice"] = map[string]any{"type": "any"}
-		case "auto":
-			params["tool_choice"] = map[string]any{"type": "auto"}
-		default: // "none"/unknown
-			delete(params, "tool_choice")
-		}
-	case map[string]any:
-		if fn, ok := tc["function"].(map[string]any); ok {
-			name, _ := fn["name"].(string)
-			if name == "" {
-				delete(params, "tool_choice")
-			} else {
-				params["tool_choice"] = map[string]any{"type": "tool", "name": name}
-			}
-		}
-	}
-
 	// CommandCode messages require content as array of blocks (never raw string)
 	if rawMsgs, ok := m["messages"].([]any); ok {
 		var systemTexts []string
 		convertedMsgs := make([]any, 0, len(rawMsgs))
-		toolNames := map[string]string{} // tool_call_id → function name (tool msgs often omit it)
 		for _, rawMsg := range rawMsgs {
 			msgMap, ok := rawMsg.(map[string]any)
 			if !ok {
@@ -532,25 +451,6 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 				if s, ok := contentVal.(string); ok && s != "" {
 					systemTexts = append(systemTexts, s)
 				}
-				continue
-			}
-
-			// OpenAI tool result → AI-SDK tool message; toolName is required there.
-			if role == "tool" {
-				callID, _ := msgMap["tool_call_id"].(string)
-				name, _ := msgMap["name"].(string)
-				if name == "" {
-					name = toolNames[callID]
-				}
-				convertedMsgs = append(convertedMsgs, map[string]any{
-					"role": "tool",
-					"content": []any{map[string]any{
-						"type":       "tool-result",
-						"toolCallId": callID,
-						"toolName":   name,
-						"output":     map[string]any{"type": "text", "value": blockText(contentVal)},
-					}},
-				})
 				continue
 			}
 
@@ -585,40 +485,6 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 					"type": "text",
 					"text": "",
 				})
-			}
-
-			// OpenAI assistant tool_calls → AI-SDK tool-call blocks.
-			if tcs, ok := msgMap["tool_calls"].([]any); ok {
-				for _, rawTC := range tcs {
-					tc, ok := rawTC.(map[string]any)
-					if !ok {
-						continue
-					}
-					fn, _ := tc["function"].(map[string]any)
-					name, _ := fn["name"].(string)
-					if name == "" {
-						continue
-					}
-					callID, _ := tc["id"].(string)
-					args := fn["arguments"]
-					argStr, _ := args.(string)
-					var input any = map[string]any{}
-					if argStr != "" && json.Unmarshal([]byte(argStr), &input) != nil {
-						input = map[string]any{}
-					} else if args != nil && argStr == "" {
-						input = args
-					}
-					contentBlocks = append(contentBlocks, map[string]any{
-						"type":       "tool-call",
-						"toolCallId": callID,
-						"toolName":   name,
-						"input":      input,
-					})
-					toolNames[callID] = name
-				}
-				if len(contentBlocks) == 0 {
-					contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": ""})
-				}
 			}
 
 			convertedMsg := map[string]any{
@@ -705,10 +571,12 @@ func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 }
 
 // ForwardOpencode handles requests for opencode (free tier).
-// The free-tier gate is keyless: every request travels with the v2 CLI
-// fingerprint and "Bearer public" (stamped by proxy.BuildOpenCodeHeaders),
-// never with the caller's key.
 func ForwardOpencode(w http.ResponseWriter, req *Request) error {
+	apiKey := req.APIKey
+	if apiKey == "" {
+		apiKey = "public"
+	}
+
 	var reqObj struct {
 		Model string `json:"model"`
 	}
@@ -737,18 +605,12 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		// The free-tier gate fingerprints the lowercase tool quartet; capitalised
 		// variants from Claude Code CLI are renamed here and restored on the
 		// response (translator.ConcealFingerprintTools).
-		preConceal := transformedBody
-		conceal := func(full bool) ([]byte, map[string]string) {
-			if full {
-				return translator.ConcealOpenCodeV2FullGateTools(preConceal, true, isOpenCodeAutoToolChoiceModel(cleanModel), cleanModel)
-			}
-			return translator.ConcealOpenCodeV2FingerprintTools(preConceal, true, isOpenCodeAutoToolChoiceModel(cleanModel))
-		}
-		firstBody, firstMap := conceal(false)
+		transformedBody, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(transformedBody, true, isOpenCodeAutoToolChoiceModel(cleanModel))
+		req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
+		w = NewToolNameRestoringWriter(w, toolNameMap)
 
 		cfg := *req.Config
 		isRelay := cfg.StaticHeaders != nil && cfg.StaticHeaders["x-relay-target"] != ""
-		targetURL := ""
 		if isRelay {
 			// Relay mode: BaseURL is the relay host (e.g. vercel-relay.vercel.app).
 			// Target endpoint must be set in x-relay-path, NOT by appending /responses to BaseURL.
@@ -757,32 +619,23 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 				cfg.StaticHeaders[k] = v
 			}
 			cfg.StaticHeaders["x-relay-path"] = "/inference/v1/responses"
-			targetURL = strings.TrimRight(cfg.BaseURL, "/")
 		} else {
 			baseURL := strings.TrimRight(cfg.BaseURL, "/")
 			baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
-			targetURL = opencodeInferenceBase(baseURL) + "/responses"
+			cfg.BaseURL = opencodeInferenceBase(baseURL) + "/responses"
 		}
-		rawHeaders := cfg.StaticHeaders
+		cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, opencodeSessionHint(req, true), req.IsStream)
 		ctx := req.Ctx
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		// DoRequest (not ForwardOpenAI): the CLI sends Accept: */* even when
-		// streaming, and ForwardOpenAI would clobber it with
-		// text/event-stream. Headers carry Bearer public (NoAuth provider).
-		send := func(session string, body []byte) (*http.Response, error) {
-			headers := proxy.BuildOpenCodeHeaders(rawHeaders, session, req.IsStream)
-			return proxy.DoRequest(ctx, req.Client, "POST", targetURL, headers, body)
-		}
-		resp, toolNameMap, _, err := opencodeGateRequest(send, req.SessionID, firstBody, firstMap,
-			func() ([]byte, map[string]string) { return conceal(true) })
+		resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+			return forwardOpencodeRequest(ctx, req.Client, &cfg, apiKey, transformedBody, req.IsStream)
+		})
 		if err != nil {
 			return fmt.Errorf("ForwardOpencode (muse-spark responses): %w", err)
 		}
 		defer resp.Body.Close()
-		req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
-		w = NewToolNameRestoringWriter(w, toolNameMap)
 
 		if resp.StatusCode != http.StatusOK {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
@@ -798,6 +651,10 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	}
 
 	body := InjectReasoningContent(req.Body, "opencode")
+	// opencode Chat Completions path: same conceal + restore of tool names.
+	body, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
+	w = NewToolNameRestoringWriter(w, toolNameMap)
 
 	// Upstream OpenCode free tier strictly requires stream=true.
 	// Non-streaming calls are blocked with 403 FreeTierError.
@@ -815,39 +672,21 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		}
 	}
 
-	// opencode Chat Completions path: same conceal + restore of tool names.
-	preConceal := body
-	conceal := func(full bool) ([]byte, map[string]string) {
-		if full {
-			return translator.ConcealOpenCodeV2FullGateTools(preConceal, false, isOpenCodeAutoToolChoiceModel(cleanModel), cleanModel)
-		}
-		return translator.ConcealOpenCodeV2FingerprintTools(preConceal, false, isOpenCodeAutoToolChoiceModel(cleanModel))
-	}
-	firstBody, firstMap := conceal(false)
-
 	cfg := *req.Config
-	targetURL := opencodeChatURL(cfg.BaseURL)
-	rawHeaders := cfg.StaticHeaders
+	cfg.BaseURL = opencodeChatURL(cfg.BaseURL)
+	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, opencodeSessionHint(req, true), true)
 
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// DoRequest (not ForwardOpenAI): the CLI sends Accept: */* even when
-	// streaming, and ForwardOpenAI would clobber it with
-	// text/event-stream. Headers carry Bearer public (NoAuth provider).
-	send := func(session string, b []byte) (*http.Response, error) {
-		headers := proxy.BuildOpenCodeHeaders(rawHeaders, session, true)
-		return proxy.DoRequest(ctx, req.Client, "POST", targetURL, headers, b)
-	}
-	resp, toolNameMap, _, err := opencodeGateRequest(send, req.SessionID, firstBody, firstMap,
-		func() ([]byte, map[string]string) { return conceal(true) })
+	resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+		return forwardOpencodeRequest(ctx, req.Client, &cfg, apiKey, body, true)
+	})
 	if err != nil {
 		return fmt.Errorf("ForwardOpencode: %w", err)
 	}
 	defer resp.Body.Close()
-	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
-	w = NewToolNameRestoringWriter(w, toolNameMap)
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
@@ -927,11 +766,8 @@ func isOpencodeFreeModel(cleanModel string) bool {
 	return false
 }
 
-// opencodeGoMessagesModels routes to /zen/go/v1/messages (the Claude Messages
-// transport) instead of /chat/completions, which answers
-// "ModelProtocolUnsupported" for them. claude-haiku-5-5 was added upstream
-// (#4727) with targetFormat "claude" so OpenAI-wire clients translate to it.
 var opencodeGoMessagesModels = map[string]bool{
+	"claude-haiku-5-5": true,
 	"minimax-m3":       true,
 	"minimax-m2.7":     true,
 	"minimax-m2.5":     true,
@@ -940,7 +776,6 @@ var opencodeGoMessagesModels = map[string]bool{
 	"qwen3.7-max":      true,
 	"qwen3.7-plus":     true,
 	"qwen3.6-plus":     true,
-	"claude-haiku-5-5": true,
 }
 
 // EnsureClaudeMessages exposes the OpenAI→Claude Messages request conversion
@@ -1054,15 +889,6 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 	// (upstream thinkingUnified captureThinking)
 	applyClaudeThinkingDisplay(reqMap)
 	applyClaudeThinkingType(reqMap, provider, model)
-	// Claude Code puts a `context_management` block (context-editing strategy)
-	// in every request; only Anthropic accepts it — gateways fronting other
-	// engines answer 400 "context_management: Extra inputs are not
-	// permitted". A same-format claude→claude request skips body rebuilding
-	// in the translator, so the field rides through to every non-Anthropic
-	// provider on the Claude transport (upstream #4727).
-	if !isAnthropicServingProvider(provider) {
-		delete(reqMap, "context_management")
-	}
 	delete(reqMap, "stream_options")
 	delete(reqMap, "store")
 	delete(reqMap, "reasoning_effort")
@@ -1072,14 +898,6 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 		return body
 	}
 	return updated
-}
-
-// isAnthropicServingProvider reports whether `provider` is Anthropic itself.
-// Only those endpoints accept `context_management`; every other Claude-wire
-// provider answers 400 "Extra inputs are not permitted" for it (upstream
-// #4727, mirroring decolua/9router's anthropic-compatible- prefix rule).
-func isAnthropicServingProvider(provider string) bool {
-	return provider == "claude" || strings.HasPrefix(provider, "anthropic") || strings.HasPrefix(provider, "anthropic-compatible-")
 }
 
 func convertOpenAIToolsToClaude(tools []any) []any {
@@ -1303,7 +1121,7 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 		if role == "tool" {
 			toolCallID, _ := msgMap["tool_call_id"].(string)
 			toolCallID = sanitizeToolUseID(toolCallID, toolIDMap)
-			contentVal := msgMap["content"]
+			contentVal := convertClaudeImageParts(msgMap["content"])
 			intermediate = append(intermediate, map[string]any{
 				"role": "user",
 				"content": []any{
@@ -1326,7 +1144,7 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 						"text": cStr,
 					})
 				} else if cArr, ok := msgMap["content"].([]any); ok && len(cArr) > 0 {
-					contentBlocks = append(contentBlocks, cArr...)
+					contentBlocks = append(contentBlocks, convertClaudeImageParts(cArr).([]any)...)
 				}
 				for _, tc := range toolCalls {
 					tcMap, ok := tc.(map[string]any)
@@ -1372,6 +1190,8 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 		intermediate = append(intermediate, claudeMessage(msgMap))
 	}
 
+	intermediate = dropImageEmptiedMessages(intermediate)
+
 	var merged []any
 	for _, m := range intermediate {
 		if len(merged) == 0 {
@@ -1404,6 +1224,13 @@ func claudeMessage(msgMap map[string]any) map[string]any {
 	for k, v := range msgMap {
 		if claudeMessageAllowedKeys[k] {
 			clean[k] = v
+		}
+	}
+	if content, has := clean["content"]; has {
+		converted := convertClaudeImageParts(content)
+		clean["content"] = converted
+		if emptiedByImageDrop(content, converted) {
+			clean[imageEmptiedMarker] = true
 		}
 	}
 	return clean
@@ -1651,21 +1478,6 @@ func opencodeGoInferenceBase(base string) string {
 	}
 }
 
-// stripOpencodeGoResponseFormat ports upstream 468aa7d9: OpenCode Go's relay
-// rejects response_format (both json_schema and json_object — drop, not
-// downgrade) for its deepseek family with HTTP 400 while serving it for
-// every other model on the same relay. Match is a ^deepseek prefix,
-// case-insensitive, on the cleaned model id.
-func stripOpencodeGoResponseFormat(reqMap map[string]any, cleanModel string) {
-	if reqMap == nil {
-		return
-	}
-	if !strings.HasPrefix(strings.ToLower(cleanModel), "deepseek") {
-		return
-	}
-	delete(reqMap, "response_format")
-}
-
 // forwardOpencodeGoFree serves free-tier ids on the paid go lane (today only
 // space-bunny-free). Keyed requests for them 403, so they travel exactly like
 // free-executor requests: the inference chat lane (no free go model takes the
@@ -1682,7 +1494,6 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 		if cleanModel != "" {
 			reqMap["model"] = cleanModel
 		}
-		stripOpencodeGoResponseFormat(reqMap, cleanModel)
 		if b, err := marshalStable(reqMap); err == nil {
 			body = b
 		}
@@ -1696,14 +1507,14 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 	} else {
 		cfg.BaseURL = opencodeGoInferenceBase(cfg.BaseURL) + "/chat/completions"
 	}
-	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, req.SessionID, true)
+	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, opencodeSessionHint(req, true), true)
 
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
-		return proxy.ForwardOpenAI(ctx, req.Client, &cfg, "public", body, true)
+		return forwardOpencodeRequest(ctx, req.Client, &cfg, "public", body, true)
 	})
 	if err != nil {
 		return fmt.Errorf("ForwardOpencodeGo (free lane): %w", err)
@@ -1927,7 +1738,9 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		if cleanModel != "" {
 			reqGoMap["model"] = cleanModel
 		}
-		stripOpencodeGoResponseFormat(reqGoMap, cleanModel)
+		if strings.HasPrefix(strings.ToLower(cleanModel), "deepseek") {
+			delete(reqGoMap, "response_format")
+		}
 		// Deterministic marshaling keeps the serialized request prefix
 		// stable across turns, which DeepSeek's prefix prompt cache
 		// requires; json/v2 randomizes map member order by default.
