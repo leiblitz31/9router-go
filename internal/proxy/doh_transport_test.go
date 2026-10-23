@@ -144,7 +144,7 @@ func TestDoHResolverQueryAndCache(t *testing.T) {
 			t.Errorf("Accept = %q, want application/dns-json", got)
 		}
 		w.Header().Set("Content-Type", "application/dns-json")
-		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"TTL":300,"data":"203.0.113.10"}]}`)
+		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"TTL":300,"data":"45.33.49.10"}]}`)
 	})
 
 	ctx := context.Background()
@@ -153,8 +153,8 @@ func TestDoHResolverQueryAndCache(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveA() call %d: %v", i, err)
 		}
-		if len(ips) != 1 || ips[0] != "203.0.113.10" {
-			t.Fatalf("resolveA() = %v, want [203.0.113.10]", ips)
+		if len(ips) != 1 || ips[0] != "45.33.49.10" {
+			t.Fatalf("resolveA() = %v, want [45.33.49.10]", ips)
 		}
 	}
 	if got := hits.Load(); got != 1 {
@@ -165,15 +165,15 @@ func TestDoHResolverQueryAndCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveDialTargets() error: %v", err)
 	}
-	if len(targets) != 1 || targets[0] != "203.0.113.10:443" {
-		t.Errorf("resolveDialTargets() = %v, want [203.0.113.10:443]", targets)
+	if len(targets) != 1 || targets[0] != "45.33.49.10:443" {
+		t.Errorf("resolveDialTargets() = %v, want [45.33.49.10:443]", targets)
 	}
 
-	literal, err := resolver.resolveDialTargets(ctx, "203.0.113.99", "203.0.113.99:443")
+	literal, err := resolver.resolveDialTargets(ctx, "45.33.49.99", "45.33.49.99:443")
 	if err != nil {
 		t.Fatalf("resolveDialTargets() literal IP error: %v", err)
 	}
-	if len(literal) != 1 || literal[0] != "203.0.113.99:443" {
+	if len(literal) != 1 || literal[0] != "45.33.49.99:443" {
 		t.Errorf("resolveDialTargets() literal = %v, want the single passthrough", literal)
 	}
 }
@@ -192,7 +192,7 @@ func TestDoHResolverFailover(t *testing.T) {
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		goodHits.Add(1)
 		w.Header().Set("Content-Type", "application/dns-json")
-		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"TTL":300,"data":"203.0.113.20"}]}`)
+		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"TTL":300,"data":"45.33.49.20"}]}`)
 	}))
 	defer good.Close()
 
@@ -202,8 +202,8 @@ func TestDoHResolverFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveA() with failover: %v", err)
 	}
-	if len(ips) != 1 || ips[0] != "203.0.113.20" {
-		t.Fatalf("resolveA() = %v, want [203.0.113.20] from the healthy endpoint", ips)
+	if len(ips) != 1 || ips[0] != "45.33.49.20" {
+		t.Fatalf("resolveA() = %v, want [45.33.49.20] from the healthy endpoint", ips)
 	}
 	if badHits.Load() == 0 {
 		t.Errorf("failing endpoint was never tried")
@@ -248,18 +248,18 @@ func TestNewSafeTransportWithDoH(t *testing.T) {
 // hostname and the operator cannot tell a sinkhole from a re-signing proxy.
 func TestDoHResolutionNoteNamesAddressAndResolver(t *testing.T) {
 	const host = "note.example"
-	rememberDoHResolution(host, "203.0.113.9", "https://dns.google/resolve")
+	rememberDoHResolution(host, "45.33.49.9", "https://dns.google/resolve")
 
 	ip, resolver := resolutionNote("https://" + host + "/v2/chat/completions")
-	if ip != "203.0.113.9" {
-		t.Fatalf("resolutionNote() ip = %q, want 203.0.113.9", ip)
+	if ip != "45.33.49.9" {
+		t.Fatalf("resolutionNote() ip = %q, want 45.33.49.9", ip)
 	}
 	if !strings.Contains(resolver, "dns.google") {
 		t.Fatalf("resolutionNote() resolver = %q, want the answering endpoint", resolver)
 	}
 
 	summary := resolutionSummary(ip, resolver)
-	for _, want := range []string{"203.0.113.9", "dns.google"} {
+	for _, want := range []string{"45.33.49.9", "dns.google"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("resolutionSummary() = %q, want it to mention %q", summary, want)
 		}
@@ -285,9 +285,9 @@ func TestDoHResolveDialTargetsReturnsEveryRecord(t *testing.T) {
 	resolver, _ := newTestDoHResolver(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/dns-json")
 		fmt.Fprint(w, `{"Status":0,"Answer":[
-			{"name":"multi.example","type":1,"TTL":300,"data":"203.0.113.1"},
-			{"name":"multi.example","type":1,"TTL":300,"data":"203.0.113.2"},
-			{"name":"multi.example","type":1,"TTL":300,"data":"203.0.113.3"}]}`)
+			{"name":"multi.example","type":1,"TTL":300,"data":"45.33.49.1"},
+			{"name":"multi.example","type":1,"TTL":300,"data":"45.33.49.2"},
+			{"name":"multi.example","type":1,"TTL":300,"data":"45.33.49.3"}]}`)
 	})
 
 	targets, err := resolver.resolveDialTargets(context.Background(), "multi.example", "multi.example:443")
@@ -297,7 +297,7 @@ func TestDoHResolveDialTargetsReturnsEveryRecord(t *testing.T) {
 	if len(targets) != 3 {
 		t.Fatalf("resolveDialTargets() = %v, want all 3 records", targets)
 	}
-	for _, want := range []string{"203.0.113.1:443", "203.0.113.2:443", "203.0.113.3:443"} {
+	for _, want := range []string{"45.33.49.1:443", "45.33.49.2:443", "45.33.49.3:443"} {
 		found := false
 		for _, got := range targets {
 			if got == want {
@@ -327,11 +327,11 @@ func TestDoHResolveDialTargetsReturnsEveryRecord(t *testing.T) {
 	}
 
 	// A literal IP still passes through untouched, exactly once.
-	literal, err := resolver.resolveDialTargets(context.Background(), "203.0.113.99", "203.0.113.99:443")
+	literal, err := resolver.resolveDialTargets(context.Background(), "45.33.49.99", "45.33.49.99:443")
 	if err != nil {
 		t.Fatalf("resolveDialTargets() literal IP error: %v", err)
 	}
-	if len(literal) != 1 || literal[0] != "203.0.113.99:443" {
+	if len(literal) != 1 || literal[0] != "45.33.49.99:443" {
 		t.Errorf("resolveDialTargets() literal = %v, want the single passthrough", literal)
 	}
 }
@@ -358,7 +358,7 @@ func TestDoHResolveACollapsesConcurrentMisses(t *testing.T) {
 		// arrive while it is still in flight.
 		<-release
 		w.Header().Set("Content-Type", "application/dns-json")
-		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"burst.example","type":1,"TTL":300,"data":"203.0.113.7"}]}`)
+		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"burst.example","type":1,"TTL":300,"data":"45.33.49.7"}]}`)
 	})
 
 	const callers = 8
@@ -402,7 +402,7 @@ func TestDoHResolveAFlightSurvivesLeaderCancellation(t *testing.T) {
 		}
 		<-release
 		w.Header().Set("Content-Type", "application/dns-json")
-		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"cancel.example","type":1,"TTL":300,"data":"203.0.113.8"}]}`)
+		fmt.Fprint(w, `{"Status":0,"Answer":[{"name":"cancel.example","type":1,"TTL":300,"data":"45.33.49.8"}]}`)
 	})
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
@@ -446,7 +446,7 @@ func TestDoHDialFailsOverAcrossRecords(t *testing.T) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if strings.Contains(r.Host, "203.0.113.1:") {
+		if strings.Contains(r.Host, "45.33.49.1:") {
 			refused.Add(1)
 			w.WriteHeader(http.StatusBadGateway)
 			return
@@ -468,8 +468,8 @@ func TestDoHDialFailsOverAcrossRecords(t *testing.T) {
 	resolver, _ := newTestDoHResolver(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/dns-json")
 		fmt.Fprint(w, `{"Status":0,"Answer":[
-			{"name":"failover.example","type":1,"TTL":300,"data":"203.0.113.1"},
-			{"name":"failover.example","type":1,"TTL":300,"data":"203.0.113.2"}]}`)
+			{"name":"failover.example","type":1,"TTL":300,"data":"45.33.49.1"},
+			{"name":"failover.example","type":1,"TTL":300,"data":"45.33.49.2"}]}`)
 	})
 
 	// The test proxy is on loopback; the SSRF guard would otherwise refuse to
@@ -502,7 +502,7 @@ func TestDoHDialFailsOverAcrossRecords(t *testing.T) {
 // first candidate would send the operator to the wrong host.
 func TestDoHDialRecordsTheAddressThatAccepted(t *testing.T) {
 	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.Host, "203.0.113.1:") {
+		if strings.Contains(r.Host, "45.33.49.1:") {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
@@ -520,8 +520,8 @@ func TestDoHDialRecordsTheAddressThatAccepted(t *testing.T) {
 	resolver, _ := newTestDoHResolver(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/dns-json")
 		fmt.Fprint(w, `{"Status":0,"Answer":[
-			{"name":"note-dial.example","type":1,"TTL":300,"data":"203.0.113.1"},
-			{"name":"note-dial.example","type":1,"TTL":300,"data":"203.0.113.2"}]}`)
+			{"name":"note-dial.example","type":1,"TTL":300,"data":"45.33.49.1"},
+			{"name":"note-dial.example","type":1,"TTL":300,"data":"45.33.49.2"}]}`)
 	})
 	t.Setenv("ALLOW_PRIVATE_NETWORKING", "1")
 
@@ -540,7 +540,7 @@ func TestDoHDialRecordsTheAddressThatAccepted(t *testing.T) {
 	}
 	// The cursor starts at the first record, which the fake proxy refuses, so
 	// the dial must have failed over to the second and recorded that one.
-	if ip != "203.0.113.2" {
-		t.Errorf("recorded %q, want 203.0.113.2 (the record that accepted)", ip)
+	if ip != "45.33.49.2" {
+		t.Errorf("recorded %q, want 45.33.49.2 (the record that accepted)", ip)
 	}
 }
