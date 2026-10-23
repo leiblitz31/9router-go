@@ -467,6 +467,8 @@ func validateProviderKey(ctx context.Context, provider string, cfg providers.Pro
 		// host — this entry signs its own request against the resolved region.
 		valid, message := proxy.BedrockProbe(ctx, http.DefaultClient, apiKey, psd)
 		return validateOutcome{valid: valid, supported: true, message: message}
+	case "nous":
+		return validateNous(ctx, apiKey)
 	}
 
 	if isAnthropicProbe(cfg) {
@@ -538,6 +540,29 @@ func validateGeneric(ctx context.Context, provider string, cfg providers.Provide
 		valid:     status != http.StatusUnauthorized && status != http.StatusForbidden,
 		supported: true,
 	}
+}
+
+func validateNous(ctx context.Context, apiKey string) validateOutcome {
+	payload, _ := json.Marshal(map[string]any{
+		"model":      providers.NousValidationModel,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens": 1,
+		"stream":     false,
+	})
+	headers := map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"Content-Type":  "application/json",
+	}
+	status, _, err := validateProbeDo(ctx, http.MethodPost, providers.NousChatCompletionsURL, headers, payload)
+	if err != nil {
+		return validateOutcome{supported: true, message: err.Error()}
+	}
+	valid := providers.IsNousApiKeyAccepted(status)
+	out := validateOutcome{valid: valid, supported: true}
+	if !valid {
+		out.message = providers.GetNousApiKeyValidationError(status)
+	}
+	return out
 }
 
 func validateCloudflareAI(ctx context.Context, cfg providers.ProviderConfig, apiKey string, psd map[string]any) validateOutcome {

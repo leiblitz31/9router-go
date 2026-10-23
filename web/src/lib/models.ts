@@ -96,6 +96,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "morph": "morph",
   "nanobanana": "nb",
   "nebius": "nebius",
+  "nous": "nous",
   "nvidia": "nvidia",
   "ollama": "ollama",
   "ollama-local": "ollama-local",
@@ -3497,6 +3498,48 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "id": "Qwen/Qwen3-Embedding-8B",
       "name": "Qwen3 Embedding 8B",
       "kind": "embedding"
+    }
+  ],
+  "nous": [
+    {
+      "id": "meituan/longcat-2.0:free",
+      "name": "Meituan: LongCat 2.0",
+      "contextLength": 1048756
+    },
+    {
+      "id": "meituan/longcat-2.5-preview:free",
+      "name": "Meituan: LongCat 2.5 Preview",
+      "contextLength": 1048576
+    },
+    {
+      "id": "stepfun/step-5-preview:free",
+      "name": "StepFun: Step 5 Preview",
+      "contextLength": 1000000
+    },
+    {
+      "id": "upstage/solar-mini4:free",
+      "name": "Upstage: Solar Mini 4",
+      "contextLength": 524288
+    },
+    {
+      "id": "stepfun/step-3.7-flash:free",
+      "name": "StepFun: Step 3.7 Flash",
+      "contextLength": 262144
+    },
+    {
+      "id": "poolside/laguna-s-2.1:free",
+      "name": "Poolside: Laguna S 2.1",
+      "contextLength": 262144
+    },
+    {
+      "id": "poolside/laguna-xs-2.1:free",
+      "name": "Poolside: Laguna XS 2.1",
+      "contextLength": 262144
+    },
+    {
+      "id": "stealth/missingno",
+      "name": "MissingNo",
+      "contextLength": 262144
     }
   ],
   "nvidia": [

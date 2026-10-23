@@ -200,10 +200,10 @@ func deviceStart(provider, region, startURL, authMethod string) (map[string]any,
 		return codebuddyStart(provider)
 	case "muse":
 		return museStart()
-	case "nous":
-		return nousStart()
 	case "minimax-code", "minimax-code-global":
 		return minimaxCodeStart(provider)
+	case "nous":
+		return nousStart()
 	default:
 		return nil, fmt.Errorf("unsupported provider")
 	}
@@ -472,10 +472,10 @@ func devicePoll(provider, code string, session map[string]any) (deviceTokens, st
 		t, err = codebuddyPoll(provider, code)
 	case "muse":
 		t, err = musePoll(code)
-	case "nous":
-		t, err = nousPoll(code)
 	case "minimax-code", "minimax-code-global":
 		t, err = minimaxCodePoll(provider, code, session)
+	case "nous":
+		t, err = nousPoll(code)
 	default:
 		return t, "error", "unsupported provider"
 	}
@@ -506,6 +506,7 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 		"qoder": "Qoder", "qoder-cn": "Qoder CN", "kilocode": "KiloCode", "grok-cli": "Grok CLI",
 		"github": "GitHub", "kiro": "Kiro", "kimi": "Kimi", "muse": "Muse",
 		"codebuddy-cn": "CodeBuddy", "codebuddy-intl": "CodeBuddy",
+		"minimax-code": "MiniMax Code", "minimax-code-global": "MiniMax Code Global",
 		"nous": "Nous Research",
 	}[provider])
 	id := provider + "-" + shortHash(t.access)
@@ -520,6 +521,10 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 	for k, v := range t.extra {
 		psd[k] = v
 	}
+	if ak, ok := t.extra["apiKey"].(string); ok && ak != "" {
+		dataMap["apiKey"] = ak
+	}
+	delete(psd, "apiKey")
 	dataMap["providerSpecificData"] = psd
 	if t.expiresIn > 0 {
 		dataMap["expiresAt"] = time.Now().Add(time.Duration(t.expiresIn) * time.Second).UTC().Format(time.RFC3339)

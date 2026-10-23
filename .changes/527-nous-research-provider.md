@@ -1,0 +1,2 @@
+### Added
+- **providers**: add Nous Research (`nous`) provider support with 8 free-tier models (`meituan/longcat-2.0:free`, `meituan/longcat-2.5-preview:free`, `stepfun/step-5-preview:free`, `upstage/solar-mini4:free`, `stepfun/step-3.7-flash:free`, `poolside/laguna-s-2.1:free`, `poolside/laguna-xs-2.1:free`, `stealth/missingno`), capabilities mapping, `nous` base thinking format levels, zero pricing, live catalogue normalisation, probe validation, and request attribution tags (upstream `decolua/9router#4745`, `decolua/9router#4770`).

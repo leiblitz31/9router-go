@@ -105,3 +105,36 @@ func TestSuggestedModelsBadRequests(t *testing.T) {
 		t.Fatalf("expected empty data, got %v", out.Data)
 	}
 }
+
+func TestSuggestedModelsNousFree(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[
+			{"id":"vendor/free-chat","name":"Free Chat","context_length":262144,"pricing":{"prompt":"0","completion":"0"},"architecture":{"output_modalities":["text"]}},
+			{"id":"vendor/paid-chat","context_length":262144,"pricing":{"prompt":"0.01","completion":"0"},"architecture":{"output_modalities":["text"]}},
+			{"id":"vendor/short-chat","context_length":131072,"pricing":{"prompt":"0","completion":"0"},"architecture":{"output_modalities":["text"]}},
+			{"id":"vendor/embedding","context_length":262144,"pricing":{"prompt":"0","completion":"0"},"architecture":{"output_modalities":["embeddings"]}}
+		]}`))
+	}))
+	defer feed.Close()
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/providers/suggested-models?url="+url.QueryEscape(feed.URL)+"&type=nous-free", nil)
+	rec := httptest.NewRecorder()
+	HandleSuggestedModels(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data []suggestedModel `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if len(out.Data) != 1 || out.Data[0].ID != "vendor/free-chat" {
+		t.Fatalf("expected only vendor/free-chat, got %v", out.Data)
+	}
+	if out.Data[0].ContextLength == nil || *out.Data[0].ContextLength != 262144 {
+		t.Fatalf("expected contextLength 262144, got %v", out.Data[0])
+	}
+}

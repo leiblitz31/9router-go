@@ -286,6 +286,16 @@ var (
 			"us.xai.grok-4.6":     {InputPer1M: 3, OutputPer1M: 15, CachedPer1M: 0.75},
 			"global.xai.grok-4.6": {InputPer1M: 3, OutputPer1M: 15, CachedPer1M: 0.75},
 		},
+		"nous": {
+			"meituan/longcat-2.0:free":         {InputPer1M: 0, OutputPer1M: 0, CachedPer1M: 0, ReasoningPer1M: 0},
+			"meituan/longcat-2.5-preview:free": {InputPer1M: 0, OutputPer1M: 0, CachedPer1M: 0, ReasoningPer1M: 0},
+			"stepfun/step-5-preview:free":      {InputPer1M: 0, OutputPer1M: 0, CachedPer1M: 0, ReasoningPer1M: 0},
+			"upstage/solar-mini4:free":         {InputPer1M: 0, OutputPer1M: 0, CachedPer1M: 0, ReasoningPer1M: 0},
+			"stepfun/step-3.7-flash:free":      {InputPer1M: 0, OutputPer1M: 0, CachedPer1M: 0, ReasoningPer1M: 0},
+			"poolside/laguna-s-2.1:free":       {InputPer1M: 0, OutputPer1M: 0, CachedPer1M: 0, ReasoningPer1M: 0},
+			"poolside/laguna-xs-2.1:free":      {InputPer1M: 0, OutputPer1M: 0, CachedPer1M: 0, ReasoningPer1M: 0},
+			"stealth/missingno":                {InputPer1M: 0, OutputPer1M: 0, CachedPer1M: 0, ReasoningPer1M: 0},
+		},
 	}
 )
 

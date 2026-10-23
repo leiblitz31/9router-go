@@ -67,6 +67,10 @@ func (h *ChatHandler) forwardRequest(
 			}
 		}
 	}
+	// Nous Portal attribution tags (upstream NOUS_ATTRIBUTION / PR #4770)
+	if strings.Contains(cfg.BaseURL, providers.NousAttributionHostname) {
+		body = providers.ApplyNousAttribution(body)
+	}
 	resp, err := internalproxy.ForwardOpenAI(ctx, httpClient, cfg, apiKey, body, isStream)
 	if err != nil {
 		return fmt.Errorf("forward to upstream: %w", err)

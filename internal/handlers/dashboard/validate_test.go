@@ -777,3 +777,71 @@ func TestHandleValidateProvider_CustomAnthropicNodeProbeModel(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleValidateProvider_Nous(t *testing.T) {
+	t.Run("valid key probes with laguna-xs-2.1:free", func(t *testing.T) {
+		calls := staticProbeStub(t, http.StatusOK)
+		rec, out := postValidate(t, `{"provider":"nous","apiKey":"portal-key"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if out["valid"] != true {
+			t.Fatalf("expected valid=true, got %v", out)
+		}
+		if len(*calls) != 1 {
+			t.Fatalf("expected 1 probe call, got %d", len(*calls))
+		}
+		call := (*calls)[0]
+		if call.url != "https://inference-api.nousresearch.com/v1/chat/completions" {
+			t.Errorf("expected URL https://inference-api.nousresearch.com/v1/chat/completions, got %q", call.url)
+		}
+		if call.method != http.MethodPost {
+			t.Errorf("expected POST, got %q", call.method)
+		}
+		if got := call.headers.Get("Authorization"); got != "Bearer portal-key" {
+			t.Errorf("expected Authorization Bearer portal-key, got %q", got)
+		}
+		var reqBody struct {
+			Model     string `json:"model"`
+			MaxTokens int    `json:"max_tokens"`
+			Stream    bool   `json:"stream"`
+		}
+		if err := json.Unmarshal([]byte(call.body), &reqBody); err != nil {
+			t.Fatalf("failed to unmarshal probe body: %v", err)
+		}
+		if reqBody.Model != "poolside/laguna-xs-2.1:free" {
+			t.Errorf("expected model poolside/laguna-xs-2.1:free, got %q", reqBody.Model)
+		}
+		if reqBody.MaxTokens != 1 || reqBody.Stream != false {
+			t.Errorf("unexpected probe body parameters: %+v", reqBody)
+		}
+	})
+
+	t.Run("rejected key returns Invalid or inactive API key", func(t *testing.T) {
+		staticProbeStub(t, http.StatusUnauthorized)
+		rec, out := postValidate(t, `{"provider":"nous","apiKey":"bad-key"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if out["valid"] != false {
+			t.Errorf("expected valid=false, got %v", out)
+		}
+		if out["error"] != "Invalid or inactive API key" {
+			t.Errorf("expected 'Invalid or inactive API key', got %v", out["error"])
+		}
+	})
+
+	t.Run("inconclusive non-200 returns status error", func(t *testing.T) {
+		staticProbeStub(t, http.StatusPaymentRequired)
+		rec, out := postValidate(t, `{"provider":"nous","apiKey":"key"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if out["valid"] != false {
+			t.Errorf("expected valid=false, got %v", out)
+		}
+		if out["error"] != "Unable to verify API key (Nous returned 402)" {
+			t.Errorf("expected 'Unable to verify API key (Nous returned 402)', got %v", out["error"])
+		}
+	})
+}

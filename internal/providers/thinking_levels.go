@@ -57,6 +57,7 @@ var formatLevels = map[string][]string{
 	"minimax":         levelOnOff,
 	"hunyuan":         levelBase,
 	"step":            levelBase,
+	"nous":            levelBase,
 }
 
 // thinkingPattern is a model-name override, more precise than the format

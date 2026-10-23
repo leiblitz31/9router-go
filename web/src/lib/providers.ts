@@ -736,6 +736,33 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "nous",
+    "name": "Nous Research",
+    "category": "freeTier",
+    "alias": "nous",
+    "color": "#7C3AED",
+    "icon": "psychology",
+    "website": "https://nousresearch.com",
+    "notice": {
+      "text": "Connect with OAuth Device Code (free account, no payment required) or a Nous Portal API key.",
+      "signupUrl": "https://portal.nousresearch.com",
+      "apiKeyUrl": "https://portal.nousresearch.com/api-keys"
+    },
+    "authType": "oauth",
+    "authModes": ["oauth", "apikey"],
+    "passthroughModels": true,
+    "noAuth": false,
+    "priority": 65,
+    "serviceKinds": [
+      "llm",
+      "imageToText"
+    ],
+    "modelsFetcher": {
+      "url": "https://inference-api.nousresearch.com/v1/models",
+      "type": "nous-free"
+    }
+  },
+  {
     "id": "nvidia",
     "name": "NVIDIA NIM",
     "category": "freeTier",

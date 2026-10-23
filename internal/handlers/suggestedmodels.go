@@ -10,6 +10,7 @@ import (
 
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/pricing"
+	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
 )
 
@@ -197,6 +198,19 @@ func filterMinimaxCode(envelopes []map[string]any) []suggestedModel {
 	return []suggestedModel{}
 }
 
+func filterNousFree(models []map[string]any) []suggestedModel {
+	nousModels := providers.NormalizeNousFreeModels(models)
+	out := make([]suggestedModel, 0, len(nousModels))
+	for _, m := range nousModels {
+		out = append(out, suggestedModel{
+			ID:            m.ID,
+			Name:          m.Name,
+			ContextLength: m.ContextLength,
+		})
+	}
+	return out
+}
+
 // contextLengthOf reads an optional context window for sorting.
 func contextLengthOf(m suggestedModel) int64 {
 	if m.ContextLength == nil {
@@ -228,6 +242,8 @@ func HandleSuggestedModels(w http.ResponseWriter, r *http.Request) {
 		filter = filterAirforceFree
 	case "minimax-code":
 		filter = filterMinimaxCode
+	case "nous-free":
+		filter = filterNousFree
 	default:
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "Unknown filter type")
 		return
