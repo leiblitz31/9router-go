@@ -596,6 +596,19 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	// client's own body shape. Fail-open: any refusal leaves the body as-is.
 	pipedBody = prefetchImagesForTarget(ctx, provider, model, providerCfg, pipedBody)
 
+	// Codex Fast intent: the account's stored preference is the fallback, and a
+	// body that carries its own intent wins. Applied after every body rewrite
+	// above so a saver or a prefetch cannot reorder or drop the service tier.
+	var accountFastOpt *bool
+	if connData != nil && connData.ProviderSpecificData != nil {
+		if v, ok := connData.ProviderSpecificData["codexFastMode"].(bool); ok {
+			accountFastOpt = &v
+		}
+	}
+	if fastBody, modified := ApplyCodexFastMode(pipedBody, provider, accountFastOpt); modified {
+		pipedBody = fastBody
+	}
+
 	start := time.Now()
 	metrics := &streamMetrics{}
 	var fwdErr error
