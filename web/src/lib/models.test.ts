@@ -93,3 +93,32 @@ describe('commandcode live catalog', () => {
   })
 })
 
+// Of the five keyless catalogues wired on the backend, only Vercel AI Gateway
+// gets a modelsFetcher here. The "Suggested free models" section is a free-tier
+// surface, and probing each feed live shows the other four have no zero-priced
+// tier to suggest: chutes prices every model, nvidia and ollama carry no
+// pricing block at all, and openrouter already had its openrouter-free fetcher.
+// A fetcher that returns nothing is worse than no fetcher — it renders an empty
+// section the operator has to interpret.
+describe('keyless live catalogs', () => {
+  it('wires Vercel AI Gateway through its own free-tier filter', () => {
+    const p = PROVIDER_CATALOG.find((e) => e.id === 'vercel-ai-gateway')
+    expect(p?.modelsFetcher).toEqual({
+      url: 'https://ai-gateway.vercel.sh/v1/models',
+      type: 'vercel-free',
+    })
+  })
+
+  it('leaves the four without a free tier unfetched', () => {
+    for (const id of ['chutes', 'nvidia', 'ollama']) {
+      const p = PROVIDER_CATALOG.find((e) => e.id === id)
+      expect(p?.modelsFetcher, `${id} has no zero-priced tier to suggest`).toBeUndefined()
+    }
+  })
+
+  it('keeps openrouter on the free-tier fetcher it already had', () => {
+    const p = PROVIDER_CATALOG.find((e) => e.id === 'openrouter')
+    expect(p?.modelsFetcher?.type).toBe('openrouter-free')
+  })
+})
+

@@ -164,6 +164,39 @@ var modelsListURL = map[string]string{
 	// registry catalog is a fixed 22-model list, so without this entry the
 	// dashboard cannot discover anything the snapshot predates.
 	"commandcode": "https://api.commandcode.ai/provider/v1/models",
+	// Five more providers whose catalogue is reachable without a valid
+	// credential, so the discovery path that fixed commandcode covers them
+	// unchanged: "Check Latest Models", "Import from /models" and "Sync Models"
+	// all read this one map.
+	//
+	// They split on whether the endpoint *validates* the bearer the handler
+	// always sends, and the difference is only in how a revoked key reports:
+	//
+	//   - nvidia, ollama and openrouter answer 200 to any Authorization header,
+	//     bogus token included, so discovery survives a revoked credential and
+	//     still lists what the provider serves.
+	//   - vercel-ai-gateway and chutes answer 200 with no header at all but 401
+	//     as soon as one is sent, so a revoked key reports a failed fetch
+	//     exactly like the keyed aggregators do.
+	//
+	// Either way a connection must exist first — writeConnectionModels refuses
+	// a provider with no stored key before it dials anything.
+	//
+	// vercel-ai-gateway and chutes ship no static catalog at all (absent from
+	// ProviderModels and from web/src/lib/models.ts), so before this entry the
+	// dashboard could not list a single model for either. nvidia and ollama
+	// carry 11 and 8 static rows against 84 and 23 live ones. openrouter
+	// already had a web modelsFetcher for its free tier, but no backend entry,
+	// so its "Check Latest Models" button never rendered.
+	"vercel-ai-gateway": "https://ai-gateway.vercel.sh/v1/models",
+	"chutes":            "https://llm.chutes.ai/v1/models",
+	"nvidia":            "https://integrate.api.nvidia.com/v1/models",
+	// Ollama's cloud library is not an OpenAI /v1/models endpoint: it answers
+	// {models:[{name, model, …}]}. writeConnectionModels accepts either `data`
+	// or `models`, and the dashboard falls back to the `model` field when `id`
+	// is absent, so the shape needs no special case here.
+	"ollama":     "https://ollama.com/api/tags",
+	"openrouter": "https://openrouter.ai/api/v1/models",
 }
 
 // modelsListHeaders carries the extra headers one live-catalogue endpoint
