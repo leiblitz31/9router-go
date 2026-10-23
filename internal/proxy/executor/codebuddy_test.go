@@ -2,6 +2,7 @@ package executor
 
 import (
 	json "encoding/json/v2"
+	"strings"
 	"testing"
 )
 
@@ -223,4 +224,55 @@ func TestSSEToOpenAIJSON_NotSSE(t *testing.T) {
 	if _, ok := sseToOpenAIJSON([]byte(`{"error":{"message":"boom","code":400}}`)); ok {
 		t.Error("plain JSON should not be treated as SSE")
 	}
+}
+
+// TestSSEToOpenAIJSON_RepeatedArgumentDeltaAppends pins the plain-append rule
+// on the codebuddy executor, which carried the drop-a-delta heuristic after
+// forward.go dropped it.
+//
+// The repeated fragment here is a substring of what has accumulated, so the
+// old `strings.Contains(existing, a)` guard fired and dropped it, and the
+// arguments stopped being valid JSON. Same shape as the maintainer's
+// `parts=["{"cmd":"run ", "run ", "echo done""]` case.
+func TestSSEToOpenAIJSON_RepeatedArgumentDeltaAppends(t *testing.T) {
+	parts := []string{`{"cmd":"run `, `run `, `echo done"}`}
+	var sse strings.Builder
+	sse.WriteString(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_r","type":"function","function":{"name":"run_tool","arguments":"` + escapeJSONArg(parts[0]) + `"}}]}}]}` + "\n\n")
+	for _, p := range parts[1:] {
+		sse.WriteString(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"` + escapeJSONArg(p) + `"}}]}}]}` + "\n\n")
+	}
+
+	out, ok := sseToOpenAIJSON([]byte(sse.String()))
+	if !ok {
+		t.Fatal("expected SSE detected")
+	}
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+	got := resp.Choices[0].Message.ToolCalls[0].Function.Arguments
+	want := strings.Join(parts, "")
+	if got != want {
+		t.Errorf("arguments = %q, want %q", got, want)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Errorf("accumulated arguments are not valid JSON: %v (%q)", err, got)
+	}
+}
+
+// escapeJSONArg renders s as the body of a JSON string literal.
+func escapeJSONArg(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b[1 : len(b)-1])
 }
