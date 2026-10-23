@@ -40,6 +40,12 @@ type ProviderConfig struct {
 	// LocalByDesign marks a provider whose upstream endpoint is intended to run on the
 	// local host or loopback network (e.g. ollama-local on localhost:11434).
 	LocalByDesign bool
+
+	// Hidden keeps a provider out of the lists a person scans — the provider
+	// pickers, the quota page — while leaving it fully reachable: connections
+	// still resolve it and requests still route to it. The MMF entries use it
+	// because they exist to serve traffic, not to be chosen.
+	Hidden bool
 }
 
 // Bedrock protocol constants. Region is substituted per request by the executor, so the
@@ -528,6 +534,7 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme:    "bearer",
 		DefaultAPIKey: "mimo-dynamic",
 		NoAuth:        true,
+		Hidden:        true,
 	},
 	"blackbox": {
 		BaseURL:    "https://api.blackbox.ai/v1/chat/completions",
@@ -650,6 +657,7 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://gitlab.com/api/v4/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+		Hidden:     true,
 	},
 	"glm-cn": {
 		BaseURL:    "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
@@ -673,6 +681,7 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://apis.iflow.cn/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+		Hidden:     true,
 	},
 	"alitp-intl": {
 		BaseURL:    "https://token-plan.ap-southeast-1.aliyuncs.com/v1/chat/completions",
@@ -925,6 +934,7 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "x-api-key",
 		AuthScheme: "raw",
 		TTSURL:     "https://api.cartesia.ai/tts/bytes",
+		Hidden:     true,
 	},
 	"exa": {
 		BaseURL:    "https://api.exa.ai/search",
@@ -963,6 +973,7 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 		TTSURL:     "https://api.play.ht/api/v2/tts/stream",
+		Hidden:     true,
 	},
 	// TinyFish — one x-api-key credential behind two separate hosts (search
 	// and fetch), which is why BaseURL is a non-endpoint root here: appending
@@ -1066,11 +1077,13 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL: "http://localhost:5000/api/tts",
 		NoAuth:  true,
 		TTSURL:  "http://localhost:5000/api/tts",
+		Hidden:  true,
 	},
 	"coqui": {
 		BaseURL: "http://localhost:5002/api/tts",
 		NoAuth:  true,
 		TTSURL:  "http://localhost:5002/api/tts",
+		Hidden:  true,
 	},
 	"edge-tts": {
 		BaseURL: "",
@@ -1132,6 +1145,7 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://api.bluesminds.com/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+		Hidden:     true,
 	},
 	"devin-cli": {
 		// ACP over stdio, not an HTTP endpoint: the pseudo-URL is what the
@@ -1169,6 +1183,7 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://api.sambanova.ai/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+		Hidden:     true,
 	},
 	"tencent": {
 		BaseURL:    "https://api.hunyuan.cloud.tencent.com/v1/chat/completions",

@@ -412,6 +412,17 @@ func (h *DashboardHandler) HandleValidateProviderNode(w http.ResponseWriter, r *
 		return
 	}
 
+	// Cloud metadata is refused for every caller, including loopback. The
+	// local-caller bypass exists so a self-hosted provider (ollama-local on
+	// 127.0.0.1:11434) stays reachable from the dashboard on the same machine;
+	// it is not a licence to dial the metadata service, which answers with
+	// instance credentials. Checked before the bypass so there is one rule to
+	// read rather than an exception inside an exception.
+	if handlerutil.IsCloudMetadataURL(r.Context(), baseURL) {
+		writeNodeValidation(w, map[string]any{"valid": false, "error": "URL not allowed"})
+		return
+	}
+
 	// SSRF guard for remote callers; loopback peers keep self-hosted nodes
 	// (e.g. ollama-local) reachable, mirroring upstream isLocalRequest.
 	if !nodeRequestIsLocal(r) {

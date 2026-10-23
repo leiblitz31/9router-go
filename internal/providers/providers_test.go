@@ -50,6 +50,20 @@ func TestKnownProviders_NoAuthOverridesScheme(t *testing.T) {
 	if cfg.DefaultAPIKey == "" {
 		t.Error("mimo-free expected a DefaultAPIKey fallback")
 	}
+	// G23b §6: the MMF entry is hidden — routable, not offered. Both its
+	// spellings must point at the same model so a caller that uses the alias
+	// gets the catalog the canonical id advertises.
+	if !cfg.Hidden {
+		t.Error("mimo-free expected Hidden=true (G23b)")
+	}
+	for _, id := range []string{"mimo-free", "mmf"} {
+		if models := ProviderModels[id]; len(models) != 1 || models[0] != "mimo-auto" {
+			t.Errorf("ProviderModels[%q] = %v, want [mimo-auto]", id, models)
+		}
+	}
+	if got := ResolveAlias("mmf"); got != "mimo-free" {
+		t.Errorf("ResolveAlias(mmf) = %q, want mimo-free", got)
+	}
 }
 
 func TestKnownProviders_StaticHeaders(t *testing.T) {

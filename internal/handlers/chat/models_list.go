@@ -295,11 +295,32 @@ func (h *ChatHandler) connectedProviderIDs(conns []*models.ProviderConnection) m
 		}
 	}
 	for id, cfg := range providers.KnownProviders {
+		// No Hidden check here. This map only answers "is this provider
+		// reachable", and a hidden provider is reachable — it routes traffic
+		// from an existing connection. Being offered is a different question,
+		// decided at each publishing loop, because this map is not consulted on
+		// the paths where hiding matters most: ?all=1 and a fresh install both
+		// dump the catalog with no `usable` filter at all.
 		if cfg.NoAuth {
 			ids[id] = true
 		}
 	}
 	return ids
+}
+
+// hiddenProvider reports whether a provider id — or the canonical id it
+// resolves to — is marked Hidden. Hidden providers still serve traffic; they
+// are simply not offered, so every path that publishes a catalog skips them.
+//
+// The alias is resolved before the lookup because the publishing loops visit
+// each spelling that resolves to itself: `mimo-free` and its `mmf` alias are
+// two separate ProviderModels keys, so an alias-only check would let one
+// spelling through while blocking the other.
+func hiddenProvider(providerID string) bool {
+	if providerID == "" {
+		return false
+	}
+	return providers.KnownProviders[providers.ResolveAlias(providerID)].Hidden
 }
 
 // isUsableProvider reports whether a provider id (or its canonical form) is
@@ -426,6 +447,12 @@ func (h *ChatHandler) buildModelsListForMode(
 			if filterConnected && !isUsableProvider(alias, usable) {
 				continue
 			}
+			// The static dump is the path that publishes the most — it answers
+			// both a fresh install and every ?all=1 request — so it needs the
+			// hidden check as much as the connected path does.
+			if hiddenProvider(alias) {
+				continue
+			}
 			for _, mID := range models {
 				if isDisabled(alias, mID) || !isLLMModelEntry(alias, alias, alias, mID, false) {
 					continue
@@ -443,6 +470,14 @@ func (h *ChatHandler) buildModelsListForMode(
 	order := make([]string, 0, len(allConns))
 	for _, conn := range allConns {
 		if conn.Provider == "" || conn.IsActive == 0 {
+			continue
+		}
+		// An active connection to a hidden provider publishes that provider's
+		// whole catalog on the unfiltered paths (default mode, ?all=1), where
+		// `usable` is not consulted at all. Hidden is about being offered, not
+		// about being routable, so the connection still serves traffic — it just
+		// does not seed the listing.
+		if hiddenProvider(conn.Provider) {
 			continue
 		}
 		if filterConnected && !isUsableProvider(conn.Provider, usable) {
@@ -670,6 +705,18 @@ func appendNoAuthCatalogModels(
 		if !providers.IsNoAuthProvider(alias) {
 			continue
 		}
+		// Hidden providers serve traffic without being offered. Checked on the
+		// canonical id so every spelling of the same provider (mimo-free and its
+		// mmf alias) leaves the catalog together — this loop publishes each
+		// alias that resolves to itself, so an alias-only check would let one
+		// spelling through while blocking the other.
+		canonical := providers.ResolveAlias(alias)
+		if canonical == "" {
+			canonical = alias
+		}
+		if providers.KnownProviders[canonical].Hidden {
+			continue
+		}
 		for _, modelID := range modelIDs {
 			if isDisabled(alias, modelID) || !isLLMModelEntry(alias, alias, alias, modelID, false) {
 				continue
@@ -720,6 +767,13 @@ func (h *ChatHandler) appendLooseCustomModels(
 	customs := h.customModelsByProvider()
 	for providerID, list := range customs {
 		if filterConnected && !isUsableProvider(providerID, usable) {
+			continue
+		}
+		// Custom rows are keyed by provider, so this loop is the second way a
+		// hidden provider can reach the listing: the static dump above skips it,
+		// but an operator-pinned custom model on mimo-free would still publish
+		// `mimo-free/<id>` under ?all=1 and on a fresh install.
+		if hiddenProvider(providerID) {
 			continue
 		}
 		prefix := providerID
