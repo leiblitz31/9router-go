@@ -245,6 +245,14 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Get("/api/combos/presets", dashH.HandleGetComboPresets)
 	r.Post("/api/combos/presets", dashH.HandleCreateComboPresets)
 	r.Put("/api/combos/{id}", dashH.HandleUpdateCombo)
+	// Smart select combo: dry-run a rule list, and apply every combo's rules on
+	// demand. These live here as well as in dashboard.RegisterRoutes for the
+	// same reason the node-limit pair does — that table is mounted by tests
+	// only, so a route registered there alone answers 200 in a unit test and
+	// "404 page not found" on the real server, which is exactly how the
+	// smart-rules editor shipped.
+	r.Post("/api/combos/reconcile", dashH.HandleReconcileSmartCombos)
+	r.Post("/api/combos/{id}/smart/preview", dashH.HandleComboSmartPreview)
 	r.Delete("/api/combos/{id}", dashH.HandleDeleteCombo)
 
 	r.Get("/api/proxy-pools", dashH.HandleGetProxyPools)
