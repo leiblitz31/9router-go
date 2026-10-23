@@ -435,6 +435,41 @@ func TestAntigravityQuota_ArgonIsolation(t *testing.T) {
 	}
 }
 
+// TestAntigravityQuota_StaleLockLifts is the other half of the exhaustion
+// predicate: a cached entry only blocks until its reset time. The nine tests
+// that came before all used a reset in the future, so the `ResetAt.After(now)`
+// clause was never exercised — dropping it would leave every one of them green
+// while permanently locking a family out of routing after its quota reset.
+func TestAntigravityQuota_StaleLockLifts(t *testing.T) {
+	connID := "test-conn-stale-lock"
+	ClearAntigravityQuotaCache()
+	defer ClearAntigravityQuotaCache()
+
+	now := time.Now().UTC()
+	agQuotaMu.Lock()
+	agQuotaCache[connID] = map[string]AntigravityModelQuota{
+		"gemini-3.8-flash-x": {RemainingPercentage: 0, ResetAt: now.Add(-time.Minute)},
+		"gemini_weekly":      {RemainingPercentage: 0, ResetAt: now.Add(-time.Hour)},
+		// No reset time at all: an entry the provider never dated cannot be
+		// held against the account, or the lock would never lift.
+		"gemini_session": {RemainingPercentage: 0},
+	}
+	agQuotaMu.Unlock()
+
+	if IsAntigravityModelBlocked(connID, "gemini-3.8-flash-x") {
+		t.Error("a model whose reset time has passed is still blocked; the lock never lifts")
+	}
+
+	// The future-dated case must still block, so the test above is not
+	// passing merely because blocking was disabled wholesale.
+	agQuotaMu.Lock()
+	agQuotaCache[connID]["gemini-3.8-flash-x"] = AntigravityModelQuota{RemainingPercentage: 0, ResetAt: now.Add(time.Hour)}
+	agQuotaMu.Unlock()
+	if !IsAntigravityModelBlocked(connID, "gemini-3.8-flash-x") {
+		t.Error("a model with a future reset is not blocked; the quota lock is not enforced at all")
+	}
+}
+
 func TestParseWeeklyQuotaSummary_PointerDecode(t *testing.T) {
 	// 1. Comprehensive multi-group fixture verifying pointer decoding and window independence
 	raw := []byte(`{

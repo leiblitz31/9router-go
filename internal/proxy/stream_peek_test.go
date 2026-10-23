@@ -160,18 +160,33 @@ func TestPeekFirstStreamEvent_CommitsAtTheBudgetBound(t *testing.T) {
 // TestPeekFirstStreamEvent_CapsAnUnboundedRequest stops a caller from asking
 // for an unbounded buffer: the spec's ceiling is what keeps a hostile or
 // broken upstream from pinning memory.
+//
+// The stream must be larger than MaxPeekBytes for the ceiling to be observable.
+// An earlier draft used eight small events and only logged its outcome, so
+// removing the clamp entirely left it green: with a short stream both a 1 GiB
+// and a 10 MiB budget read to EOF, and the test asserted nothing about either.
 func TestPeekFirstStreamEvent_CapsAnUnboundedRequest(t *testing.T) {
-	var sb strings.Builder
-	for range 8 {
-		sb.WriteString("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+	event := []byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+	stream := bytes.Repeat(event, MaxPeekBytes/len(event)+2)
+	if len(stream) <= MaxPeekBytes {
+		t.Fatalf("fixture must exceed the ceiling: %d <= %d", len(stream), MaxPeekBytes)
 	}
 
-	_, _, err := PeekFirstStreamEvent(context.Background(), strings.NewReader(sb.String()), 1<<30)
-	if err == nil {
-		// Committing is acceptable only if the buffer stayed bounded; the
-		// observable contract is that the caller cannot have asked for a
-		// gigabyte, so a committed peek must fit the ceiling.
-		t.Log("oversized maxBytes was clamped rather than refused")
+	peeked, rest, err := PeekFirstStreamEvent(context.Background(), bytes.NewReader(stream), 1<<30)
+	if err != nil {
+		t.Fatalf("a clamped peek must commit at the ceiling, not refuse: %v", err)
+	}
+	if len(peeked) > MaxPeekBytes {
+		t.Errorf("peek held %d bytes for a 1 GiB request; the ceiling is %d", len(peeked), MaxPeekBytes)
+	}
+	// The clamp must not cost the client a byte: rest replays the peeked bytes
+	// ahead of the untouched remainder, so it alone must rebuild the stream.
+	n, copyErr := io.Copy(io.Discard, rest)
+	if copyErr != nil {
+		t.Fatalf("replay read: %v", copyErr)
+	}
+	if n != int64(len(stream)) {
+		t.Errorf("replay lost bytes: replayed %d, stream is %d (peeked %d)", n, len(stream), len(peeked))
 	}
 }
 
