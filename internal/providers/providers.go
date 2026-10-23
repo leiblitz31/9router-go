@@ -156,7 +156,6 @@ var modelsListURL = map[string]string{
 	// SumoPod exposes the standard OpenAI /v1/models catalogue (auth required,
 	// same contract as tokenharbor/dahl).
 	"sumopod": "https://ai.sumopod.com/v1/models",
-	"nous":    "https://inference-api.nousresearch.com/v1/models",
 }
 
 // modelsListHeaders carries the extra headers one live-catalogue endpoint
@@ -697,11 +696,6 @@ var KnownProviders = map[string]ProviderConfig{
 
 	"nebius": {
 		BaseURL:    "https://api.studio.nebius.ai/v1/chat/completions",
-		AuthHeader: "Authorization",
-		AuthScheme: "bearer",
-	},
-	"nous": {
-		BaseURL:    "https://inference-api.nousresearch.com/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
