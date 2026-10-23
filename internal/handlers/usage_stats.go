@@ -9,6 +9,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -620,7 +621,17 @@ func newDetailListItem(row db.RequestDetailListRow) detailListItem {
 // request messages and the response body the list deliberately omits.
 func HandleRequestDetail(repo *db.Repo) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
+		// chi keys a request id by the raw path segment, so a model id that
+		// contains a "/" arrives still percent-encoded ("<millis>-<model>" is
+		// the requestDetails primary key, and slashed custom model ids are
+		// valid since #584). Unescape before the repository read, or the
+		// lookup misses a row that exists and the payload modal breaks for
+		// every such request.
+		id, err := url.PathUnescape(r.PathValue("id"))
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid request id")
+			return
+		}
 		raw, err := repo.GetRequestDetailByID(id)
 		if err != nil {
 			// A detail that was never recorded, or has since been pruned by
