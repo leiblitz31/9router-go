@@ -828,6 +828,16 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "kind": "systemone"
     },
     {
+      "id": "@cf/cloudflare/clef",
+      "name": "Clef",
+      "kind": "systemone"
+    },
+    {
+      "id": "@cf/cloudflare/clef-omni",
+      "name": "Clef Omni",
+      "kind": "systemone"
+    },
+    {
       "id": "@cf/meta/llama-3.2-1b-instruct",
       "name": "Llama 3.2 1B Instruct"
     },
@@ -908,8 +918,32 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Nemotron 3 120B A12B"
     },
     {
-      "id": "deepseek/deepseek-v4-pro",
+      "id": "@cf/deepseek-ai/deepseek-v4-pro-0813",
       "name": "DeepSeek V4 Pro"
+    },
+    {
+      "id": "@cf/deepseek-ai/deepseek-v4-flash-0731",
+      "name": "DeepSeek V4 Flash"
+    },
+    {
+      "id": "@cf/zai-org/glm-5.3",
+      "name": "GLM 5.3"
+    },
+    {
+      "id": "@cf/zai-org/glm-5.3-flash",
+      "name": "GLM 5.3 Flash"
+    },
+    {
+      "id": "@cf/openai/gpt-oss-20b",
+      "name": "GPT-OSS 20B"
+    },
+    {
+      "id": "@cf/qwen/qwen3-30b-a3b-fp8",
+      "name": "Qwen3 30B A3B FP8"
+    },
+    {
+      "id": "@cf/meta/llama-3.2-11b-vision-instruct",
+      "name": "Llama 3.2 11B Vision Instruct"
     },
     {
       "id": "@cf/black-forest-labs/flux-2-klein-9b",
