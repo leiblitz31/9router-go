@@ -49,14 +49,19 @@ func TestClampDeepseekEffort(t *testing.T) {
 			want:     "high",
 		},
 		{
-			name:     "low stays low when declared (upstream #4984)",
+			// Upstream 313559f4: the declared levels win over the DeepSeek
+			// low→high collapse — mimo-v2.5-pro declares low, so it goes out
+			// verbatim now.
+			name:     "low survives when the level set declares it",
 			provider: "mimo-free",
 			model:    "mimo-v2.5-pro",
 			level:    "low",
 			want:     "low",
 		},
 		{
-			name:     "deepseek-v4.1-flash-free low stays low (upstream #4984)",
+			// zen's free deepseek-v4.1-flash publishes low|high|max and its
+			// upstream takes the level verbatim.
+			name:     "zen free deepseek keeps low",
 			provider: "opencode",
 			model:    "deepseek-v4.1-flash-free",
 			level:    "low",
@@ -70,7 +75,14 @@ func TestClampDeepseekEffort(t *testing.T) {
 			want:     "low",
 		},
 		{
-			name:     "deepseek-v4.1-flash-free medium stays high (upstream #4984)",
+			name:     "zen free deepseek maps xhigh onto its declared max",
+			provider: "opencode",
+			model:    "deepseek-v4.1-flash-free",
+			level:    "xhigh",
+			want:     "max",
+		},
+		{
+			name:     "zen free deepseek has no medium, so it clamps to high",
 			provider: "opencode",
 			model:    "deepseek-v4.1-flash-free",
 			level:    "medium",

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/samber/lo"
+
 	"9router/proxy/internal/combos/smart"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
@@ -258,14 +260,21 @@ func (h *DashboardHandler) smartComboCandidates(ctx context.Context) ([]smart.Ca
 	if err != nil {
 		return nil, fmt.Errorf("smart candidates: provider nodes: %w", err)
 	}
-	// prefix -> node id, plus the set of aliases that resolve to anything.
+	// prefix -> node id, node id -> prefix, plus the set of aliases that
+	// resolve to anything. The reverse map exists because the dashboard keys a
+	// node's custom-model rows with the node id (ProviderDetailView stores
+	// custom models under storageAlias = the node id) while every reader —
+	// /v1/models, the resolver, a combo member — addresses them by the display
+	// prefix the operator sees.
 	prefixToNode := make(map[string]string, len(nodePrefixes))
+	nodeIDToPrefix := make(map[string]string, len(nodePrefixes))
 	knownAlias := make(map[string]bool, len(nodePrefixes)+len(providers.KnownProviders))
 	for nodeID, prefix := range nodePrefixes {
 		if prefix == "" {
 			continue
 		}
 		prefixToNode[prefix] = nodeID
+		nodeIDToPrefix[nodeID] = prefix
 		knownAlias[prefix] = true
 	}
 	for providerID := range providers.KnownProviders {
@@ -319,19 +328,36 @@ func (h *DashboardHandler) smartComboCandidates(ctx context.Context) ([]smart.Ca
 				alias = entry.ProviderAlias
 			}
 		}
-		if alias == "" || !knownAlias[alias] {
+		if alias == "" {
+			continue
+		}
+		// A node's rows are keyed by its id; the addressable spelling is the
+		// display prefix. Normalize so the candidate carries the spelling the
+		// rules and the resolver agree on, and keep the node-id spelling as the
+		// AltID so a member written that way is never pruned for it.
+		nodeID := alias
+		if prefix, ok := nodeIDToPrefix[alias]; ok {
+			alias = prefix
+		} else if !knownAlias[alias] {
 			// An alias that resolves to nothing: the node was deleted and its
 			// custom-model rows were left behind. The model is not routable,
 			// so it is not live and a rule must not keep it in a combo.
 			continue
 		}
 		live := true
+		// The dashboard writes disabledModels under the same storage alias the
+		// custom rows use — node id for a node, alias otherwise — and /v1/models
+		// honours both spellings, so the rules do too.
 		if _, isOff := disabled[alias][modelID]; isOff {
+			live = false
+		}
+		if _, isOff := disabled[nodeID][modelID]; isOff {
 			live = false
 		}
 		out = append(out, smart.Candidate{
 			ID:      alias + "/" + modelID,
 			Bare:    modelID,
+			AltID:   lo.Ternary(nodeID != alias, nodeID+"/"+modelID, ""),
 			Kind:    customModelKind(mtype),
 			Addable: live && aliasReachable(alias, active, prefixToNode),
 			Live:    live,

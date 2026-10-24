@@ -261,6 +261,9 @@ func kiroUpstreamBody(req *Request) ([]byte, error) {
 	if idx := strings.IndexByte(model, '('); idx > 0 {
 		model = model[:idx]
 	}
+	// Anthropic spellings (claude-sonnet-4-5-20250929) 400 on Kiro's data
+	// plane; fold them onto the dotted upstream alias.
+	model = normalizeKiroUpstreamModelId(model)
 
 	profileArn := ""
 	if req.ConnData != nil {
@@ -821,6 +824,12 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	}
 
 	body := InjectReasoningContent(req.Body, "opencode")
+	// The free lane's MiMo route streams thinking as reasoning +
+	// reasoning_details[] instead of reasoning_content; the passthrough lifts
+	// the alias so OpenAI-shaped clients see the thinking. Every other model
+	// on the lane already emits reasoning_content, so the lift is a no-op
+	// there (upstream quirks.reasoningAliasFields).
+	req.LiftReasoningAliases = true
 
 	// Upstream OpenCode free tier strictly requires stream=true.
 	// Non-streaming calls are blocked with 403 FreeTierError.
@@ -829,6 +838,14 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		reqMap["stream"] = true
 		if cleanModel != "" {
 			reqMap["model"] = cleanModel
+		}
+		// The free backend validates reasoning_effort against the plain
+		// OpenAI enum and answers 400 "Invalid option" for "auto", which
+		// adaptive thinking (Claude Code's thinking:{type:"adaptive"})
+		// arrives as. Omitting it lets the upstream pick its own default,
+		// which is what adaptive means.
+		if v, ok := reqMap["reasoning_effort"].(string); ok && v == "auto" {
+			delete(reqMap, "reasoning_effort")
 		}
 		// Deterministic marshaling keeps the serialized request prefix
 		// stable across turns, which DeepSeek's prefix prompt cache
@@ -1333,7 +1350,12 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 		if role == "tool" {
 			toolCallID, _ := msgMap["tool_call_id"].(string)
 			toolCallID = sanitizeToolUseID(toolCallID, toolIDMap)
-			contentVal := msgMap["content"]
+			contentVal := convertClaudeImageParts(msgMap["content"])
+			// is_error is optional to Anthropic but REQUIRED by some gateways
+			// that re-serialize the block through a strict Rust struct — Zed
+			// answers "missing field `is_error`" to a request Anthropic itself
+			// accepts. Emitting it always keeps one body valid on both.
+			isError, _ := msgMap["is_error"].(bool)
 			intermediate = append(intermediate, map[string]any{
 				"role": "user",
 				"content": []any{
@@ -1341,6 +1363,7 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 						"type":        "tool_result",
 						"tool_use_id": toolCallID,
 						"content":     contentVal,
+						"is_error":    isError,
 					},
 				},
 			})
@@ -1356,7 +1379,7 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 						"text": cStr,
 					})
 				} else if cArr, ok := msgMap["content"].([]any); ok && len(cArr) > 0 {
-					contentBlocks = append(contentBlocks, cArr...)
+					contentBlocks = append(contentBlocks, convertClaudeImageParts(cArr).([]any)...)
 				}
 				for _, tc := range toolCalls {
 					tcMap, ok := tc.(map[string]any)
@@ -1402,6 +1425,8 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 		intermediate = append(intermediate, claudeMessage(msgMap))
 	}
 
+	intermediate = dropImageEmptiedMessages(intermediate)
+
 	var merged []any
 	for _, m := range intermediate {
 		if len(merged) == 0 {
@@ -1434,6 +1459,13 @@ func claudeMessage(msgMap map[string]any) map[string]any {
 	for k, v := range msgMap {
 		if claudeMessageAllowedKeys[k] {
 			clean[k] = v
+		}
+	}
+	if content, has := clean["content"]; has {
+		converted := convertClaudeImageParts(content)
+		clean["content"] = converted
+		if emptiedByImageDrop(content, converted) {
+			clean[imageEmptiedMarker] = true
 		}
 	}
 	return clean
@@ -1726,17 +1758,21 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 	} else {
 		cfg.BaseURL = opencodeGoInferenceBase(cfg.BaseURL) + "/chat/completions"
 	}
-	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, opencodeSessionHint(req, true), true)
+	baseHeaders := cfg.StaticHeaders
+	hint := opencodeSessionHint(req, true)
+	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, hint, true)
 
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+	resp, err := forwardOpenCodeRotating(ctx, func() (*http.Response, error) {
 		return forwardOpencodeRequest(ctx, req.Client, &cfg, "public", body, true)
 	}, func() (*http.Response, error) {
 		return forwardOpencodeRequestDirect(ctx, &cfg, "public", body, true)
-	})
+	}, rotateOpencodeStableSession(opencodeStableSessionKey(req, true), hint, func(session string) {
+		cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(baseHeaders, session, true)
+	}))
 	if err != nil {
 		return fmt.Errorf("ForwardOpencodeGo (free lane): %w", err)
 	}
@@ -1895,7 +1931,7 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
 			return proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, transformedBody, req.IsStream)
 		}, func() (*http.Response, error) {
-			return proxy.ForwardOpenAI(ctx, nil, &cfg, req.APIKey, transformedBody, req.IsStream)
+			return forwardOpencodeRequestDirect(ctx, &cfg, req.APIKey, transformedBody, req.IsStream)
 		})
 		if err != nil {
 			return fmt.Errorf("ForwardOpencodeGo (muse-spark responses): %w", err)
@@ -1995,7 +2031,7 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 	resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
 		return proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, body, req.IsStream)
 	}, func() (*http.Response, error) {
-		return proxy.ForwardOpenAI(ctx, nil, &cfg, req.APIKey, body, req.IsStream)
+		return forwardOpencodeRequestDirect(ctx, &cfg, req.APIKey, body, req.IsStream)
 	})
 	if err != nil {
 		return fmt.Errorf("ForwardOpencodeGo (default route): %w", err)

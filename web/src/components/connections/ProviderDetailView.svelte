@@ -153,7 +153,7 @@
     providerId === 'github' || providerId === 'kiro' || providerId === 'kimi' ||
     providerId === 'kimi-coding' || providerId === 'codebuddy-cn' || providerId === 'codebuddy-intl' ||
     providerId === 'minimax-code' || providerId === 'minimax-code-global' || providerId === 'muse' ||
-    providerId === 'nous'
+    providerId === 'nous' || providerId === 'glm'
   )
   // Upstream parity: only the explicit noAuth flag hides the Connections card
   // ([id]/page.js isFreeNoAuth = !!FREE_PROVIDERS[id]?.noAuth). Category "free"
@@ -2804,7 +2804,7 @@
   let canListLiveModels = $derived(
     providerId.startsWith('openai-compatible-') ||
       isCompatibleNode ||
-      ['antigravity', 'gemini-cli', 'cline', 'clinepass', 'qoder', 'qoder-cn'].includes(providerId) ||
+      ['antigravity', 'gemini-cli', 'cline', 'clinepass', 'qoder', 'qoder-cn', 'zed'].includes(providerId) ||
       ModelsListURLs.has(providerId)
   )
 

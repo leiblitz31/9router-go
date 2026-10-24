@@ -5,8 +5,11 @@ import "strings"
 // CodexAutoPingModel is the model used to auto-ping the Codex 5h reset window.
 const CodexAutoPingModel = "gpt-5.6-terra"
 
-// CodexImagesMainModel is the main model answering Codex tool-call image requests.
-const CodexImagesMainModel = "gpt-5.6-sol"
+// CodexImagesMainModel is the main model answering Codex tool-call image
+// requests. It only drives the image_generation tool call: gpt-5.6-sol is
+// rejected for ChatGPT Go accounts ("model is not supported when using Codex
+// with a ChatGPT account"); gpt-5.6-terra is accepted (upstream b08f12d5).
+const CodexImagesMainModel = "gpt-5.6-terra"
 
 // ProviderModels maps provider aliases/IDs to their supported models in 9router.
 // Ported verbatim from open-sse/providers/registry (registry/{id}.js models arrays,
@@ -114,11 +117,11 @@ var ProviderModels = map[string][]string{
 		"gemini-pro", "gemini-flash", "gemini-flash-lite", "gemini-argon",
 		"gemini-3-pro", "gemini-4-argon",
 	},
-	"gh":                   {"gpt-5.2", "gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "claude-haiku-4.5", "claude-opus-4.5", "claude-sonnet-4.5", "claude-sonnet-4.6", "claude-opus-4.6", "claude-opus-4.7", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview", "grok-code-fast-1", "oswe-vscode-prime", "goldeneye-free-auto", "text-embedding-3-small", "text-embedding-ada-002"},
-	"github":               {"gpt-5.2", "gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "claude-haiku-4.5", "claude-opus-4.5", "claude-sonnet-4.5", "claude-sonnet-4.6", "claude-opus-4.6", "claude-opus-4.7", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview", "grok-code-fast-1", "oswe-vscode-prime", "goldeneye-free-auto", "text-embedding-3-small", "text-embedding-ada-002"},
+	"gh":                   {"gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "claude-fable-5", "claude-fable-5.1", "claude-haiku-4.5", "claude-haiku-5.5", "claude-opus-4.8", "claude-opus-4.8-fast", "claude-opus-5", "claude-opus-5.5", "claude-sonnet-4.6", "claude-sonnet-5", "claude-sonnet-5.5", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-4-argon", "kimi-k3", "mai-code-1.1-flash", "text-embedding-3-small", "text-embedding-ada-002"},
+	"github":               {"gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "claude-fable-5", "claude-fable-5.1", "claude-haiku-4.5", "claude-haiku-5.5", "claude-opus-4.8", "claude-opus-4.8-fast", "claude-opus-5", "claude-opus-5.5", "claude-sonnet-4.6", "claude-sonnet-5", "claude-sonnet-5.5", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-4-argon", "kimi-k3", "mai-code-1.1-flash", "text-embedding-3-small", "text-embedding-ada-002"},
 	"glm":                  {"glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5-turbo", "glm-5", "glm-4.7", "glm-4.6v"},
 	"glm-cn":               {"glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5-turbo", "glm-5", "glm-4.7", "glm-4.6v", "glm-4.6", "glm-4.5-air"},
-	"grok-cli":             {"grok-build", "grok-4.5", "grok-4.5-high", "grok-4.5-medium", "grok-4.5-low"},
+	"grok-cli":             {"grok-build", "grok-4.7", "grok-4.5", "grok-4.5-high", "grok-4.5-medium", "grok-4.5-low"},
 	"grok-web":             {"grok-3", "grok-3-mini", "grok-3-thinking", "grok-4", "grok-4-mini", "grok-4-thinking", "grok-4-heavy", "grok-4.1-mini", "grok-4.1-fast", "grok-4.1-expert", "grok-4.1-thinking", "grok-4.2"},
 	"groq":                 {"llama-3.3-70b-versatile", "meta-llama/llama-4-maverick-17b-128e-instruct", "qwen/qwen3-32b", "openai/gpt-oss-120b", "whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"},
 	"gw":                   {"grok-3", "grok-3-mini", "grok-3-thinking", "grok-4", "grok-4-mini", "grok-4-thinking", "grok-4-heavy", "grok-4.1-mini", "grok-4.1-fast", "grok-4.1-expert", "grok-4.1-thinking", "grok-4.2"},
@@ -157,7 +160,7 @@ var ProviderModels = map[string][]string{
 	"oc":                   {"muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free", "jev-1.13-free"},
 	"ocg":                  {"deepseek-flash", "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "kimi-k3", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4.1-flash", "longcat-2.0", "mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.5", "mimo-v2.5-pro", "mimo-v2-pro", "mimo-v2-omni", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "space-bunny-free", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.5-plus", "hy4-preview", "hy3", "hy3-preview", "omen-alpha", "grok-4.7", "grok-4.6", "grok-4.5", "gpt-5.6-luna", "gpt-6-luna", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor", "claude-haiku-5-5", "gemini-4-argon-contributor", "longcat-2.5-preview-free", "step-5-preview", "beam-free"},
 	"ocz":                  {"claude-fable-5", "claude-fable-5-1", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4", "claude-haiku-4-5", "gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-pro", "gemini-3-flash", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-pro", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.3-codex-spark", "gpt-5.3-codex", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1", "gpt-5.1-codex-max", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5", "gpt-5-codex", "gpt-5-nano", "grok-build-0.1", "grok-4.6", "grok-4.5", "muse-spark-1.3", "muse-spark-1.2", "qwen3.6-plus", "qwen3.5-plus", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "big-pickle", "deepseek-v4-flash-free", "mimo-v2.6-flash-free", "mimo-v2.5-free", "ling-3.0-flash-fin-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "muse-spark-1.3-contributor-free", "muse-spark-1.2-contributor-free", "jev-1.13", "jev-1.13-free"},
-	"ollama":               {"gpt-oss:120b", "kimi-k2.5", "glm-5", "minimax-m2.5", "glm-4.7-flash", "qwen3.5", "minimax-m3", "deepseek-v4.1-flash:cloud"},
+	"ollama":               {"gpt-oss:120b", "kimi-k2.5", "glm-5", "minimax-m2.5", "glm-4.7-flash", "qwen3.5", "minimax-m3", "deepseek-v4.1-flash:cloud", "clef", "clef-flash", "clef:cloud"},
 	"openai":               {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2", "gpt-5.1", "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o3", "o3-mini", "o3-pro", "o4-mini", "o1", "o1-mini", "text-embedding-3-large", "text-embedding-3-small", "text-embedding-ada-002", "tts-1", "tts-1-hd", "gpt-4o-mini-tts", "whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-1", "dall-e-3", "dall-e-2"},
 	"opencode":             {"muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free", "jev-1.13-free"},
 	"opencode-go":          {"deepseek-flash", "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "kimi-k3", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4.1-flash", "longcat-2.0", "mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.5", "mimo-v2.5-pro", "mimo-v2-pro", "mimo-v2-omni", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "space-bunny-free", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.5-plus", "hy4-preview", "hy3", "hy3-preview", "omen-alpha", "grok-4.7", "grok-4.6", "grok-4.5", "gpt-5.6-luna", "gpt-6-luna", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor", "claude-haiku-5-5", "gemini-4-argon-contributor", "longcat-2.5-preview-free", "step-5-preview", "beam-free"},
@@ -187,6 +190,7 @@ var ProviderModels = map[string][]string{
 	"selfhosted-embedding": {"embedding"},
 	"selfhosted-stt":       {"whisper-1"},
 	"selfhosted-tts":       {"kokoro"},
+	"sensenova":            {"sensenova-6.8-flash-lite", "sensenova-u1.5-lite", "sensenova-u1.5-fast", "deepseek-v4-flash", "deepseek-flash", "glm-5.2", "kimi-k3"},
 	"siliconflow":          {"deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V3.2", "deepseek-ai/DeepSeek-V3.2-Exp", "deepseek-ai/DeepSeek-V3.1", "deepseek-ai/DeepSeek-V3.1-Terminus", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3.5-122B-A10B", "zai-org/GLM-5.1", "zai-org/GLM-5", "moonshotai/Kimi-K2.6", "moonshotai/Kimi-K2.5", "openai/gpt-oss-120b", "MiniMaxAI/MiniMax-M2.5", "inclusionAI/Ling-flash-2.0"},
 	"stability":            {"stable-image-ultra", "stable-image-core", "sd3.5-large", "sd3.5-large-turbo", "sd3.5-medium"},
 	"stability-ai":         {"stable-image-ultra", "stable-image-core", "sd3.5-large", "sd3.5-large-turbo", "sd3.5-medium"},
@@ -202,7 +206,7 @@ var ProviderModels = map[string][]string{
 	"voyage-ai":            {"voyage-3-large", "voyage-3.5", "voyage-3.5-lite", "voyage-code-3", "voyage-finance-2", "voyage-law-2", "voyage-multilingual-2"},
 	"vx":                   {"gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "veo-3.1-generate-preview", "veo-3.1-fast-generate-preview", "veo-3.0-generate-001", "veo-2.0-generate-001"},
 	"vxp":                  {"deepseek-ai/deepseek-v3.2-maas", "qwen/qwen3-next-80b-a3b-thinking-maas", "qwen/qwen3-next-80b-a3b-instruct-maas", "zai-org/glm-5-maas"},
-	"xai":                  {"grok-4.6", "grok-4.5", "grok-4", "grok-4-fast-reasoning", "grok-code-fast-1", "grok-3", "grok-2-image-1212", "grok-imagine-video"},
+	"xai":                  {"grok-4.7", "grok-4.6", "grok-4.5", "grok-4", "grok-4-fast-reasoning", "grok-code-fast-1", "grok-3", "grok-2-image-1212", "grok-imagine-video"},
 	"xiaomi-mimo":          {"mimo-x-pro-preview", "mimo-x-flash-preview", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-omni", "mimo-v2-flash", "mimo-v2.5-tts"},
 	"xiaomi-tokenplan":     {"mimo-v2.5-pro", "mimo-v2.5-pro-claude", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "mimo-v2-tts", "mimo-v2.5-tts", "mimo-v2.5-tts-voiceclone", "mimo-v2.5-tts-voicedesign"},
 	"xmtp":                 {"mimo-v2.5-pro", "mimo-v2.5-pro-claude", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "mimo-v2-tts", "mimo-v2.5-tts", "mimo-v2.5-tts-voiceclone", "mimo-v2.5-tts-voicedesign"},

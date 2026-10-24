@@ -742,6 +742,18 @@ func TestAugmentModelsWithCapacityAdapter_Pool(t *testing.T) {
 			wantModels: []string{"oc/mimo-v2.6-flash-free", "deepseek/deepseek-chat"},
 			wantStrat:  "fallback",
 		},
+		{
+			// A settings row saved before the capacity-adapter toggle existed
+			// carries no capacityAdapter key at all. The raw store must fall back
+			// to the declared defaults (vision/audioInput enabled-and-empty) so
+			// an image request is not forwarded to a text-only model.
+			name:       "absent capacityAdapter key falls back to the defaults",
+			settings:   `{"rtkEnabled":true,"comboStrategy":"fallback"}`,
+			models:     []string{"deepseek/deepseek-chat"},
+			required:   map[string]bool{"vision": true},
+			wantModels: []string{"oc/mimo-v2.6-flash-free", "deepseek/deepseek-chat"},
+			wantStrat:  "fallback",
+		},
 	}
 
 	for _, tt := range tests {

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	json "encoding/json/v2"
 	"fmt"
@@ -298,69 +299,77 @@ func (r *Repo) ResetProviderHealth(provider, model string) error {
 	return r.clearSpecificModelLock(provider, model)
 }
 
+// listConnectionData drains a providerConnections id/data query and closes
+// its rows before returning. The clear*ModelLocks helpers write per row
+// (clearConnectionModelLocks / Exec), and a nested pool checkout while the
+// SELECT rows are still open can deadlock the pool the same way
+// GetProviderConnections did: the writer waits for a connection the open
+// rows will never release. Collect first, then write.
+func (r *Repo) listConnectionData(query string, args ...any) ([]struct{ id, data string }, error) {
+	rows, err := r.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []struct{ id, data string }
+	for rows.Next() {
+		var row struct{ id, data string }
+		if err := rows.Scan(&row.id, &row.data); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (r *Repo) clearAllModelLocks() error {
-	rows, err := r.db.Query("SELECT id, data FROM providerConnections")
+	pairs, err := r.listConnectionData("SELECT id, data FROM providerConnections")
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id, data string
-		if err := rows.Scan(&id, &data); err != nil {
-			return err
-		}
-		if err := r.clearConnectionModelLocks(id, data); err != nil {
+	for _, p := range pairs {
+		if err := r.clearConnectionModelLocks(p.id, p.data); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (r *Repo) clearProviderModelLocks(provider string) error {
-	rows, err := r.db.Query("SELECT id, data FROM providerConnections WHERE provider = ?", provider)
+	pairs, err := r.listConnectionData("SELECT id, data FROM providerConnections WHERE provider = ?", provider)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id, data string
-		if err := rows.Scan(&id, &data); err != nil {
-			return err
-		}
-		if err := r.clearConnectionModelLocks(id, data); err != nil {
+	for _, p := range pairs {
+		if err := r.clearConnectionModelLocks(p.id, p.data); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (r *Repo) clearSpecificModelLock(provider, model string) error {
 	key := "$." + modelLockPrefix + model
-	rows, err := r.db.Query("SELECT id, data FROM providerConnections WHERE provider = ?", provider)
+	pairs, err := r.listConnectionData("SELECT id, data FROM providerConnections WHERE provider = ?", provider)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id, data string
-		if err := rows.Scan(&id, &data); err != nil {
-			return err
-		}
-		locked := checkConnectionModelLock(data, model)
+	for _, p := range pairs {
+		locked := checkConnectionModelLock(p.data, model)
 		if !locked {
 			continue
 		}
 		if _, err := r.db.Exec(
 			`UPDATE providerConnections SET data = json_set(data, ?, json('null'), '$.backoffLevel', 0), updatedAt = datetime('now') WHERE id = ?`,
-			key, id,
+			key, p.id,
 		); err != nil {
-			return fmt.Errorf("clear lock %s on %s: %w", key, id, err)
+			return fmt.Errorf("clear lock %s on %s: %w", key, p.id, err)
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (r *Repo) clearConnectionModelLocks(id, data string) error {

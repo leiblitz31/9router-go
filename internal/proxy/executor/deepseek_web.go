@@ -66,12 +66,15 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 
 	// One account, at most maxConcurrency turns at a time. A burst is what turns
 	// a busy account into a limited one, so the over-cap turns wait here instead
-	// of being sent.
+	// of being sent. The slot is freed after a randomized quiet window rather
+	// than the moment the answer is written: two generations overlapping on one
+	// account is the measured trigger of the account-level restriction, and the
+	// window is what keeps the next turn out of this one's breath.
 	release, err := deepSeekGates.acquire(ctx, userToken, stealth.maxConcurrency, deepSeekStealthQueueWait)
 	if err != nil {
 		return deepSeekFailure(http.StatusTooManyRequests, "deepseek-web: "+err.Error())
 	}
-	defer release()
+	defer deepSeekReleaseAfterTurn(release, stealth.callGap)
 
 	accessToken, err := turn.acquireAccessToken(ctx, userToken)
 	if err != nil {
@@ -92,10 +95,14 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 		RefFileIDs:      []string{},
 		ThinkingEnabled: options.thinking,
 		SearchEnabled:   options.search,
-		Stream:          req.IsStream,
+		// The site's own client has no non-streaming mode: every completion it
+		// issues is an event stream, and a `stream: false` on this endpoint is
+		// a value no browser ever wrote. A non-streaming client is served by
+		// draining the stream, not by asking the upstream not to send one.
+		Stream: true,
 	})
 	if err != nil {
-		deepSeekAbandonSession(session, ctx, turn, accessToken)
+		deepSeekAbandonSession(session, ctx, turn, userToken, accessToken)
 		return deepSeekAuthFailure(err, userToken)
 	}
 	defer response.Body.Close()
@@ -105,7 +112,7 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 	// one as an empty stream would report the account as merely cut off — which
 	// is how a briefly muted account earns a longer mute.
 	if enforcement := deepSeekEnforcementFromResponse(response); enforcement != nil {
-		deepSeekAbandonSession(session, ctx, turn, accessToken)
+		deepSeekAbandonSession(session, ctx, turn, userToken, accessToken)
 		return enforcement.error()
 	}
 
@@ -133,8 +140,11 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 
 	if !deepSeekSettleSession(session, prompt, accumulator, runErr, ctx, turn, accessToken) {
 		// The conversation is not pinned to this session, so nothing will ever
-		// thread on it: the upstream copy is closed rather than left behind.
-		turn.deleteSession(ctx, accessToken, session.id)
+		// thread on it: the upstream copy is retired rather than left behind.
+		// With stealth on the retirement is queued and batched — an instant
+		// create-then-delete is a cadence no browser produces (see
+		// deepseek_web_delete_queue.go).
+		deepSeekCloseSession(ctx, turn, userToken, accessToken, session.id)
 	}
 	return runErr
 }
@@ -151,6 +161,7 @@ func deepSeekTurnPrompt(envelope deepSeekRequestEnvelope, req *Request, stealth 
 	// tail of each prompt is sent: the same conversation has to render the same
 	// way from turn to turn, or no turn extends the previous one.
 	prompt := deepSeekMessagesToPrompt(envelope.Messages, deepSeekHistoryWindow(req.ConnData), stealth.persistSession)
+	prompt = deepSeekClampPrompt(prompt, deepSeekMaxPromptChars(req.ConnData))
 	if prompt == "" || len(envelope.Tools) == 0 {
 		return prompt
 	}
@@ -195,7 +206,7 @@ func deepSeekAcquireSession(
 	session := deepSeekSession{claim: deepSeekSessionClaim{tail: prompt}}
 
 	if stealth.persistSession {
-		session.key = deepSeekSessionKey(userToken, req.SessionID, req.IsStream)
+		session.key = deepSeekSessionKey(userToken, req.SessionID)
 		session.claim = deepSeekSessions.claim(session.key, prompt)
 	}
 
@@ -246,16 +257,18 @@ func deepSeekSettleSession(
 // deepSeekAbandonSession drops a conversation's session after a turn that must
 // not continue it.
 //
-// A session this turn created is closed upstream, because nothing will thread on
+// A session this turn created is retired upstream, because nothing will thread on
 // it. A reused one is only forgotten: the upstream thread is still the one the
 // conversation belongs to, but the next turn must not assume a refused turn was
-// recorded, so the entry goes either way.
-func deepSeekAbandonSession(session deepSeekSession, ctx context.Context, turn deepSeekTurn, accessToken string) {
+// recorded, so the entry goes either way. The retirement itself goes through
+// deepSeekCloseSession, so a stealth turn queues it rather than deleting in the
+// same second the session was created.
+func deepSeekAbandonSession(session deepSeekSession, ctx context.Context, turn deepSeekTurn, userToken, accessToken string) {
 	if session.key != "" && session.claim.pin {
 		deepSeekSessions.forget(session.key, session.id)
 	}
 	if session.createdHere {
-		turn.deleteSession(ctx, accessToken, session.id)
+		deepSeekCloseSession(ctx, turn, userToken, accessToken, session.id)
 	}
 }
 

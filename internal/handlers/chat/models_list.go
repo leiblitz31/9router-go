@@ -622,7 +622,22 @@ func (h *ChatHandler) appendConnectionModels(
 
 		declaredCtxLen, declaredMaxOut := typedCustomLimits[modelID][0], typedCustomLimits[modelID][1]
 
+		live, hasLive := liveByID[modelID]
+
 		ctxLen, maxOut := declaredCtxLen, declaredMaxOut
+		// A live catalogue that states its own limits outranks every static
+		// table: it describes the exact model this account may run, down to
+		// the window the provider will actually accept. Kiro's resolver only
+		// publishes a capability block, so it keeps upstream's behaviour of
+		// reporting the table default (see the branch below).
+		if hasLive && live.LimitsAuthoritative {
+			if ctxLen == 0 {
+				ctxLen = live.ContextLength
+			}
+			if maxOut == 0 {
+				maxOut = live.MaxOutput
+			}
+		}
 		// Anything the operator did not declare comes from the same chain that
 		// fills `capabilities` (per-model caps → catalog → substring table), so
 		// context_length / max_completion_tokens can never disagree with it.
@@ -638,7 +653,7 @@ func (h *ChatHandler) appendConnectionModels(
 		// {thinking, agentic}). Upstream then uses that block verbatim and
 		// fills the window from the static fallback, so a kiro model reports
 		// context_length from the table default rather than the live payload.
-		if live, ok := liveByID[modelID]; ok && live.Capabilities != nil {
+		if hasLive && live.Capabilities != nil {
 			data = append(data, ModelInfoObject{
 				ID:                  fullID,
 				Object:              "model",
@@ -651,7 +666,7 @@ func (h *ChatHandler) appendConnectionModels(
 		}
 		// Live catalogs (grok-cli) publish limits the static table may not
 		// know; use them when it has nothing to say.
-		if live, ok := liveByID[modelID]; ok {
+		if hasLive {
 			if ctxLen == 0 {
 				ctxLen = live.ContextLength
 			}

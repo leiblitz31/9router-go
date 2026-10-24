@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"9router/proxy/internal/db"
-	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/translator"
 )
 
@@ -218,7 +217,7 @@ func rowPromptCompletion(row db.UsageHistoryRow) (promptTok, complTok int64) {
 }
 
 func (a *rawAggregate) foldRow(row db.UsageHistoryRow) {
-	promptTok, complTok := rowPromptCompletion(row)
+	promptTok, complTok := translator.ResolveTokensCounts([]byte(row.Tokens), row.PromptTokens, row.CompletionTokens)
 	cachedTok := int64(translator.CachedTokensFromJSON([]byte(row.Tokens)))
 
 	if row.Provider != "" {
@@ -270,7 +269,7 @@ func (a *rawAggregate) foldRow(row db.UsageHistoryRow) {
 // the order they were added, which keeps the float sum from drifting further
 // than the fold did.
 func (a *rawAggregate) unfoldRow(row db.UsageHistoryRow) {
-	promptTok, complTok := rowPromptCompletion(row)
+	promptTok, complTok := translator.ResolveTokensCounts([]byte(row.Tokens), row.PromptTokens, row.CompletionTokens)
 	cachedTok := int64(translator.CachedTokensFromJSON([]byte(row.Tokens)))
 
 	if row.Provider != "" {
@@ -582,10 +581,15 @@ func apiKeyDisplayName(storedKey string, keyNames map[string]string) string {
 	switch {
 	case keyNames[trimmed] != "":
 		return keyNames[trimmed]
-	case trimmed == "local-no-key" || trimmed == "":
+	case keyNames[storedKey] != "":
+		return keyNames[storedKey]
+	case trimmed == "local-no-key" || trimmed == "" || trimmed == "***":
 		return "Local (No Key)"
 	default:
-		return handlerutil.MaskAPIKey(trimmed)
+		if masked := maskAPIKeyForStats(trimmed); masked != "" {
+			return masked
+		}
+		return "Local (No Key)"
 	}
 }
 
@@ -640,8 +644,12 @@ func applyRawAggregate(resp *UsageStatsResponse, agg *rawAggregate, nodeNameMap,
 		k := resp.ByApiKey[key]
 		k.RawModel = meta.rawModel
 		k.Provider = displayProviderName(meta.provider, nodeNameMap)
-		k.ApiKeyMasked = meta.apiKey
-		k.ApiKeyKey = meta.apiKey
+		masked := maskAPIKeyForStats(meta.apiKey)
+		if masked == "" {
+			masked = "local-no-key"
+		}
+		k.ApiKeyMasked = masked
+		k.ApiKeyKey = masked
 		k.KeyName = apiKeyDisplayName(meta.apiKey, keyNames)
 		k.Requests = t.requests
 		k.PromptTokens = t.promptTokens

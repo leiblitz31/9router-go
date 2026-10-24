@@ -284,15 +284,19 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
-	targetURL := providerCfg.SystemoneURL
-	if connData != nil && connData.BaseURL != "" {
-		baseURL := strings.TrimRight(connData.BaseURL, "/")
-		if strings.Contains(baseURL, "/chat/completions") {
-			targetURL = strings.Replace(baseURL, "/chat/completions", "/systemone", 1)
-		} else {
-			targetURL = baseURL + "/systemone"
-		}
-	} else if targetURL == "" {
+	override := ""
+	if connData != nil {
+		override = strings.TrimSpace(connData.BaseURL)
+	}
+	var targetURL string
+	switch {
+	case override != "" && strings.Contains(override, "/chat/completions"):
+		targetURL = strings.Replace(strings.TrimRight(override, "/"), "/chat/completions", "/systemone", 1)
+	case override != "":
+		targetURL = buildSystemoneURL(override, providerCfg.SystemoneURL, providerCfg.SystemonePath)
+	case providerCfg.SystemoneURL != "":
+		targetURL = providerCfg.SystemoneURL
+	default:
 		baseURL := strings.TrimRight(providerCfg.BaseURL, "/")
 		if strings.Contains(baseURL, "/chat/completions") {
 			targetURL = strings.Replace(baseURL, "/chat/completions", "/systemone", 1)
@@ -314,7 +318,16 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if modelInfo.Provider == "opencode" || modelInfo.Provider == "opencode-zen" {
-		req.Header.Set("x-opencode-session", proxy.GenerateOpenCodeSessionID())
+		// One stable session per provider+connection, like the chat lanes:
+		// minting a fresh session per request drains the egress budget at
+		// mint time and surfaces as 429 FreeUsageLimitError. A separate
+		// namespace from the chat lanes keeps media traffic from drawing on
+		// a conversation's session budget.
+		mediaSessionKey := "media:" + modelInfo.Provider
+		if modelInfo.ConnectionID != "" {
+			mediaSessionKey += ":conn:" + modelInfo.ConnectionID
+		}
+		req.Header.Set("x-opencode-session", proxy.StableOpenCodeSessionID(mediaSessionKey))
 	}
 	client, clientErr := h.ChatH.GetClientForConnection(connData)
 	if clientErr != nil {
@@ -785,6 +798,16 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 			}
+			// Gemini image models answer the native generateContent shape, not
+			// the OpenAI images endpoint the generic forward would dial.
+			if (endpoint == "/v1/images/generations" || endpoint == "/images/generations") && (subInfo.Provider == "gemini" || subInfo.Provider == "gm") {
+				if err := h.handleGeminiImage(w, r, body, subInfo); err == nil {
+					return
+				} else {
+					lastErr = err.Error()
+					continue
+				}
+			}
 			// Codex image models are Responses-API models, not an image endpoint.
 			if (endpoint == "/v1/images/generations" || endpoint == "/images/generations") && (subInfo.Provider == "codex" || subInfo.Provider == "cx") {
 				if err := h.handleCodexImage(w, r, body, subInfo); err == nil {
@@ -937,6 +960,14 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	}
 	if (endpoint == "/v1/images/generations" || endpoint == "/images/generations") && (modelInfo.Provider == "antigravity" || modelInfo.Provider == "ag") {
 		if err := h.handleAntigravityImage(w, r, body, modelInfo); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
+	// Gemini image models answer the native generateContent shape, not the
+	// OpenAI images endpoint the generic forward would dial.
+	if (endpoint == "/v1/images/generations" || endpoint == "/images/generations") && (modelInfo.Provider == "gemini" || modelInfo.Provider == "gm") {
+		if err := h.handleGeminiImage(w, r, body, modelInfo); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
 		}
 		return
@@ -1259,4 +1290,31 @@ func buildEmbeddingsURL(baseURL string) string {
 		return strings.Replace(baseURL, "/chat/completions", "/embeddings", 1)
 	}
 	return strings.TrimRight(baseURL, "/") + "/embeddings"
+}
+
+// buildSystemoneURL joins a saved host override with the registry path
+// without doubling a "/v1" or "/v1/systemone" the host already includes
+// (upstream buildSystemoneUrl). An override with no registry path keeps the
+// lane's "/systemone" suffix; one that already names the endpoint is used
+// as-is.
+func buildSystemoneURL(override, cfgURL, cfgPath string) string {
+	base := strings.TrimRight(strings.TrimSpace(override), "/")
+	if base == "" {
+		return cfgURL
+	}
+	if strings.HasSuffix(base, "/systemone") {
+		return base
+	}
+	if cfgPath == "" {
+		return base + "/systemone"
+	}
+	path := strings.TrimRight(cfgPath, "/")
+	if strings.HasSuffix(base, path) {
+		return base
+	}
+	prefix := path[:strings.LastIndex(path, "/")]
+	if prefix != "" && strings.HasSuffix(base, prefix) {
+		return base + path[len(prefix):]
+	}
+	return base + path
 }

@@ -63,19 +63,18 @@ var deepSeekSessions = &deepSeekSessionStore{items: make(map[string]*deepSeekSes
 
 // deepSeekSessionKey identifies one conversation.
 //
-// The transport mode is part of the key because a session created for a
-// streamed turn and reused by a non-streamed one answers with an empty body:
-// the sibling implementation isolates `stream:` from `nonstream:` for exactly
-// that reason.
-func deepSeekSessionKey(userToken, clientSessionID string, stream bool) string {
+// The client's streaming mode is not part of the key: the upstream request
+// always asks for a stream (the site's own client has no other mode), so a
+// streamed and a non-streamed turn of one conversation are the same
+// conversation upstream, and both drain an event stream. The split this key
+// used to carry existed only because the request's own `stream` flag once
+// followed the client's, and a session created for one flag answered the
+// other with an empty body.
+func deepSeekSessionKey(userToken, clientSessionID string) string {
 	if userToken == "" || clientSessionID == "" {
 		return ""
 	}
-	mode := "nonstream"
-	if stream {
-		mode = "stream"
-	}
-	return userToken + "|" + mode + "|" + clientSessionID
+	return userToken + "|" + clientSessionID
 }
 
 // deepSeekSessionClaim is the outcome of asking for a conversation's session.

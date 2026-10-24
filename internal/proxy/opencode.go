@@ -131,6 +131,27 @@ func StableOpenCodeSessionID(key string) string {
 	return id
 }
 
+// ExpireStableOpenCodeSession retires the stable session minted for key, but
+// only while it still holds id: a rotation that loses a race against an
+// already-rotated session must not discard the fresh budget that rotation
+// minted. It reports whether the entry was removed.
+func ExpireStableOpenCodeSession(key, id string) bool {
+	opencodeStableMu.Lock()
+	defer opencodeStableMu.Unlock()
+	entry, ok := opencodeStableSessions[key]
+	if !ok || entry.id != id {
+		return false
+	}
+	delete(opencodeStableSessions, key)
+	for i, k := range opencodeStableOrder {
+		if k == key {
+			opencodeStableOrder = append(opencodeStableOrder[:i], opencodeStableOrder[i+1:]...)
+			break
+		}
+	}
+	return true
+}
+
 // descendingTimeHex renders the 12-hex session prefix: the low 48 bits of
 // ~(timeMs * 0x1000 + counter), exactly like the upstream CLI.
 func descendingTimeHex(timeMs, counter uint64) string {

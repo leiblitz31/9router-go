@@ -122,6 +122,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "selfhosted-stt": "selfhosted-stt",
   "selfhosted-tts": "selfhosted-tts",
   "siliconflow": "siliconflow",
+  "sensenova": "sensenova",
   "stability-ai": "stability",
   "tencent": "hunyuan",
   "together": "together",
@@ -2375,12 +2376,8 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
   ],
   "gh": [
     {
-      "id": "gpt-5.2",
-      "name": "GPT-5.2"
-    },
-    {
-      "id": "gpt-5.2-codex",
-      "name": "GPT-5.2 Codex"
+      "id": "gpt-5-mini",
+      "name": "GPT-5 Mini"
     },
     {
       "id": "gpt-5.3-codex",
@@ -2395,52 +2392,100 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "GPT-5.4 Mini"
     },
     {
+      "id": "gpt-5.5",
+      "name": "GPT-5.5"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6 Luna"
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "name": "GPT-5.6 Sol"
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6 Terra"
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT-6 Astra"
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna"
+    },
+    {
+      "id": "gpt-6-sol",
+      "name": "GPT-6 Sol"
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1 Sol"
+    },
+    {
+      "id": "claude-fable-5",
+      "name": "Claude Fable 5"
+    },
+    {
+      "id": "claude-fable-5.1",
+      "name": "Claude Fable 5.1"
+    },
+    {
       "id": "claude-haiku-4.5",
       "name": "Claude Haiku 4.5"
     },
     {
-      "id": "claude-opus-4.5",
-      "name": "Claude Opus 4.5"
+      "id": "claude-haiku-5.5",
+      "name": "Claude Haiku 5.5"
     },
     {
-      "id": "claude-sonnet-4.5",
-      "name": "Claude Sonnet 4.5"
+      "id": "claude-opus-4.8",
+      "name": "Claude Opus 4.8"
+    },
+    {
+      "id": "claude-opus-4.8-fast",
+      "name": "Claude Opus 4.8 (Fast)"
+    },
+    {
+      "id": "claude-opus-5",
+      "name": "Claude Opus 5"
+    },
+    {
+      "id": "claude-opus-5.5",
+      "name": "Claude Opus 5.5"
     },
     {
       "id": "claude-sonnet-4.6",
       "name": "Claude Sonnet 4.6"
     },
     {
-      "id": "claude-opus-4.6",
-      "name": "Claude Opus 4.6"
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet 5"
     },
     {
-      "id": "claude-opus-4.7",
-      "name": "Claude Opus 4.7"
+      "id": "claude-sonnet-5.5",
+      "name": "Claude Sonnet 5.5"
     },
     {
-      "id": "gemini-2.5-pro",
-      "name": "Gemini 2.5 Pro"
+      "id": "gemini-3.7-flash",
+      "name": "Gemini 3.7 Flash"
     },
     {
-      "id": "gemini-3-flash-preview",
-      "name": "Gemini 3 Flash"
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash"
     },
     {
-      "id": "gemini-3.1-pro-preview",
-      "name": "Gemini 3.1 Pro"
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon"
     },
     {
-      "id": "grok-code-fast-1",
-      "name": "Grok Code Fast 1"
+      "id": "kimi-k3",
+      "name": "Kimi K3"
     },
     {
-      "id": "oswe-vscode-prime",
-      "name": "Raptor Mini"
-    },
-    {
-      "id": "goldeneye-free-auto",
-      "name": "GoldenEye"
+      "id": "mai-code-1.1-flash",
+      "name": "MAI-Code-1.1-Flash"
     },
     {
       "id": "text-embedding-3-small",
@@ -3665,6 +3710,21 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "deepseek-v4.1-flash:cloud",
       "name": "DeepSeek V4.1 Flash (Cloud)"
+    },
+    {
+      "id": "clef",
+      "name": "Clef",
+      "kind": "systemone"
+    },
+    {
+      "id": "clef-flash",
+      "name": "Clef Flash",
+      "kind": "systemone"
+    },
+    {
+      "id": "clef:cloud",
+      "name": "Clef (Cloud)",
+      "kind": "systemone"
     }
   ],
   "openai": [
@@ -4942,6 +5002,54 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "kind": "image"
     }
   ],
+  "sensenova": [
+    {
+      "id": "sensenova-6.8-flash-lite",
+      "name": "SenseNova 6.8 Flash Lite"
+    },
+    {
+      "id": "sensenova-u1.5-lite",
+      "name": "SenseNova U1.5 Lite",
+      "kind": "image",
+      "params": [
+        "n",
+        "size",
+        "output_format",
+        "response_format",
+        "watermark",
+        "prompt_extend"
+      ]
+    },
+    {
+      "id": "sensenova-u1.5-fast",
+      "name": "SenseNova U1.5 Fast",
+      "kind": "image",
+      "params": [
+        "n",
+        "size",
+        "output_format",
+        "response_format",
+        "watermark",
+        "prompt_extend"
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash"
+    },
+    {
+      "id": "deepseek-flash",
+      "name": "DeepSeek V4.1 Flash"
+    },
+    {
+      "id": "glm-5.2",
+      "name": "GLM-5.2"
+    },
+    {
+      "id": "kimi-k3",
+      "name": "Kimi K3"
+    }
+  ],
   "siliconflow": [
     {
       "id": "deepseek-ai/DeepSeek-V4-Pro",
@@ -5651,6 +5759,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     }
   ],
   "xai": [
+    {
+      "id": "grok-4.7",
+      "name": "Grok 4.7"
+    },
     {
       "id": "grok-4.6",
       "name": "Grok 4.6"

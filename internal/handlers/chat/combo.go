@@ -1088,7 +1088,7 @@ func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]stri
 		return
 	}
 	currentLevel := h.Repo.GetConnectionBackoffLevel(connID)
-	cls := providers.ClassifyError(ue.StatusCode, extractErrorText(ue.Body), currentLevel)
+	cls := providers.ClassifyErrorForProvider(ue.StatusCode, extractErrorText(ue.Body), currentLevel, provider)
 	// Upstream parity (checkFallbackError): request-scoped 4xx (400/404/405/
 	// 409/422/...) must not lock the account — the bug is in the request,
 	// not the credential. Only lock when ShouldFallback is set.
@@ -1107,7 +1107,7 @@ func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]stri
 	// can skip this account before spending a request (upstream applyErrorState).
 	// Only lock if error is account-scoped, not model-scoped (e.g. 401 auth issues),
 	// so unrelated models stay available.
-	if isModelScopedError(ue.StatusCode, extractErrorText(ue.Body), model) {
+	if isModelScopedError(ue.StatusCode, extractErrorText(ue.Body), model, ue.Body) {
 		if recErr := h.Repo.RecordConnectionScopedError(connID, model, "chat", ue.StatusCode, extractErrorText(ue.Body), cls.NewBackoffLevel); recErr != nil {
 			log.Warn("combo", "record connection error failed", "conn", connID, "error", recErr)
 		}

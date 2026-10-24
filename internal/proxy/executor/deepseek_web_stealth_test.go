@@ -110,7 +110,7 @@ func TestDeepSeekStealthDivergedHistoryStartsAFreshSession(t *testing.T) {
 func TestDeepSeekStealthConcurrentTurnDoesNotForkTheChain(t *testing.T) {
 	t.Cleanup(deepSeekSessions.reset)
 
-	key := deepSeekSessionKey("user-token-1", "conversation-3", false)
+	key := deepSeekSessionKey("user-token-1", "conversation-3")
 	deepSeekSessions.commit(deepSeekSessionClaim{pin: true}, key, "session-pinned", "turn one", new(int64(11)))
 
 	// The first turn takes the session, which marks it busy for as long as the
@@ -138,7 +138,7 @@ func TestDeepSeekStealthConcurrentTurnDoesNotForkTheChain(t *testing.T) {
 // the store must not promise otherwise.
 func TestDeepSeekStealthSessionWithoutMessageIDIsNotPinned(t *testing.T) {
 	t.Cleanup(deepSeekSessions.reset)
-	key := deepSeekSessionKey("user-token-1", "conversation-4", false)
+	key := deepSeekSessionKey("user-token-1", "conversation-4")
 
 	deepSeekSessions.commit(deepSeekSessionClaim{pin: true}, key, "session-1", "turn one", nil)
 
@@ -156,7 +156,7 @@ func TestDeepSeekStealthSessionWithoutMessageIDIsNotPinned(t *testing.T) {
 func TestDeepSeekStealthConcurrentTurnDoesNotOverwriteThePinnedEntry(t *testing.T) {
 	t.Cleanup(deepSeekSessions.reset)
 
-	key := deepSeekSessionKey("user-token-1", "conversation-11", false)
+	key := deepSeekSessionKey("user-token-1", "conversation-11")
 	deepSeekSessions.commit(deepSeekSessionClaim{pin: true}, key, "session-pinned", "turn one", new(int64(11)))
 
 	held := deepSeekSessions.claim(key, "turn one\n\nturn two")
@@ -183,17 +183,24 @@ func TestDeepSeekStealthConcurrentTurnDoesNotOverwriteThePinnedEntry(t *testing.
 	}
 }
 
-// A stream and a non-stream turn of one conversation must not share an upstream
-// session: the site answers an empty body when a session created for a streamed
-// turn is reused by a non-streamed one.
-func TestDeepSeekSessionKeySeparatesTransportModes(t *testing.T) {
-	streamed := deepSeekSessionKey("token", "conversation", true)
-	plain := deepSeekSessionKey("token", "conversation", false)
-	if streamed == plain {
-		t.Errorf("streamed and non-streamed keys collided (%q); the site answers an empty body when they share a session", streamed)
+// The client's streaming mode is not part of a conversation's identity: the
+// upstream request always asks for a stream, so a streamed and a non-streamed
+// turn of one conversation share the session the conversation is pinned to.
+// The split used to exist because the request's own `stream` flag followed
+// the client's, and a session created for one flag answered the other with
+// an empty body; with the flag constant there is nothing left to split on.
+func TestDeepSeekSessionKeyIgnoresTheTransportMode(t *testing.T) {
+	if deepSeekSessionKey("token", "conversation") == "" {
+		t.Error("a named conversation must have a session key")
 	}
-	if deepSeekSessionKey("token", "", true) != "" {
+	if deepSeekSessionKey("token", "") != "" {
 		t.Error("a turn with no client conversation id must not be pinnable")
+	}
+	if deepSeekSessionKey("", "conversation") != "" {
+		t.Error("a turn with no credential must not be pinnable")
+	}
+	if a, b := deepSeekSessionKey("token", "conversation"), deepSeekSessionKey("token", "other"); a == b {
+		t.Error("two conversations must not share a session key")
 	}
 }
 
@@ -501,8 +508,9 @@ func TestDeepSeekStealthOptions(t *testing.T) {
 		wantPersist    bool
 		wantConcurrenc int
 		wantJitterMs   int64
+		wantGapMs      int64
 	}{
-		{name: "unconfigured defaults to stealth", wantEnabled: true, wantPersist: true, wantConcurrenc: deepSeekStealthDefaultConcurrency, wantJitterMs: 400},
+		{name: "unconfigured defaults to stealth", wantEnabled: true, wantPersist: true, wantConcurrenc: deepSeekStealthDefaultConcurrency, wantJitterMs: 400, wantGapMs: deepSeekStealthDefaultCallGapMs},
 		{name: "explicitly off", connData: map[string]any{"stealth": false}},
 		{
 			name:           "concurrency raised",
@@ -511,6 +519,7 @@ func TestDeepSeekStealthOptions(t *testing.T) {
 			wantPersist:    true,
 			wantConcurrenc: 8,
 			wantJitterMs:   400,
+			wantGapMs:      deepSeekStealthDefaultCallGapMs,
 		},
 		{
 			name:           "concurrency uncapped",
@@ -519,6 +528,7 @@ func TestDeepSeekStealthOptions(t *testing.T) {
 			wantPersist:    true,
 			wantConcurrenc: 0,
 			wantJitterMs:   400,
+			wantGapMs:      deepSeekStealthDefaultCallGapMs,
 		},
 		{
 			name:           "session persistence off",
@@ -527,6 +537,7 @@ func TestDeepSeekStealthOptions(t *testing.T) {
 			wantPersist:    false,
 			wantConcurrenc: deepSeekStealthDefaultConcurrency,
 			wantJitterMs:   400,
+			wantGapMs:      deepSeekStealthDefaultCallGapMs,
 		},
 		{
 			name:           "jitter off",
@@ -535,6 +546,16 @@ func TestDeepSeekStealthOptions(t *testing.T) {
 			wantPersist:    true,
 			wantConcurrenc: deepSeekStealthDefaultConcurrency,
 			wantJitterMs:   0,
+			wantGapMs:      deepSeekStealthDefaultCallGapMs,
+		},
+		{
+			name:           "call gap off",
+			connData:       map[string]any{"callGapMs": float64(0)},
+			wantEnabled:    true,
+			wantPersist:    true,
+			wantConcurrenc: deepSeekStealthDefaultConcurrency,
+			wantJitterMs:   400,
+			wantGapMs:      0,
 		},
 	}
 
@@ -555,6 +576,9 @@ func TestDeepSeekStealthOptions(t *testing.T) {
 			}
 			if got.jitter.Milliseconds() != tt.wantJitterMs {
 				t.Errorf("jitter = %dms, want %dms", got.jitter.Milliseconds(), tt.wantJitterMs)
+			}
+			if got.callGap.Milliseconds() != tt.wantGapMs {
+				t.Errorf("callGap = %dms, want %dms", got.callGap.Milliseconds(), tt.wantGapMs)
 			}
 		})
 	}
@@ -757,6 +781,80 @@ func TestDeepSeekStreamedEnforcementShapes(t *testing.T) {
 				t.Errorf("kind = %q, want %q", got.Kind, tt.wantKind)
 			}
 		})
+	}
+}
+
+// The quiet window after a turn is drawn from the upper half of its bound, so
+// the 4s default reads as 2-4s and never as a constant interval, which would
+// be a scheduler's signature rather than a person's.
+func TestDeepSeekTurnGapDrawsFromTheUpperHalf(t *testing.T) {
+	upper := 4 * time.Second
+	for range 100 {
+		got := deepSeekTurnGapFn(upper)
+		if got < upper/2 || got > upper {
+			t.Fatalf("gap = %s, want within [%s, %s]", got, upper/2, upper)
+		}
+	}
+	if got := deepSeekTurnGapFn(0); got != 0 {
+		t.Errorf("gap(0) = %s, want 0: a disabled gap must not delay the release", got)
+	}
+}
+
+// A zero gap frees the slot on the spot, and the freed slot must be usable
+// again: the quiet window narrows the account, it must not break it.
+func TestDeepSeekReleaseAfterTurnWithNoGapFreesTheSlot(t *testing.T) {
+	gate := &deepSeekGate{slots: map[string]chan struct{}{}}
+	release, err := gate.acquire(context.Background(), "account-gap", 1, 0)
+	if err != nil {
+		t.Fatalf("slot: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		deepSeekReleaseAfterTurn(release, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("a zero gap must release without waiting on a timer")
+	}
+	next, err := gate.acquire(context.Background(), "account-gap", 1, 0)
+	if err != nil {
+		t.Fatalf("the slot must be free again after the release: %v", err)
+	}
+	next()
+}
+
+// Retired sessions leave in a batch, on the flush, and never in the same
+// breath the turn that created them: an instant create-then-delete is the
+// scripted cadence the queue exists to unsend.
+func TestDeepSeekRetiredSessionsDrainOnTheFlush(t *testing.T) {
+	t.Cleanup(deepSeekSessions.reset)
+	upstream := newDeepSeekFakeUpstream(t, deepSeekTurnFrames(1, "ok"))
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	// Stateless turns — no client conversation id — so each session retires
+	// when its turn ends.
+	for range 2 {
+		req := &Request{
+			Ctx:    context.Background(),
+			Client: server.Client(),
+			Config: deepSeekTestConfig(server.URL),
+			APIKey: "user-token-flush",
+			Body:   deepSeekTestBody(t, "deepseek-chat", map[string]any{"role": "user", "content": "hi"}),
+		}
+		if err := forwardTurn(t, req); err != nil {
+			t.Fatalf("turn: %v", err)
+		}
+	}
+	if got := upstream.countCalls("/api/v0/chat_session/delete"); got != 0 {
+		t.Fatalf("session deletes = %d, want 0 before the flush: the delete is the signal", got)
+	}
+
+	deepSeekFlushSessionDeletes(context.Background())
+	if got := upstream.countCalls("/api/v0/chat_session/delete"); got != 2 {
+		t.Errorf("session deletes = %d, want 2 after the flush drained the queue", got)
 	}
 }
 

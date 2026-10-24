@@ -17,9 +17,9 @@ import "strings"
 // are never real keys, and the previous "***" sentinel is kept so existing
 // no-key usage rows stay in the same bucket instead of splitting.
 func MaskAPIKey(key string) string {
-	key = strings.TrimSpace(key)
-	if RuneCount(key) <= 8 {
+	trimmed := strings.TrimSpace(key)
+	if RuneCount(trimmed) <= 8 {
 		return "***"
 	}
-	return RunePrefix(key, 8) + "***" + RuneSuffix(key, 4)
+	return RunePrefix(trimmed, 8) + "***" + RuneSuffix(trimmed, 4)
 }

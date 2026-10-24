@@ -169,6 +169,20 @@ type UsageStatsResponse struct {
 // HandleUsageStats aggregates usage over the window named by ?period. Besides the
 // dashboard presets ("today", "24h", "7d", "30d", "60d", "all") it accepts any
 // <n>d or <n>h window, so the selector is not limited to a fixed set.
+// maskAPIKeyForStats masks an API key for usage stats display and grouping.
+// Keys <= 12 characters mask to firstChar + "***" to prevent leaking the raw
+// key in apiKeyMasked, keyName, and apiKeyKey (upstream usageRepo.js parity).
+func maskAPIKeyForStats(key string) string {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" || trimmed == "local-no-key" || trimmed == "***" {
+		return ""
+	}
+	if handlerutil.RuneCount(trimmed) <= 12 {
+		return handlerutil.RunePrefix(trimmed, 1) + "***"
+	}
+	return handlerutil.MaskAPIKey(trimmed)
+}
+
 func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		window := resolveUsagePeriod(r.URL.Query().Get("period"), time.Now())
@@ -221,8 +235,17 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 				if k.Name == nil || *k.Name == "" {
 					continue
 				}
+				trimmed := strings.TrimSpace(k.Key)
+				if trimmed != "" {
+					keyNames[trimmed] = *k.Name
+					if m := maskAPIKeyForStats(trimmed); m != "" {
+						keyNames[m] = *k.Name
+					}
+				}
 				keyNames[k.Key] = *k.Name
-				keyNames[handlerutil.MaskAPIKey(k.Key)] = *k.Name
+				if m := maskAPIKeyForStats(k.Key); m != "" {
+					keyNames[m] = *k.Name
+				}
 			}
 		}
 
@@ -237,22 +260,31 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 			trimmed := strings.TrimSpace(apiKey)
 			if trimmed == "" || trimmed == "***" {
 				apiKey = "local-no-key"
+				trimmed = "local-no-key"
 			}
 			bucketKey := apiKey + "|" + rawModel + "|" + provider
 			cur := resp.ByApiKey[bucketKey]
 			cur.RawModel = rawModel
 			cur.Provider = providerDisplay
-			cur.ApiKeyMasked = apiKey
-			cur.ApiKeyKey = apiKey
+			masked := maskAPIKeyForStats(apiKey)
+			if masked == "" {
+				masked = "local-no-key"
+			}
+			cur.ApiKeyMasked = masked
+			cur.ApiKeyKey = masked
 			switch {
 			case keyNames[trimmed] != "":
 				cur.KeyName = keyNames[trimmed]
-			case apiKey == "local-no-key":
+			case keyNames[apiKey] != "":
+				cur.KeyName = keyNames[apiKey]
+			case trimmed == "local-no-key":
 				cur.KeyName = "Local (No Key)"
 			default:
-				// Fall back to the masked key rather than a bare prefix
-				// (upstream 813a0121).
-				cur.KeyName = handlerutil.MaskAPIKey(trimmed)
+				if masked != "local-no-key" {
+					cur.KeyName = masked
+				} else {
+					cur.KeyName = "Local (No Key)"
+				}
 			}
 			cur.Requests += requests
 			cur.PromptTokens += promptTok
@@ -459,10 +491,7 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 		var dedupedRecent []usagetracker.RecentRequest
 		seen := make(map[string]bool)
 		for _, rh := range recentHistory {
-			// Same fallback as the aggregate fold: rows recorded with
-			// input_tokens/output_tokens blobs (upstream 813a0121) carry
-			// zero columns and must not be dropped as token-less.
-			promptTok, complTok := rowPromptCompletion(rh)
+			promptTok, complTok := translator.ResolveTokensCounts([]byte(rh.Tokens), rh.PromptTokens, rh.CompletionTokens)
 			if promptTok == 0 && complTok == 0 {
 				continue
 			}

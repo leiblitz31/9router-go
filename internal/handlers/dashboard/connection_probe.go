@@ -236,7 +236,8 @@ var oauthProbeConfigs = map[string]oauthProbeConfig{
 	"gitlab":         {url: "https://gitlab.com/api/v4/user", method: http.MethodGet, authHeader: "Authorization", authPrefix: "Bearer "},
 	"codebuddy-cn":   {tokenExists: true},
 	"codebuddy-intl": {tokenExists: true},
-	"zed":            {tokenExists: true},
+	// The stored credential only authorizes the account API; model access
+	// needs a minted LLM token, so the test walks both layers (probeZed).
 	"windsurf":       {tokenExists: true},
 	"trae":           {tokenExists: true},
 	"devin":          {tokenExists: true},
@@ -648,6 +649,8 @@ func (h *DashboardHandler) probeOAuthConnection(ctx context.Context, conn *model
 		return probeOutcome{message: attempt.message, refreshed: refreshed, tokens: tokens}
 	case "cline", "clinepass":
 		return h.probeCline(ctx, data, client, accessToken, refreshed, tokens)
+	case "zed":
+		return h.probeZed(ctx, data, client)
 	case "freebuff":
 		return h.probeFreebuff(ctx, conn, data, client)
 	}
