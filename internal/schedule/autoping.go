@@ -180,7 +180,9 @@ func ConfigSourceFromSettings(read SettingsReader) ConfigSource {
 		if err != nil || raw == nil {
 			return empty
 		}
-		return ParseConfig(raw[SettingsKey(provider)])
+		cfg := ParseConfig(raw[SettingsKey(provider)])
+		foldLegacySchedules(&cfg, raw[SettingsKey(provider)+"Schedules"])
+		return cfg
 	}
 }
 

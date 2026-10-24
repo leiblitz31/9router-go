@@ -220,3 +220,35 @@ func (c Config) toMap() map[string]any {
 	}
 	return map[string]any{"connections": connections, "schedules": schedules}
 }
+
+// foldLegacySchedules folds schedules stored under the legacy split key
+// (<provider>AutoPingSchedules) into cfg. The local dashboard writes the
+// schedules half under its own key instead of inside the canonical
+// envelope; without this fold those schedules persist in settings but the
+// scheduler never sees them. A canonical schedule for the same connection
+// wins — the legacy key is only a fallback for entries the canonical key
+// does not carry.
+func foldLegacySchedules(cfg *Config, legacy any) {
+	obj, ok := legacy.(map[string]any)
+	if !ok {
+		return
+	}
+	if cfg.Schedules == nil {
+		cfg.Schedules = map[string]*Schedule{}
+	}
+	for id, raw := range obj {
+		if id == "" {
+			continue
+		}
+		if _, exists := cfg.Schedules[id]; exists {
+			continue
+		}
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if parsed := Normalize(scheduleInput(entry)); parsed != nil {
+			cfg.Schedules[id] = parsed
+		}
+	}
+}
