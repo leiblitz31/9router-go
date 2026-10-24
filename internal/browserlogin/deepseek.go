@@ -304,7 +304,14 @@ func DeepSeekUserTokenFromLocalStorage(raw string) string {
 		if stored.Value == nil {
 			return ""
 		}
-		return strings.TrimSpace(*stored.Value)
+		// A wrapper only counts when its value is a string of 20+ chars
+		// (upstream decolua/9router#5182): anything shorter is not a
+		// credential the site would have minted, so it is not a sign-in.
+		value := strings.TrimSpace(*stored.Value)
+		if len(value) < 20 {
+			return ""
+		}
+		return value
 	}
 	if !strings.HasPrefix(trimmed, "\"") {
 		return trimmed

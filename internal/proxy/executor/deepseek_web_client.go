@@ -310,16 +310,39 @@ const (
 // in localStorage as {"value":"..."}, so a straight copy out of DevTools arrives
 // JSON-wrapped; upstream unwraps it and the dashboard probe must too, or the
 // probe and the executor would disagree about what is valid.
+//
+// A JSON wrapper only counts when its value is a string of 20+ chars
+// (upstream decolua/9router#5182): a logged-out page holds
+// {"value":null,"__version":"0"}, and falling back to that raw JSON string
+// as the token made the capture finish before the user signed in and the
+// identity probe reject it. A wrapper without a usable string value is not
+// a token at all, so it normalizes to "" instead of to the raw JSON.
+// A bare JSON string or a plain value keeps the browser-login reader's
+// behavior: unwrap or trim, with no length gate, because those spellings
+// are not the wrapper shape the upstream fix is about.
 func deepSeekUserToken(raw string) string {
 	token := strings.TrimSpace(raw)
 	if token == "" {
 		return ""
 	}
-	var wrapper struct {
-		Value string `json:"value"`
+	if strings.HasPrefix(token, "{") {
+		var wrapper struct {
+			Value *string `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(token), &wrapper); err != nil || wrapper.Value == nil {
+			return ""
+		}
+		value := strings.TrimSpace(*wrapper.Value)
+		if len(value) < 20 {
+			return ""
+		}
+		return value
 	}
-	if err := json.Unmarshal([]byte(token), &wrapper); err == nil && wrapper.Value != "" {
-		return strings.TrimSpace(wrapper.Value)
+	if strings.HasPrefix(token, "\"") {
+		var value string
+		if err := json.Unmarshal([]byte(token), &value); err == nil {
+			return strings.TrimSpace(value)
+		}
 	}
 	return token
 }

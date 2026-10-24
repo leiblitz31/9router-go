@@ -26,6 +26,11 @@ func TestDeepSeekUserTokenReadsEveryStoredShape(t *testing.T) {
 			want: "",
 		},
 		{
+			name: "a wrapped value shorter than 20 chars is not a sign-in",
+			raw:  `{"value":"short","__version":"0"}`,
+			want: "",
+		},
+		{
 			name: "a bare JSON string",
 			raw:  `"the-token"`,
 			want: "the-token",

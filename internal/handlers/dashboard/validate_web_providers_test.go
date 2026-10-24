@@ -72,11 +72,24 @@ func TestValidateDeepSeekWeb(t *testing.T) {
 		},
 		{
 			name:   "json-wrapped localStorage value",
-			apiKey: `{"value":"user-token-2"}`,
+			apiKey: `{"value":"tfWDPBARqgRC/+KfPOmhLFeW78PdKOKWiI3ro8MaP9hvRd1IoKZrMSd2L5jEaUZN"}`,
 			respond: func(int, capturedProbe) (int, []byte, error) {
 				return http.StatusOK, deepSeekProbeBody("access-token"), nil
 			},
 			wantValid: true,
+		},
+		{
+			// Upstream decolua/9router#5182: a JSON wrapper only counts
+			// when its value is a string of 20+ chars, so a short wrapped
+			// value is not a credential at all and must not reach upstream.
+			name:   "wrapped value shorter than 20 chars is not a token",
+			apiKey: `{"value":"user-token-2"}`,
+			respond: func(int, capturedProbe) (int, []byte, error) {
+				t.Fatal("a probe with no credential must not reach upstream")
+				return 0, nil, nil
+			},
+			wantValid:   false,
+			wantMessage: "Missing userToken",
 		},
 		{
 			name:   "rejected credential arrives as HTTP 200",
