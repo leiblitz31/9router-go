@@ -179,11 +179,44 @@ func ambientProxyURL() *url.URL {
 }
 
 // ambientProxyAllowlist permits the environment's own proxy endpoint.
+//
+// The allowlist is matched against the resolved dial address, so a proxy
+// named by hostname must also be remembered by the addresses its name
+// resolves to: an egress proxy named in the environment can resolve into a
+// range the guard treats as reserved (the sandbox egress name resolves to
+// 198.19.0.1, inside the RFC2544 benchmark block the netguard predicate
+// reserves), and without the resolved forms every dial to the operator's
+// own proxy is refused as an SSRF target.
 func ambientProxyAllowlist() *proxyAllowlist {
 	if u := ambientProxyURL(); u != nil {
-		return newProxyAllowlist(u.Host)
+		return newProxyAllowlist(proxyAllowlistHosts(u)...)
 	}
 	return nil
+}
+
+// proxyAllowlistHosts expands a proxy URL's host into every form the dial
+// guard can be handed: the literal host as written, plus — for a hostname —
+// each resolved address, bare (any port) and with the URL's port.
+func proxyAllowlistHosts(u *url.URL) []string {
+	hosts := []string{u.Host}
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		host, port = u.Host, ""
+	}
+	if netguard.ParseIP(host) != nil {
+		return hosts
+	}
+	ips, err := net.DefaultResolver.LookupHost(context.Background(), host)
+	if err != nil {
+		return hosts
+	}
+	for _, ip := range ips {
+		hosts = append(hosts, ip)
+		if port != "" {
+			hosts = append(hosts, net.JoinHostPort(ip, port))
+		}
+	}
+	return hosts
 }
 
 // newSafeDialerForProxy returns NewSafeDialer's dialer with the given proxy
@@ -244,11 +277,24 @@ func newSafeDialerForProxy(allow *proxyAllowlist) *net.Dialer {
 // to introspect how a transport dials.
 //
 // When no proxy env vars are set, the dialer connects directly.
-func newTransportWithUTLS(d *utlsDialer, kind transportProxyKind, url string) *http.Transport {
+func newTransportWithUTLS(d *utlsDialer, kind transportProxyKind, proxyURL string) *http.Transport {
 	t := constants.DefaultHTTPTransportConfig.NewTransport()
 	t.DialContext = NewSafeDialer().DialContext
+	if kind == proxyKindExplicit && proxyURL != "" {
+		// A transport pinned to an assigned proxy must be able to dial that
+		// proxy: net/http reaches it through DialContext, not through the
+		// uTLS tunnel path, and the guard would otherwise refuse a proxy
+		// that lives on a private or reserved address.
+		if u, err := url.Parse(proxyURL); err == nil {
+			hosts := proxyAllowlistHosts(u)
+			if amb := ambientProxyURL(); amb != nil {
+				hosts = append(hosts, proxyAllowlistHosts(amb)...)
+			}
+			t.DialContext = newSafeDialerForProxy(newProxyAllowlist(hosts...)).DialContext
+		}
+	}
 	t.DialTLSContext = d.dialTLSContext
-	registerTransportProxy(t, kind, url)
+	registerTransportProxy(t, kind, proxyURL)
 	return t
 }
 
