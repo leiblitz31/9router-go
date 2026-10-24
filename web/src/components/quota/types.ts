@@ -718,7 +718,6 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
                     : quotaType === 'addOn'
                       ? 'Add-on'
                       : quotaType,
-              detailUrl: quota.detailUrl as string | undefined,
               used: Number(quota.used) || 0,
               total: Number(quota.total) || 0,
               unit: (quota.unit as string) || undefined,
