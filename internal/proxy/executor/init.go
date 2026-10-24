@@ -97,7 +97,7 @@ func RegisterAll() {
 	Register("kilo-gateway", func() Executor { return ForwardOpenAI })
 	Register("llm7", func() Executor { return ForwardOpenAI })
 	Register("morph", func() Executor { return ForwardOpenAI })
-	Register("poolside", func() Executor { return ForwardOpenAI })
+	Register("poolside", func() Executor { return ForwardPoolside })
 	Register("sambanova", func() Executor { return ForwardOpenAI })
 	Register("tencent", func() Executor { return ForwardOpenAI })
 	Register("tokenrouter", func() Executor { return ForwardOpenAI })
