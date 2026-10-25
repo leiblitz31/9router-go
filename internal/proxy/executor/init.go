@@ -27,7 +27,7 @@ func RegisterAll() {
 	Register("cohere", func() Executor { return ForwardOpenAI })
 	Register("ollama", func() Executor { return ForwardOpenAI })
 	Register("siliconflow", func() Executor { return ForwardOpenAI })
-	Register("cloudflare-ai", func() Executor { return ForwardOpenAI })
+	Register("cloudflare-ai", func() Executor { return ForwardCloudflareAI })
 	Register("blackbox", func() Executor { return ForwardOpenAI })
 	Register("featherless", func() Executor { return ForwardOpenAI })
 	Register("hyperbolic", func() Executor { return ForwardOpenAI })
