@@ -40,9 +40,57 @@ func setPoolsideModel(body []byte) ([]byte, bool) {
 	return out, true
 }
 
+// stripPoolsideReasoningCollision drops the `reasoning` key from any message
+// that also carries `reasoning_content`. Poolside's upstream deserializer
+// maps `reasoning` onto the `reasoning_content` field, so a message carrying
+// both — an OpenAI client echoing back streamed reasoning_content alongside
+// its own `reasoning` field, as Hermes does on later turns of a session —
+// is rejected with HTTP 400 "duplicate field `reasoning_content`".
+// Messages with only one of the two keys pass through untouched, so
+// currently-working payloads are byte-identical.
+func stripPoolsideReasoningCollision(body []byte) ([]byte, bool) {
+	var env map[string]any
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, false
+	}
+	msgs, ok := env["messages"].([]any)
+	if !ok {
+		return nil, false
+	}
+	changed := false
+	for _, msg := range msgs {
+		m, ok := msg.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasRC := m["reasoning_content"]; hasRC {
+			if _, hasR := m["reasoning"]; hasR {
+				delete(m, "reasoning")
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	out, err := json.Marshal(env)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
 // ForwardPoolside is ForwardOpenAI with the org-scoped model id fix.
 func ForwardPoolside(w http.ResponseWriter, req *Request) error {
-	if body, ok := setPoolsideModel(req.Body); ok {
+	changed := false
+	body := req.Body
+	if fixed, ok := setPoolsideModel(body); ok {
+		body, changed = fixed, true
+	}
+	if stripped, ok := stripPoolsideReasoningCollision(body); ok {
+		body, changed = stripped, true
+	}
+	if changed {
 		c := *req
 		c.Body = body
 		req = &c
