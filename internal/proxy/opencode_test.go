@@ -1,8 +1,10 @@
 package proxy_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"9router/proxy/internal/proxy"
 )
@@ -228,5 +230,76 @@ func TestExpireStableOpenCodeSession(t *testing.T) {
 
 	if proxy.ExpireStableOpenCodeSession("expire-unknown", id) {
 		t.Error("expiry of an unknown key reported success")
+	}
+}
+
+// decodeOpenCodeSessionPrefix decodes the 12-hex time half of a translated
+// session id: the gate reads ~(ts_ms<<12|counter), so inverting the 48-bit
+// prefix recovers the mint millisecond modulo 2^36 (the prefix holds only
+// the low 36 bits of the timestamp) and the counter.
+func decodeOpenCodeSessionPrefix(t *testing.T, id string) (timeMsMod, counter uint64) {
+	t.Helper()
+	if len(id) != 30 || !strings.HasPrefix(id, "ses_") {
+		t.Fatalf("not a translated session id: %q", id)
+	}
+	raw, err := strconv.ParseUint(id[4:16], 16, 48)
+	if err != nil {
+		t.Fatalf("prefix of %q is not hex: %v", id, err)
+	}
+	value := ^raw & ((uint64(1) << 48) - 1)
+	return (value >> 12) & ((uint64(1) << 36) - 1), value & 0xFFF
+}
+
+// The translated id's clock must be current (decolua/9router#5222): upstream
+// decodes the prefix and rejects future or ~60d-stale sessions with 429.
+// The comparison is modulo 2^36, the width of the encoded timestamp field.
+func TestTranslateOpenCodeSessionIDCurrentClock(t *testing.T) {
+	const mod = uint64(1) << 36
+	inputs := []string{
+		"oneshot-0123456789abcdef",
+		"550e8400-e29b-41d4-a716-446655440001",
+		"hermes-gateway_3838:127274046162625",
+		"ses_000000000002ObbCKcHUQYZR2I",
+	}
+	for _, in := range inputs {
+		before := time.Now().UnixMilli()
+		got := proxy.TranslateOpenCodeSessionID(in, "")
+		after := time.Now().UnixMilli()
+		if !proxy.IsCanonicalOpenCodeSession(got) {
+			t.Errorf("TranslateOpenCodeSessionID(%q) = %q, not canonical", in, got)
+		}
+		ms, counter := decodeOpenCodeSessionPrefix(t, got)
+		// Modular distance from the mint window: a correct mint lands
+		// within [before, after] (a few ms); anything else is either far
+		// ahead or far behind modulo the 2^36 ms cycle.
+		diff := (ms - uint64(before)%mod) % mod
+		if diff > 5000 && diff < mod-5000 {
+			t.Errorf("TranslateOpenCodeSessionID(%q) mint time %d (mod 2^36) outside [%d, %d]", in, ms, uint64(before)%mod, uint64(after)%mod)
+		}
+		if counter != 1 {
+			t.Errorf("TranslateOpenCodeSessionID(%q) counter = %d, want 1", in, counter)
+		}
+	}
+}
+
+// The memo (decolua/9router#5222) keeps one stable id per (clientTool,
+// sessionId) within its TTL and isolates different keys from each other.
+func TestTranslateOpenCodeSessionIDMemoStabilityAndIsolation(t *testing.T) {
+	first := proxy.TranslateOpenCodeSessionID("conv-alpha", "")
+	if again := proxy.TranslateOpenCodeSessionID("conv-alpha", ""); again != first {
+		t.Errorf("same input minted two sessions: %q then %q", first, again)
+	}
+	if otherTool := proxy.TranslateOpenCodeSessionID("conv-alpha", "claude-code"); otherTool == first {
+		t.Errorf("different clientTool shares one session: %q", first)
+	}
+	if other := proxy.TranslateOpenCodeSessionID("conv-beta", ""); other == first {
+		t.Errorf("different sessionIds share one session: %q", first)
+	}
+}
+
+func TestTranslateOpenCodeSessionIDCanonicalPassthrough(t *testing.T) {
+	id := proxy.GenerateOpenCodeSessionID()
+	if got := proxy.TranslateOpenCodeSessionID(id, ""); got != id {
+		t.Errorf("canonical session was re-encoded: %q -> %q", id, got)
 	}
 }

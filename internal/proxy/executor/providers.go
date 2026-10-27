@@ -760,6 +760,15 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 			return fmt.Errorf("normalize muse-spark body: %w", err)
 		}
 
+		// Same <env> requirement on the Responses shape (instructions).
+		var respMap map[string]any
+		if err := json.Unmarshal(transformedBody, &respMap); err == nil {
+			ensureOpenCodeEnvMarker(respMap)
+			if b, err := marshalStable(respMap); err == nil {
+				transformedBody = b
+			}
+		}
+
 		// The free-tier gate fingerprints the lowercase tool quartet; capitalised
 		// variants from Claude Code CLI are renamed here and restored on the
 		// response (translator.ConcealFingerprintTools).
@@ -843,6 +852,9 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		if v, ok := reqMap["reasoning_effort"].(string); ok && v == "auto" {
 			delete(reqMap, "reasoning_effort")
 		}
+		// The free-tier gate requires the CLI <env> marker in the
+		// effective system prompt (decolua/9router#5218, #5222).
+		ensureOpenCodeEnvMarker(reqMap)
 		// Deterministic marshaling keeps the serialized request prefix
 		// stable across turns, which DeepSeek's prefix prompt cache
 		// requires; json/v2 randomizes map member order by default.
@@ -1769,6 +1781,9 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 			reqMap["model"] = cleanModel
 		}
 		stripOpencodeGoResponseFormat(reqMap, cleanModel)
+		// The free-tier gate requires the CLI <env> marker in the
+		// effective system prompt (decolua/9router#5218, #5222).
+		ensureOpenCodeEnvMarker(reqMap)
 		if b, err := marshalStable(reqMap); err == nil {
 			body = b
 		}

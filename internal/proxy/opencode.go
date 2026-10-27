@@ -175,12 +175,42 @@ func GenerateOpenCodeRequestID() string {
 	return "msg_" + hex.EncodeToString(timeBytes[:]) + unstableRandomBase62(14)
 }
 
-// TranslateOpenCodeSessionID deterministically maps a downstream session id
-// onto one the upstream free tier accepts. A canonical id — ses_ shape plus
-// the descending time encoding the gate decodes — is forwarded verbatim;
-// anything else (a UUID, another gateway's session, a ses_ id carrying foreign
-// hex) is re-encoded into the descending layout with counter 1, so one
-// downstream conversation still maps to one stable upstream session.
+// opencodeTranslatedSessionTTL bounds reuse of a translated session id,
+// mirroring upstream decolua/9router#5222 (MEMORY_CONFIG.sessionTtlMs, 2 h).
+// A var so tests can shrink the window.
+var opencodeTranslatedSessionTTL = 2 * time.Hour
+
+// opencodeTranslatedSessionLimit bounds the translated-session memo: at the
+// limit the oldest key is evicted. Expiry and eviction are lazy (checked on
+// read/insert), so no background goroutine runs for this cache.
+const opencodeTranslatedSessionLimit = 5000
+
+var (
+	opencodeTranslatedMu       sync.Mutex
+	opencodeTranslatedSessions = make(map[string]opencodeTranslatedEntry)
+	opencodeTranslatedOrder    []string
+)
+
+type opencodeTranslatedEntry struct {
+	id     string
+	minted time.Time
+}
+
+// TranslateOpenCodeSessionID maps a downstream session id onto one the
+// upstream free tier accepts. A canonical id — ses_ shape plus the descending
+// time encoding the gate decodes — is forwarded verbatim; anything else (a
+// UUID, another gateway's session, a ses_ id carrying foreign hex) is minted
+// into the descending layout with the CURRENT clock and counter 1, and
+// memoized per (clientTool, sessionId) for opencodeTranslatedSessionTTL, so
+// one downstream conversation keeps one stable upstream session.
+//
+// The clock MUST be current: upstream decodes the 12-hex prefix and rejects
+// sessions in the future or older than the free-tier window (measured
+// upstream at now back to ~-60d; decolua/9router#5222). The previous
+// implementation derived the timestamp from a SHA-256 digest of the seed, so
+// the decoded clock was uniform over 2^36 ms and most translated ids were
+// rejected with 429 FreeUsageLimitError — while clients that sent no session
+// (stable per-connection id minted with time.Now()) passed.
 func TranslateOpenCodeSessionID(sessionID, clientTool string) string {
 	trimmed := strings.TrimSpace(sessionID)
 	if IsCanonicalOpenCodeSession(trimmed) {
@@ -190,28 +220,33 @@ func TranslateOpenCodeSessionID(sessionID, clientTool string) string {
 	if tool == "" {
 		tool = "generic"
 	}
+	key := tool + "\x00" + trimmed
+	now := time.Now()
+	opencodeTranslatedMu.Lock()
+	defer opencodeTranslatedMu.Unlock()
+	if entry, ok := opencodeTranslatedSessions[key]; ok && now.Sub(entry.minted) < opencodeTranslatedSessionTTL {
+		return entry.id
+	}
 	h := sha256.New()
 	h.Write([]byte("opencode\x00" + tool + "\x00" + trimmed))
 	digest := h.Sum(nil)
-	// Keep the deterministic time component but pin the low 12 counter bits
-	// to the small value accepted by the OpenCode v2 free-tier gate.
-	timeValue := uint64(0)
-	for _, b := range digest[:5] {
-		timeValue = (timeValue << 8) | uint64(b)
-	}
-	timeValue &= (uint64(1) << 36) - 1
-	current := timeValue*0x1000 + 1
-	var prefix [6]byte
-	for i := range 6 {
-		prefix[i] = byte((^current >> (40 - 8*uint64(i))) & 0xff)
-	}
-	timeHex := hex.EncodeToString(prefix[:])
 	var sb strings.Builder
 	sb.Grow(14)
 	for i := 6; i < 20; i++ {
 		sb.WriteByte(base62Chars[int(digest[i])%62])
 	}
-	return "ses_" + timeHex + sb.String()
+	id := "ses_" + descendingTimeHex(uint64(now.UnixMilli()), 1) + sb.String()
+	_, exists := opencodeTranslatedSessions[key]
+	opencodeTranslatedSessions[key] = opencodeTranslatedEntry{id: id, minted: now}
+	if !exists {
+		opencodeTranslatedOrder = append(opencodeTranslatedOrder, key)
+		for len(opencodeTranslatedOrder) > opencodeTranslatedSessionLimit {
+			oldest := opencodeTranslatedOrder[0]
+			opencodeTranslatedOrder = opencodeTranslatedOrder[1:]
+			delete(opencodeTranslatedSessions, oldest)
+		}
+	}
+	return id
 }
 
 var opencodeUARegex = regexp.MustCompile(`(?i)^opencode/([a-z0-9-]+)/(\d+)\.(\d+)\.(\d+)/([a-z0-9-]+)$`)
