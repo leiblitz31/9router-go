@@ -780,7 +780,10 @@ var patternCapabilities = []patternCapability{
 	// thinkingBudget, and thinking cannot be disabled. The bridge publishes
 	// the bare id "gemini-argon" as well as the "gemini-4-argon" alias, so
 	// both spellings have to hit a row (upstream PATTERN_CAPABILITIES).
-	{pattern: "*gemini*argon*", caps: Capabilities{Vision: true, PDF: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
+	// Argon IS Gemini 4, so this row carries the gemini-4 windows too:
+	// without them the row shadows the *gemini-4* pattern below and
+	// gemini-4-argon resolves to a zero window (gemini4_argon_test.go).
+	{pattern: "*gemini*argon*", caps: Capabilities{Vision: true, PDF: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false), ContextWindow: 1048576, MaxOutput: 65536}},
 	{pattern: "*gemini-4*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false), ContextWindow: 1048576, MaxOutput: 65536}},
 	{pattern: "*gemini-3.8*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-3.7*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},

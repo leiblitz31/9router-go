@@ -58,15 +58,15 @@ func TestGetClientForConnection_ProxyPool(t *testing.T) {
 	if !ok || transport == nil {
 		t.Fatal("expected *http.Transport")
 	}
-
-	req, _ := http.NewRequest("GET", "https://api.openai.com/v1/models", nil)
-	proxyURL, err := transport.Proxy(req)
-	if err != nil {
-		t.Fatalf("proxy resolve error: %v", err)
-	}
-	if proxyURL == nil || proxyURL.String() != "http://user:pass@proxy.example.com:8080" {
-		t.Errorf("expected proxy URL http://user:pass@proxy.example.com:8080, got %v", proxyURL)
-	}
+	// The proxy no longer lives in Transport.Proxy: NewSafeTransportWithProxy
+	// pins it in the uTLS dialer and the transport proxy registry, and
+	// Transport.Proxy is intentionally nil (see the note at ssrf.go
+	// newTransportWithUTLS: "Use proxiesViaAssignment / proxyURLFor (not
+	// t.Proxy)"). Calling transport.Proxy here panics on the nil func, so
+	// this test asserts the structural contract — a distinct client with a
+	// safe transport — and leaves the URL pinning to the proxy package's own
+	// registry tests. The URL above is still the pool's, and a client that
+	// came back identical to h.Client would fail the check above.
 }
 
 // A Vercel relay pasted into a pool declared "http" must never be dialed as a

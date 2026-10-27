@@ -67,11 +67,23 @@ var pendingUpstreamDivergences = map[string]map[string][]string{
 		"space-bunny-free": {"none", "minimal", "low", "medium", "high", "xhigh"},
 		"longcat-2.0":      {"none", "minimal", "low", "medium", "high", "xhigh"},
 	},
+	// The fork's own OpenCode free-lane rows answer wider level sets than
+	// the captured fixture: the nemotron rows carry no format, so they
+	// resolve to the openai default, and mimo-v2.6-flash-free keeps its
+	// deepseek-format row (#646 full reasoning support). These six
+	// divergences pre-date the exp.11 merge (identical against the v0.5.99
+	// fixture); they are Go-intentional, not pending.
 	"opencode-zen": {
-		"big-pickle": {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"big-pickle":                  {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"mimo-v2.6-flash-free":        {"none", "low", "medium", "high", "xhigh"},
+		"nemotron-3-ultra-free":       {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"nemotron-3.5-lightning-free": {"none", "minimal", "low", "medium", "high", "xhigh"},
 	},
 	"ocz": {
-		"big-pickle": {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"big-pickle":                  {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"mimo-v2.6-flash-free":        {"none", "low", "medium", "high", "xhigh"},
+		"nemotron-3-ultra-free":       {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"nemotron-3.5-lightning-free": {"none", "minimal", "low", "medium", "high", "xhigh"},
 	},
 	// gemini-web: the Go override (providerCapabilities["gemini-web"]) narrows
 	// the site surface deliberately — the composer has no thinking toggle the
