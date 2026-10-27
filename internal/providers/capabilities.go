@@ -996,6 +996,23 @@ var providerTokenLimits = map[string]map[string][2]int{
 		"deepseek-v4-pro":     {1000000, 393216},
 		"deepseek-v4.1-flash": {1000000, 393216},
 	},
+	// Kilo Code serves the Nemotron 3.5/3 free tier with a 1M-token
+	// endpoint cap: the upstream error names it ("This endpoint's maximum
+	// context length is 1000000 tokens") and a 300k-token prompt is
+	// accepted, while the models.dev catalog still publishes 128000 for
+	// these ids. Declared under both key forms callers pass — the "kc"
+	// alias and the canonical "kilocode" — because the lookup does not
+	// resolve provider aliases itself.
+	"kilocode": {
+		"nemotron-3.5-super-vl:free":      {1000000, 4096},
+		"nemotron-3-ultra-550b-a55b:free": {1000000, 4096},
+		"nemotron-3.5-lightning:free":      {1000000, 4096},
+	},
+	"kc": {
+		"nemotron-3.5-super-vl:free":      {1000000, 4096},
+		"nemotron-3-ultra-550b-a55b:free": {1000000, 4096},
+		"nemotron-3.5-lightning:free":      {1000000, 4096},
+	},
 }
 
 // lookupProviderTokenLimits returns the limits a provider declares for a model,
