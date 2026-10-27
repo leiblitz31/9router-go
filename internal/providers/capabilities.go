@@ -1006,12 +1006,12 @@ var providerTokenLimits = map[string]map[string][2]int{
 	"kilocode": {
 		"nemotron-3.5-super-vl:free":      {1000000, 4096},
 		"nemotron-3-ultra-550b-a55b:free": {1000000, 4096},
-		"nemotron-3.5-lightning:free":      {1000000, 4096},
+		"nemotron-3.5-lightning:free":     {1000000, 4096},
 	},
 	"kc": {
 		"nemotron-3.5-super-vl:free":      {1000000, 4096},
 		"nemotron-3-ultra-550b-a55b:free": {1000000, 4096},
-		"nemotron-3.5-lightning:free":      {1000000, 4096},
+		"nemotron-3.5-lightning:free":     {1000000, 4096},
 	},
 }
 
