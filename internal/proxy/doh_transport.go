@@ -26,7 +26,17 @@ import (
 //     resolver, and the SSRF socket guard stays in force for every dial this
 //     transport makes (the proxy endpoint and any direct fallback alike).
 func NewSafeTransportWithDoH(resolverSpecs ...string) *http.Transport {
-	d := &utlsDialer{useEnvProxy: true, doh: newDoHResolver(resolverSpecs...)}
+	return NewSafeTransportWithDoHSpec(resolverSpecs, nil)
+}
+
+// NewSafeTransportWithDoHSpec is NewSafeTransportWithDoH with a custom
+// ClientHello spec factory for the uTLS handshake. A nil factory keeps the
+// default Chrome fingerprint. The factory must return a fresh spec per
+// handshake (see ClientHelloSpecFactory); it is how one lane — currently
+// only the OpenCode free lane — presents a different hello without
+// changing any other lane's transport.
+func NewSafeTransportWithDoHSpec(resolverSpecs []string, specFactory ClientHelloSpecFactory) *http.Transport {
+	d := &utlsDialer{useEnvProxy: true, doh: newDoHResolver(resolverSpecs...), specFactory: specFactory}
 	t := constants.DefaultHTTPTransportConfig.NewTransport()
 	t.DialContext = d.dialPlainContext
 	t.DialTLSContext = d.dialTLSContext

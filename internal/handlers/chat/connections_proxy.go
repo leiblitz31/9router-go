@@ -9,6 +9,7 @@ import (
 
 	"9router/proxy/internal/log"
 	internalproxy "9router/proxy/internal/proxy"
+	"9router/proxy/internal/proxy/executor"
 )
 
 // maxProxyClients caps rotating-proxy growth: each entry pins a Transport
@@ -47,14 +48,28 @@ func logProxyOnce(poolID, proxyURLStr, proxyType string) {
 }
 
 // GetClientForConnection returns an http.Client configured with ProxyPool transport if set.
-// A connection bound to a pool that cannot serve traffic gets an error instead of a
-// client: silently dropping the pool would send the request out from the real IP,
+// A connection bound to a pool that cannot serve traffic gets an error instead of
+// a client: silently dropping the pool would send the request out from the real IP,
 // which is the one thing the assignment exists to prevent.
+// Provider is unknown here (media callers resolve no provider), so the
+// provider-scoped transport variants are selected by passing "" — the
+// chat path passes the resolved provider instead.
 func (h *ChatHandler) GetClientForConnection(connData *ConnectionData) (*http.Client, error) {
-	return h.getClientForConnection(connData)
+	return h.getClientForConnection(connData, "")
 }
 
-func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Client, error) {
+// isOpencodeFreeLane reports whether provider is the OpenCode free lane
+// (canonical "opencode"; the "oc" alias resolves to it). Only the free lane
+// gets the Bun ClientHello on its DoH transport: the gate compares the JA4
+// cipher-list hash, and Chrome's list answers 429 while Bun's answers 200.
+// Zen/go lanes keep their existing transports (their direct path already
+// dials through the Bun stealth stack), and every other provider keeps
+// Chrome — the variant transport is cached under its own key, never shared.
+func isOpencodeFreeLane(provider string) bool {
+	return resolveProviderAlias(provider) == "opencode"
+}
+
+func (h *ChatHandler) getClientForConnection(connData *ConnectionData, provider string) (*http.Client, error) {
 	if connData == nil {
 		return h.Client, nil
 	}
@@ -170,11 +185,22 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 		if len(specs) == 0 {
 			specs = []string{proxyURLStr}
 		}
+		// The OpenCode free lane presents Bun's ClientHello on this
+		// transport (see isOpencodeFreeLane): the gate compares the JA4
+		// cipher-list hash, and Chrome's list is refused. The variant is
+		// cached under its own key so no other provider ever shares it.
+		bunHello := isOpencodeFreeLane(provider)
 		cacheKey := "doh\x00" + connData.ProxyPoolID + "\x00" + strings.Join(specs, "\x00")
+		if bunHello {
+			cacheKey = "doh\x00bun\x00" + connData.ProxyPoolID + "\x00" + strings.Join(specs, "\x00")
+		}
 		if strictProxy {
 			cacheKey = strictCachePrefix + cacheKey
 		}
 		return h.cachedProxyClient(cacheKey, strictProxy, func() *http.Transport {
+			if bunHello {
+				return internalproxy.NewSafeTransportWithDoHSpec(specs, executor.OpencodeBunSpecFactory())
+			}
 			return internalproxy.NewSafeTransportWithDoH(specs...)
 		}), nil
 	}

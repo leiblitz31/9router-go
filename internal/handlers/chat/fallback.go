@@ -740,7 +740,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	// A connection bound to a pool that cannot serve traffic must fail before
 	// anything is sent: the first request is the one that would otherwise
 	// escape from the real IP while the error only shows on the next attempt.
-	httpClient, clientErr := h.getClientForConnection(connData)
+	httpClient, clientErr := h.getClientForConnection(connData, provider)
 	if clientErr != nil {
 		// Marshalled, not concatenated: the pool name is user-supplied and a
 		// quote in it produced a body that no longer parsed as JSON, so both

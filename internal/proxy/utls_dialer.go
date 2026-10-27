@@ -86,6 +86,12 @@ type utlsDialer struct {
 	useEnvProxy bool
 	// insecureSkipVerify disables certificate verification (STRICT_SSL opt-out).
 	insecureSkipVerify bool
+	// specFactory, when set, builds a fresh ClientHelloSpec per handshake
+	// instead of the default Chrome (or UTLS_FINGERPRINT override) spec.
+	// It must return a fresh spec on every call: the dialer pins ALPN on a
+	// copy, but the spec's extension objects are otherwise shared with the
+	// handshake. Nil keeps the historical behaviour.
+	specFactory ClientHelloSpecFactory
 	// doh, when non-nil, resolves the target host over DNS-over-HTTPS and
 	// dials the resolved public IP instead of letting the system resolver
 	// answer (see doh_resolve.go). Only the TCP destination changes: the
@@ -94,6 +100,10 @@ type utlsDialer struct {
 	// re-resolve the host through the bypassed resolver.
 	doh *dohResolver
 }
+
+// ClientHelloSpecFactory builds one fresh ClientHelloSpec per handshake.
+// Callers that return a shared spec risk concurrent handshakes racing on it.
+type ClientHelloSpecFactory func() (*utls.ClientHelloSpec, error)
 
 // dialTLSContext implements http.Transport.DialTLSContext. It performs the
 // full dial itself — TCP (+ optional CONNECT tunnel) + uTLS handshake —
@@ -114,7 +124,7 @@ func (d *utlsDialer) dialTLSContext(ctx context.Context, network, addr string) (
 		ServerName:         host,
 		InsecureSkipVerify: d.insecureSkipVerify,
 	}, utls.HelloCustom)
-	spec, err := http1OnlySpec(defaultClientHelloID())
+	spec, err := d.helloSpec()
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("proxy.utlsDialer: fingerprint spec: %w", err)
@@ -323,6 +333,21 @@ func defaultClientHelloID() utls.ClientHelloID {
 	}
 }
 
+// helloSpec returns the ClientHelloSpec for one handshake: the factory's
+// fresh spec when one is configured, otherwise the default Chrome (or
+// UTLS_FINGERPRINT override) spec. Either way ALPN is pinned to http/1.1
+// (see pinALPNH1).
+func (d *utlsDialer) helloSpec() (*utls.ClientHelloSpec, error) {
+	if d.specFactory != nil {
+		spec, err := d.specFactory()
+		if err != nil {
+			return nil, err
+		}
+		return pinALPNH1(*spec), nil
+	}
+	return http1OnlySpec(defaultClientHelloID())
+}
+
 // http1OnlySpec returns the ClientHelloSpec for base with ALPN pinned to
 // http/1.1 only.
 //
@@ -336,16 +361,25 @@ func http1OnlySpec(base utls.ClientHelloID) (*utls.ClientHelloSpec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("UTLSIdToSpec: %w", err)
 	}
+	return pinALPNH1(spec), nil
+}
+
+// pinALPNH1 returns a copy of spec with ALPN pinned to http/1.1 only.
+// The input spec is never mutated: only the copy's Extensions slice header
+// changes, and the ALPN extension itself is copied before rewriting, so a
+// factory that hands out a shared spec stays safe to reuse.
+func pinALPNH1(spec utls.ClientHelloSpec) *utls.ClientHelloSpec {
+	cp := spec
 	exts := make([]utls.TLSExtension, len(spec.Extensions))
 	for i, ext := range spec.Extensions {
 		if alpn, ok := ext.(*utls.ALPNExtension); ok {
-			cp := *alpn
-			cp.AlpnProtocols = []string{"http/1.1"}
-			exts[i] = &cp
+			alpnCopy := *alpn
+			alpnCopy.AlpnProtocols = []string{"http/1.1"}
+			exts[i] = &alpnCopy
 		} else {
 			exts[i] = ext
 		}
 	}
-	spec.Extensions = exts
-	return &spec, nil
+	cp.Extensions = exts
+	return &cp
 }

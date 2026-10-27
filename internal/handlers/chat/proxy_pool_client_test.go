@@ -15,7 +15,7 @@ func TestGetClientForConnection_PoolsAndReusesClient(t *testing.T) {
 		ConnectionProxyURL:     "http://127.0.0.1:8888",
 	}
 
-	client1, err1 := h.getClientForConnection(connData)
+	client1, err1 := h.getClientForConnection(connData, "")
 	if err1 != nil {
 		t.Fatalf("first client: %v", err1)
 	}
@@ -23,7 +23,7 @@ func TestGetClientForConnection_PoolsAndReusesClient(t *testing.T) {
 		t.Fatal("expected non-nil client")
 	}
 
-	client2, err2 := h.getClientForConnection(connData)
+	client2, err2 := h.getClientForConnection(connData, "")
 	if err2 != nil {
 		t.Fatalf("second client: %v", err2)
 	}
