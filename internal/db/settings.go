@@ -7,10 +7,32 @@ import (
 )
 
 // ComboStrategy defines routing strategy, sticky limit, and judge model for a combo.
+// The Smart* fields configure the "smart" strategy (System One routing, #623).
 type ComboStrategy struct {
 	Strategy    string `json:"strategy,omitempty"`
 	StickyLimit int    `json:"stickyLimit,omitempty"`
 	JudgeModel  string `json:"judgeModel,omitempty"`
+	// SmartPolicy is "smart" (adaptive switch, default), "strict" (lock the
+	// first evaluated model for the session), "per-turn" (no stickiness), or
+	// "custom" (SmartCustomThreshold governs switching).
+	SmartPolicy string `json:"smartPolicy,omitempty"`
+	// SessionSticky nil means true; an explicit false forces per-turn.
+	SessionSticky *bool `json:"sessionSticky,omitempty"`
+	// ConfidenceThreshold is the 0-1 confidence a System One choice must
+	// reach before the session switches away from its pinned model.
+	ConfidenceThreshold *float64 `json:"confidenceThreshold,omitempty"`
+	// RouterModel overrides the System One model that evaluates the route
+	// (default oc/jev-1.13-free).
+	RouterModel string `json:"routerModel,omitempty"`
+	// RespectStoredOrder skips the rotation strategy and walks the combo's
+	// stored model list in order, so the ordering the operator arranged in the
+	// editor is the fallback chain the gateway tries. It does NOT skip
+	// ReorderByCapabilities: a request that needs vision must still float a
+	// capable model to the front, or the chain would offer a text-only model
+	// and fail. The "smart" strategy always orders the models itself (System
+	// One evaluation plus session stickiness) and keeps the combo's own order
+	// on every failure path, so this flag is a no-op there.
+	RespectStoredOrder bool `json:"respectStoredOrder,omitempty"`
 }
 
 // ProviderStrategy defines routing and proxy pool options for a specific
@@ -46,30 +68,30 @@ type CapacityAdapterEntry struct {
 
 // SettingsData represents token saver, combo routing, and general settings stored in the settings table.
 type SettingsData struct {
-	RTKEnabled                 bool                            `json:"rtkEnabled"`
-	RTKMode                    string                          `json:"rtkMode,omitempty"`
-	RTKIntensity               string                          `json:"rtkIntensity,omitempty"`
-	RTKMaxLines                int                             `json:"rtkMaxLines,omitempty"`
-	RTKMaxChars                int                             `json:"rtkMaxChars,omitempty"`
-	RTKDeduplicate             bool                            `json:"rtkDeduplicate,omitempty"`
-	RTKCategories              map[string]bool                 `json:"rtkCategories,omitempty"`
-	RTKFilters                 map[string]bool                 `json:"rtkFilters,omitempty"`
-	RTKRawRetention            string                          `json:"rtkRawRetention,omitempty"`
-	CavemanEnabled             bool                            `json:"cavemanEnabled"`
-	CavemanMode                string                          `json:"cavemanMode,omitempty"`
-	CavemanLevel               string                          `json:"cavemanLevel"`
-	CavemanAutoClarity         bool                            `json:"cavemanAutoClarity,omitempty"`
-	CavemanLanguage            string                          `json:"cavemanLanguage,omitempty"`
-	CavemanInputMode           bool                            `json:"cavemanInputMode,omitempty"`
-	CavemanPreserveKeywords    string                          `json:"cavemanPreserveKeywords,omitempty"`
-	PonytailEnabled            bool                            `json:"ponytailEnabled"`
-	PonytailLevel              string                          `json:"ponytailLevel"`
-	ADHDEnabled                bool                            `json:"adhdEnabled"`
-	ADHDLevel                  string                          `json:"adhdLevel"`
-	SystemPromptEnabled        bool                            `json:"systemPromptEnabled"`
-	SystemPromptPrefix         string                          `json:"systemPromptPrefix,omitempty"`
-	SystemPromptSuffix         string                          `json:"systemPromptSuffix,omitempty"`
-	HeadroomUrl                string                          `json:"headroomUrl"`
+	RTKEnabled              bool            `json:"rtkEnabled"`
+	RTKMode                 string          `json:"rtkMode,omitempty"`
+	RTKIntensity            string          `json:"rtkIntensity,omitempty"`
+	RTKMaxLines             int             `json:"rtkMaxLines,omitempty"`
+	RTKMaxChars             int             `json:"rtkMaxChars,omitempty"`
+	RTKDeduplicate          bool            `json:"rtkDeduplicate,omitempty"`
+	RTKCategories           map[string]bool `json:"rtkCategories,omitempty"`
+	RTKFilters              map[string]bool `json:"rtkFilters,omitempty"`
+	RTKRawRetention         string          `json:"rtkRawRetention,omitempty"`
+	CavemanEnabled          bool            `json:"cavemanEnabled"`
+	CavemanMode             string          `json:"cavemanMode,omitempty"`
+	CavemanLevel            string          `json:"cavemanLevel"`
+	CavemanAutoClarity      bool            `json:"cavemanAutoClarity,omitempty"`
+	CavemanLanguage         string          `json:"cavemanLanguage,omitempty"`
+	CavemanInputMode        bool            `json:"cavemanInputMode,omitempty"`
+	CavemanPreserveKeywords string          `json:"cavemanPreserveKeywords,omitempty"`
+	PonytailEnabled         bool            `json:"ponytailEnabled"`
+	PonytailLevel           string          `json:"ponytailLevel"`
+	ADHDEnabled             bool            `json:"adhdEnabled"`
+	ADHDLevel               string          `json:"adhdLevel"`
+	SystemPromptEnabled     bool            `json:"systemPromptEnabled"`
+	SystemPromptPrefix      string          `json:"systemPromptPrefix,omitempty"`
+	SystemPromptSuffix      string          `json:"systemPromptSuffix,omitempty"`
+	HeadroomUrl             string          `json:"headroomUrl"`
 	// HeadroomEnabled is the master switch for in-flight compression. It is
 	// separate from HeadroomUrl because the URL has a default the panel fills
 	// in, so "a URL exists" cannot stand in for "the operator turned this on".
@@ -115,8 +137,8 @@ func DefaultSettings() *SettingsData {
 		RTKEnabled:     true,
 		RTKMode:        "simple",
 		RTKIntensity:   "standard",
-		RTKMaxLines:    100,
-		RTKMaxChars:    8000,
+		RTKMaxLines:    250,
+		RTKMaxChars:    10 * 1024 * 1024,
 		RTKDeduplicate: true,
 		RTKCategories: map[string]bool{
 			"git":     true,
@@ -334,11 +356,26 @@ func (r *Repo) GetSettings() (*SettingsData, error) {
 					sticky = int(sl)
 				}
 				judge := handlerutil.GetString(vm, "judgeModel")
-				s.ComboStrategies[k] = ComboStrategy{
+				entry := ComboStrategy{
 					Strategy:    strat,
 					StickyLimit: sticky,
 					JudgeModel:  judge,
 				}
+				entry.SmartPolicy = handlerutil.GetString(vm, "smartPolicy")
+				if ss, ok := vm["sessionSticky"].(bool); ok {
+					entry.SessionSticky = &ss
+				}
+				if ct, ok := vm["confidenceThreshold"].(float64); ok && ct > 0 {
+					entry.ConfidenceThreshold = &ct
+				}
+				entry.RouterModel = handlerutil.GetString(vm, "routerModel")
+				// An absent flag reads as false, which is the behaviour every
+				// combo had before the flag existed: rotation stays on unless
+				// the operator turned it off for this combo.
+				if rso, ok := vm["respectStoredOrder"].(bool); ok {
+					entry.RespectStoredOrder = rso
+				}
+				s.ComboStrategies[k] = entry
 			}
 		}
 	}

@@ -12,6 +12,10 @@ import (
 type committedResponseWriter struct {
 	http.ResponseWriter
 	committed int32 // atomic: 1 if headers have been sent
+	// stream records that the client asked for an event stream, so a terminal
+	// error written before any byte went out can be framed as SSE instead of a
+	// bare JSON document the client cannot split into events.
+	stream bool
 }
 
 func newCommittedResponseWriter(w http.ResponseWriter) *committedResponseWriter {

@@ -240,7 +240,7 @@ func (h *ChatHandler) handleAccountFallback(
 			// Classify error to get dynamic cooldown; provider-scoped rules
 			// key off the canonical provider the request routed to.
 			classification := providers.ClassifyErrorForProvider(ue.StatusCode, errorText, currentBackoffLevel, provider)
-			cooldownSec := retryableCooldownSec(ue.StatusCode, time.Duration(classification.CooldownMs)*time.Millisecond, ue)
+			cooldownSec := retryableCooldownSec(ue.StatusCode, time.Duration(classification.CooldownMs)*time.Millisecond, ue, provider)
 			errMsg := errorText
 			if errMsg == "" {
 				errMsg = fmt.Sprintf("%d upstream error", ue.StatusCode)
@@ -663,6 +663,26 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		log.Debug("fallback", "deduped duplicate tool names", "provider", provider, "model", model)
 		pipedBody = deduped
 	}
+	// DeepSeek (and Kimi) thinking mode requires every assistant message echoed
+	// back with a reasoning_content field whenever the request declares tools;
+	// OpenAI-shaped clients drop it when replaying history, and the API answers
+	// 400 ("The reasoning_content in the thinking mode must be passed back to
+	// the API") without it. A placeholder satisfies the validator; reasoning the
+	// client really sent is preserved. Port of upstream
+	// utils/reasoningContentInjector.js, run at the same last-point-before-
+	// dispatch stage as the tool collapse above. Internal provider/model rules
+	// decide applicability (any provider serving a deepseek/kimi model id), so
+	// the call itself is unconditional on non-Claude lanes.
+	if !upstreamClaude {
+		pipedBody = executor.InjectReasoningContent(pipedBody, provider)
+		if provider == "deepseek" {
+			// DeepSeek V4 models think by default and reject required/named
+			// tool_choice while thinking is on ("Thinking mode does not
+			// support this tool_choice"); downgrade the pin to auto so the
+			// turn is served instead of failing with 400.
+			pipedBody = executor.NormalizeDeepSeekThinkingToolChoice(pipedBody)
+		}
+	}
 
 	// Fit tool names exceeding MaxToolNameLength (64 chars) to prevent upstream HTTP 400.
 	fittedBody, fittedToolMap := translator.FitToolNames(pipedBody)
@@ -868,6 +888,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 			execReq.Leases = h.Repo
 		}
 		fwdErr = exec(w, execReq)
+		execReq.Release()
 	} else if providerCfg.IsGeminiNative() {
 		fwdErr = h.forwardGeminiNativeRequest(ctx, w, provider, providerCfg, apiKey, connectionID, pipedBody, isStream, translateResponse, metrics, httpClient)
 	} else {
@@ -914,6 +935,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 					retryReq.Leases = h.Repo
 				}
 				fwdErr = exec(w, retryReq)
+				retryReq.Release()
 			} else if providerCfg.IsGeminiNative() {
 				fwdErr = h.forwardGeminiNativeRequest(ctx, w, provider, providerCfg, apiKey, connectionID, pipedBody, isStream, translateResponse, metrics, httpClient)
 			} else {
@@ -1046,6 +1068,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		}
 		logInfo.ConnName, logInfo.ConnEmail = identityNames(h.connIdentityKVOr(f, connectionID))
 		h.logUsage(ctx, logInfo, usage, latencyMs, body, metrics)
+		metrics.ResponseBuf.Reset()
 		fwdErr = nil
 		return nil
 	}
@@ -1107,6 +1130,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		body,
 		metrics,
 	)
+	metrics.ResponseBuf.Reset()
 	if isClientCanceled(ctx, fwdErr) {
 		log.Info("fallback", "client canceled request", append([]any{
 			"provider", provider, "model", model,

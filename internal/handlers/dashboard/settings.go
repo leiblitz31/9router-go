@@ -122,10 +122,20 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
+	// White-label branding is rendered by the sidebar, so the stored shape is
+	// normalized here the same way the sidebar ids are (whitelabel.go).
+	applyWhitelabelUpdate(updates)
+	// Clearing appLogoUrl removes the uploaded file with it. The previous value
+	// is read before the write so the path is known, and the file is removed
+	// only after the write succeeds: a failed write must leave the stored logo
+	// and its file in agreement, not one pointing at a deleted asset.
+	previousLogo, clearLogo := logoClearedByUpdate(h, updates)
 	if err := h.Repo.UpdateSettingsRaw(updates); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if clearLogo {
+		removeUploadedLogo(previousLogo)
 	}
 
 	if h.TokenSaver != nil {
@@ -414,6 +424,7 @@ func sanitizeSettings(raw map[string]any) map[string]any {
 	}
 	sanitizeNavVisibility(out)
 	sanitizeDisplayCurrency(out)
+	sanitizeWhitelabel(out)
 	out["hasPassword"] = hasPassword
 	return out
 }

@@ -35,6 +35,7 @@
   import Toasts from './lib/ui/Toasts.svelte'
   import TerminalView from './components/TerminalView.svelte'
   import TokenSaverView from './components/TokenSaverView.svelte'
+  import JailbreakView from './components/JailbreakView.svelte'
   import TopBar from './components/TopBar.svelte'
   import { parseMediaProvider, parseProviderId, pathToTab, providerPath, mediaProviderPath, TAB_ROUTES, type ActiveTab, type MediaProviderRoute } from './lib/router'
   import { PROVIDER_CATALOG } from './lib/providers'
@@ -42,6 +43,7 @@
   import { isNavHidden, normalizeHiddenNav, normalizeNavOrder } from './lib/nav'
   import { setHiddenNavEntries } from './lib/navVisibility.svelte'
   import { setDisplayCurrency } from './lib/currency.svelte'
+  import { applyAnimationLevel } from './lib/displayPrefs'
 
   let activeTab = $state<ActiveTab>(
     typeof window !== 'undefined' ? pathToTab(window.location.pathname) : 'endpoint'
@@ -186,6 +188,7 @@
   }
 
   onMount(() => {
+    applyAnimationLevel()
     const unsubscribeUnauthorized = onUnauthorized(() => {
       isAuthenticatedState = false
       requireLogin = true
@@ -293,6 +296,7 @@
       description: 'Encrypt provider credentials at rest, and scan prompts for personal data and injection attempts before they leave the gateway',
     },
     plans: { title: 'Plans', description: 'Per-key quota plans and policy resolution' },
+    jailbreak: { title: 'Persona', description: 'Per-model system-prompt injection and Gemini safety bypass' },
   }
 
   function handleOpenNewCombo() {
@@ -357,6 +361,8 @@
         bind:version={systemVersion}
         hiddenNav={hiddenNav}
         navOrder={navOrder}
+        brandName={settings.appName || ''}
+        brandLogo={settings.appLogoUrl || ''}
       />
     </div>
 
@@ -602,6 +608,8 @@
               <SecurityPanel />
             {:else if activeTab === 'plans'}
               <PlansView />
+            {:else if activeTab === 'jailbreak'}
+              <JailbreakView />
             {/if}
           {/if}
         </div>

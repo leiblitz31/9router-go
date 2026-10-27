@@ -36,6 +36,19 @@ const TransientCooldownMs = 30 * 1000 // 30 seconds
 const (
 	cooldownLong  = 2 * 60 * 1000 // 2 minutes
 	cooldownShort = 5 * 1000      // 5 seconds
+
+	// cooldownBannedAccount parks a deepseek-web account whose credential the
+	// site refuses (40012 USER_IS_BANNED). The ban names the account, not a
+	// model and not a transient condition: the generic 2-minute 403 rule
+	// would re-pick the punished account every two minutes, and each attempt
+	// is another request the site is actively penalizing.
+	cooldownBannedAccount = 24 * 60 * 60 * 1000
+
+	// cooldownAddressRefused is the pause for a deepseek-web address-level
+	// refusal (40029 IP_ACCESS_RESTRICTED). The account is fine; the egress
+	// is not, so the account waits out a short window instead of absorbing
+	// every turn the same address is refused on.
+	cooldownAddressRefused = 30 * 60 * 1000
 )
 
 // ErrorRules is the ordered list of error classification rules, matching Next.js ERROR_RULES.
@@ -48,6 +61,13 @@ var ErrorRules = []ErrorRule{
 	// zero cooldown while its backoff level never moves.
 	{Provider: "codebuddy-intl", Text: "request illegal", Backoff: true},
 	{Provider: "codebuddy-intl", Text: "conversation id missing", Backoff: true},
+	// DeepSeek web account-level refusals both arrive as 403, and they are
+	// not the same verdict. A ban ("refused this account") is the account
+	// itself; an address refusal ("refused this address") is the egress, and
+	// the account should be tried from another address rather than parked
+	// forever. The generic 403 rule cannot tell them apart.
+	{Provider: "deepseek-web", Text: "refused this account", CooldownMs: cooldownBannedAccount},
+	{Provider: "deepseek-web", Text: "refused this address", CooldownMs: cooldownAddressRefused},
 	{Text: "no credentials", CooldownMs: cooldownLong},
 	{Text: "request not allowed", CooldownMs: cooldownShort},
 	{Text: "improperly formed request", CooldownMs: cooldownLong},

@@ -84,3 +84,30 @@ func TestClassifyError_RequestScoped4xxNoFallback(t *testing.T) {
 		t.Errorf("expected fallback for 404, got %+v", cls)
 	}
 }
+
+func TestClassifyDeepSeekWebAccountRefusals(t *testing.T) {
+	// A ban names the account, so it parks it far longer than the generic
+	// 2-minute 403 rule would.
+	ban := ClassifyErrorForProvider(http.StatusForbidden, "deepseek-web: the upstream refused this account: user is banned", 0, "deepseek-web")
+	if !ban.ShouldFallback {
+		t.Error("a banned account must fall back")
+	}
+	if ban.CooldownMs != cooldownBannedAccount {
+		t.Errorf("ban cooldown = %dms, want %dms", ban.CooldownMs, cooldownBannedAccount)
+	}
+	// An address refusal is a different verdict: the account is fine, the
+	// egress is not, so the pause is short.
+	address := ClassifyErrorForProvider(http.StatusForbidden, "deepseek-web: the upstream refused this address: ip access restricted", 0, "deepseek-web")
+	if !address.ShouldFallback {
+		t.Error("an address refusal must fall back")
+	}
+	if address.CooldownMs != cooldownAddressRefused {
+		t.Errorf("address cooldown = %dms, want %dms", address.CooldownMs, cooldownAddressRefused)
+	}
+	// The rules are scoped to deepseek-web: another provider's 403 keeps the
+	// generic 2-minute rule.
+	other := ClassifyErrorForProvider(http.StatusForbidden, "the upstream refused this account", 0, "gemini")
+	if other.CooldownMs != cooldownLong {
+		t.Errorf("other provider 403 cooldown = %dms, want %dms", other.CooldownMs, cooldownLong)
+	}
+}

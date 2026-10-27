@@ -90,27 +90,29 @@ func TestRetryAfterWait_Extraction(t *testing.T) {
 // seconds, which is what kept it absorbing failing requests.
 func TestRetryableCooldownSec(t *testing.T) {
 	tests := []struct {
-		name   string
-		status int
-		base   time.Duration
-		header http.Header
-		body   string
-		want   int
+		name     string
+		status   int
+		base     time.Duration
+		header   http.Header
+		body     string
+		provider string
+		want     int
 	}{
-		{"429 without a wait falls back to the classifier", http.StatusTooManyRequests, 2 * time.Second, nil, rateLimitedBody, 2},
-		{"429 retryinfo window wins", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("120s"), 120},
-		{"429 header window wins", http.StatusTooManyRequests, 2 * time.Second, http.Header{"Retry-After": {"30"}}, rateLimitedBody, 30},
-		{"429 short window shortens the lock so the brief retry can run", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("1s"), 1},
-		{"429 nonsense window is capped", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("72h"), int(max429LockCooldown / time.Second)},
-		{"503 keeps its own backoff", http.StatusServiceUnavailable, 30 * time.Second, nil, rateLimitedBody, 30},
-		{"503 still reads the quota reset", http.StatusServiceUnavailable, 30 * time.Second, nil, `{"error":{"message":"Quota exceeded. Resets in 2m."}}`, 120},
+		{"429 without a wait falls back to the classifier", http.StatusTooManyRequests, 2 * time.Second, nil, rateLimitedBody, "", 2},
+		{"429 retryinfo window wins", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("120s"), "", 120},
+		{"429 header window wins", http.StatusTooManyRequests, 2 * time.Second, http.Header{"Retry-After": {"30"}}, rateLimitedBody, "", 30},
+		{"429 short window shortens the lock so the brief retry can run", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("1s"), "", 1},
+		{"429 nonsense window is capped", http.StatusTooManyRequests, 2 * time.Second, nil, retryInfoBody("72h"), "", int(maxResetCooldown / time.Second)},
+		{"deepseek-web mute is not clamped to two hours", http.StatusTooManyRequests, 2 * time.Second, http.Header{"Retry-After": {"259200"}}, rateLimitedBody, "deepseek-web", 259200},
+		{"503 keeps its own backoff", http.StatusServiceUnavailable, 30 * time.Second, nil, rateLimitedBody, "", 30},
+		{"503 still reads the quota reset", http.StatusServiceUnavailable, 30 * time.Second, nil, `{"error":{"message":"Quota exceeded. Resets in 2m."}}`, "", 120},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ue := &upstreamError{StatusCode: tt.status, Body: []byte(tt.body), Header: tt.header}
-			if got := retryableCooldownSec(tt.status, tt.base, ue); got != tt.want {
-				t.Errorf("retryableCooldownSec(%d, %v) = %ds, want %ds", tt.status, tt.base, got, tt.want)
+			if got := retryableCooldownSec(tt.status, tt.base, ue, tt.provider); got != tt.want {
+				t.Errorf("retryableCooldownSec(%d, %v, %s) = %ds, want %ds", tt.status, tt.base, tt.provider, got, tt.want)
 			}
 		})
 	}

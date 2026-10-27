@@ -418,8 +418,15 @@ func TestZenShapedBodyFollowsTheDestinationGate(t *testing.T) {
 		if !names["read"] || !names["shell"] {
 			t.Errorf(`a free request must carry the genuine "read" and "shell" fingerprint, got %v`, names)
 		}
-		if names["bash"] || names["glob"] || names["grep"] {
-			t.Errorf("a free request must not receive the legacy quartet, got %v", names)
+		if names["Bash"] || names["bash"] {
+			t.Errorf("a caller tool must not travel as a declaration, got %v", names)
+		}
+		if len(raw) != 12 {
+			t.Errorf("a free request must declare exactly the 12 genuine built-ins, got %d", len(raw))
+		}
+		system, _ := payload["messages"].([]any)[0].(map[string]any)["content"].(string)
+		if !strings.Contains(system, `"name":"Bash"`) {
+			t.Errorf("the caller Bash tool must be described in the system text: %s", out)
 		}
 	})
 
@@ -516,21 +523,21 @@ func TestForwardZenMessages_FreeLaneTakesTheStealthForwarder(t *testing.T) {
 	if probe.auth != "Bearer public" {
 		t.Errorf("expected the public credential, got %q", probe.auth)
 	}
-	if probe.body["system"] != "be brief" {
-		t.Errorf("a native Claude body must not be rewritten, got %v", probe.body)
+	system, _ := probe.body["system"].(string)
+	if !strings.HasPrefix(system, "You are an AI agent running in OpenCode, a coding agent harness.") {
+		t.Errorf("a native Claude system must gain the harness preamble, got %.80s", system)
+	}
+	if !strings.Contains(system, "be brief") || !strings.Contains(system, "No tools are available") {
+		t.Errorf("the caller system text and the placeholder note must both survive, got tail %.60s", system[len(system)-60:])
 	}
 	tools, _ := probe.body["tools"].([]any)
-	for _, name := range []string{"read", "shell"} {
-		found := false
-		for _, tool := range tools {
-			tm, _ := tool.(map[string]any)
-			fn, _ := tm["function"].(map[string]any)
-			if fn["name"] == name {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("missing v2 fingerprint tool %q: %v", name, probe.body)
+	if len(tools) != 12 {
+		t.Errorf("the messages lane must declare exactly the 12 genuine built-ins, got %d", len(tools))
+	}
+	for _, tool := range tools {
+		tm, _ := tool.(map[string]any)
+		if _, ok := tm["input_schema"]; !ok {
+			t.Errorf("claude-shaped tool lost input_schema: %v", tool)
 		}
 	}
 }

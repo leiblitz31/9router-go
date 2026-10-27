@@ -1228,3 +1228,16 @@ func (h *ChatHandler) modelAliasTargets() map[string]string {
 	}
 	return out
 }
+
+// BuildModelsListResult exposes the model-list builder to the dashboard, which
+// needs the same catalog the engine route serves but without the per-key
+// access filter: a dashboard session is not an engine API key, so the engine
+// route answers 401 to the SPA. mode is the caller's choice; the dashboard
+// uses ListModeCatalog to see every model the gateway can route.
+func (h *ChatHandler) BuildModelsListResult(ctx context.Context, mode ModelsListMode) ModelsListResult {
+	return h.buildModelsListResult(ctx, mode)
+}
+
+// ListModeCatalog is the mode that forces the full static catalog dump plus
+// custom models, regardless of how many connections are configured.
+const ListModeCatalog = modeListCatalog

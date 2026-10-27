@@ -3,6 +3,8 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -15,6 +17,29 @@ import (
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
 )
+
+// deepSeekFirstMessageFingerprint is the stable identity of a conversation
+// that sent no client session id: the account plus the conversation's first
+// user message. The system prompt never stands in for it — most clients lead
+// every conversation with the same system message, and keying on that would
+// put all of a client's conversations on one fallback key where each
+// divergent turn evicts the other's chain, leaving every turn a fresh session
+// carrying the full transcript. Identical first user messages still collide,
+// which is why the session store pairs this with an idle TTL and a tail check
+// that opens a fresh session the moment the prompts diverge.
+func deepSeekFirstMessageFingerprint(messages []deepSeekMessage) string {
+	for _, message := range messages {
+		if message.Role != "user" {
+			continue
+		}
+		h := sha256.New()
+		h.Write([]byte(message.Role))
+		h.Write([]byte{0})
+		h.Write([]byte(message.Content))
+		return hex.EncodeToString(h.Sum(nil))[:16]
+	}
+	return ""
+}
 
 // ForwardDeepSeekWeb routes a chat completion through chat.deepseek.com's web
 // API using a browser-login credential — the port of OmniRoute's
@@ -81,7 +106,7 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 		return deepSeekAuthFailure(err, userToken)
 	}
 
-	session, err := deepSeekAcquireSession(ctx, turn, accessToken, stealth, userToken, req, prompt)
+	session, err := deepSeekAcquireSession(ctx, turn, accessToken, stealth, userToken, deepSeekFirstMessageFingerprint(envelope.Messages), req, prompt)
 	if err != nil {
 		return deepSeekAuthFailure(err, userToken)
 	}
@@ -101,6 +126,40 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 		// draining the stream, not by asking the upstream not to send one.
 		Stream: true,
 	})
+	if err != nil && session.claim.reuse && ctx.Err() == nil && !isDeepSeekAuthError(err) {
+		// The pinned session failed at the HTTP level: the chat was deleted in
+		// the DeepSeek UI, the upstream session expired, or the connection
+		// dropped. None of that is the account being refused — the sibling
+		// implementation heals the same situation in-request by dropping the
+		// stale session and retrying once on a fresh one, and so does this:
+		// the fresh session carries the whole prompt, because nothing of the
+		// old thread can be assumed to exist. One retry only — a second
+		// failure is an upstream condition no third attempt of the same shape
+		// fixes, and every attempt is another request on this account. An
+		// auth failure never heals: the token was freshly exchanged and the
+		// upstream rejected it, so a new session would just add two more
+		// doomed calls to the account the site is refusing.
+		deepSeekAbandonSession(session, ctx, turn, userToken, accessToken)
+		deepSeekCloseSession(ctx, turn, userToken, accessToken, session.id)
+		if freshID, createErr := turn.createSession(ctx, accessToken); createErr == nil {
+			retry, retryErr := turn.completion(ctx, accessToken, deepSeekCompletionRequest{
+				ChatSessionID:   freshID,
+				ParentMessageID: nil,
+				ModelType:       options.modelType,
+				Prompt:          prompt,
+				RefFileIDs:      []string{},
+				ThinkingEnabled: options.thinking,
+				SearchEnabled:   options.search,
+				Stream:          true,
+			})
+			if retryErr == nil {
+				response, err = retry, nil
+				session.id = freshID
+				session.createdHere = true
+				session.claim = deepSeekSessionClaim{tail: prompt, pin: true}
+			}
+		}
+	}
 	if err != nil {
 		deepSeekAbandonSession(session, ctx, turn, userToken, accessToken)
 		return deepSeekAuthFailure(err, userToken)
@@ -200,13 +259,14 @@ func deepSeekAcquireSession(
 	accessToken string,
 	stealth deepSeekStealth,
 	userToken string,
+	firstMessageFingerprint string,
 	req *Request,
 	prompt string,
 ) (deepSeekSession, error) {
 	session := deepSeekSession{claim: deepSeekSessionClaim{tail: prompt}}
 
 	if stealth.persistSession {
-		session.key = deepSeekSessionKey(userToken, req.SessionID)
+		session.key = deepSeekSessionKey(userToken, req.SessionID, firstMessageFingerprint)
 		session.claim = deepSeekSessions.claim(session.key, prompt)
 	}
 

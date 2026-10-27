@@ -5,6 +5,7 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"net/http"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/dbtest"
 )
 
 func TestApplyComboStrategy_capacity(t *testing.T) {
@@ -789,17 +791,12 @@ func TestApplyCapacityAdapter_DoesNotFoldAdapterIntoComboRotation(t *testing.T) 
 		t.Fatalf("seed settings: %v", err)
 	}
 	h := NewChatHandler(db.NewRepo(database))
-	// A text-only model, so the vision pool is what makes the request
-	// servable. oc/space-bunny-free used to stand here, but upstream
-	// 4c58e7f3 gives it vision:true (models.dev), and once the combo's own
-	// model satisfies the requirement the adapter correctly stays out of it —
-	// that is the other subtest's case, not this one.
-	comboModels := []string{"opencode/big-pickle"}
+	comboModels := []string{"oc/jev-1.13-free"}
 
 	t.Run("vision turn is governed by the adapter strategy, not the combo's", func(t *testing.T) {
 		augmented, strategy, injected := h.applyCapacityAdapter(comboModels, map[string]bool{"vision": true}, "round-robin", "combo-wombo", "")
 
-		if !slices.Equal(augmented, []string{"ag/gemini-3.8-flash-high", "opencode/big-pickle"}) {
+		if !slices.Equal(augmented, []string{"ag/gemini-3.8-flash-high", "oc/jev-1.13-free"}) {
 			t.Fatalf("expected the vision adapter model prepended, got %v", augmented)
 		}
 		if !slices.Equal(injected, []string{"ag/gemini-3.8-flash-high"}) {
@@ -816,7 +813,7 @@ func TestApplyCapacityAdapter_DoesNotFoldAdapterIntoComboRotation(t *testing.T) 
 			if rotated[0] != "ag/gemini-3.8-flash-high" {
 				t.Fatalf("turn %d served by %s, want ag/gemini-3.8-flash-high", turn, rotated[0])
 			}
-			if rotated[len(rotated)-1] != "opencode/big-pickle" {
+			if rotated[len(rotated)-1] != "oc/jev-1.13-free" {
 				t.Fatalf("turn %d lost the combo fallback, got %v", turn, rotated)
 			}
 		}
@@ -825,7 +822,7 @@ func TestApplyCapacityAdapter_DoesNotFoldAdapterIntoComboRotation(t *testing.T) 
 	t.Run("text-only turn keeps the combo's own strategy and list", func(t *testing.T) {
 		augmented, strategy, injected := h.applyCapacityAdapter(comboModels, map[string]bool{"tools": true}, "round-robin", "combo-wombo", "")
 
-		if len(augmented) != 1 || augmented[0] != "opencode/big-pickle" {
+		if len(augmented) != 1 || augmented[0] != "oc/jev-1.13-free" {
 			t.Fatalf("expected an untouched list, got %v", augmented)
 		}
 		if injected != nil {
@@ -866,4 +863,69 @@ func TestCollectPanel_CancelAbortsStragglers(t *testing.T) {
 			t.Fatalf("straggler %d not aborted after timeout", i)
 		}
 	}
+}
+
+// comboRespectsStoredOrder reads the flag out of the combo's own strategy row.
+// The cases that matter are the ones a real install produces: a combo that
+// never had a strategy row, a settings read that fails, and an explicit false
+// — none of which may read as "respect the stored order", because that would
+// silently disable rotation for combos that never asked for it.
+func TestComboRespectsStoredOrder(t *testing.T) {
+	repo, cleanup := setupComboFlagRepo(t)
+	defer cleanup()
+
+	h := NewChatHandler(repo)
+	if h.comboRespectsStoredOrder("no-such-combo") {
+		t.Error("a combo with no strategy row must not respect the stored order")
+	}
+	if err := repo.UpdateSettingsRaw(map[string]any{
+		"comboStrategies": map[string]any{
+			"off":  map[string]any{"strategy": "round-robin"},
+			"on":   map[string]any{"strategy": "round-robin", "respectStoredOrder": true},
+			"also": map[string]any{"respectStoredOrder": true},
+		},
+	}); err != nil {
+		t.Fatalf("UpdateSettingsRaw: %v", err)
+	}
+	if h.comboRespectsStoredOrder("off") {
+		t.Error("respectStoredOrder absent must read as false")
+	}
+	if !h.comboRespectsStoredOrder("on") {
+		t.Error("respectStoredOrder true must read as true")
+	}
+	if !h.comboRespectsStoredOrder("also") {
+		t.Error("the flag alone, with no strategy, must still read as true")
+	}
+	// A handler with no repo cannot read settings, and must fail closed.
+	if NewChatHandler(nil).comboRespectsStoredOrder("on") {
+		t.Error("a nil repo must fail closed to false")
+	}
+	if h.comboRespectsStoredOrder("") {
+		t.Error("an empty combo name must read as false")
+	}
+}
+
+// setupComboFlagRepo opens a real database so the settings read exercises the
+// same code path production does.
+func setupComboFlagRepo(t *testing.T) (*db.Repo, func()) {
+	t.Helper()
+	tmpFile, err := os.CreateTemp("", "combo-flag-*.sqlite")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	tmpFile.Close()
+	database, err := db.OpenDatabase(tmpFile.Name())
+	if err != nil {
+		os.Remove(tmpFile.Name())
+		t.Fatalf("OpenDatabase: %v", err)
+	}
+	cleanup := func() {
+		_ = database.Close()
+		_ = os.Remove(tmpFile.Name())
+	}
+	if err := dbtest.CreateTables(database); err != nil {
+		cleanup()
+		t.Fatalf("CreateTables: %v", err)
+	}
+	return db.NewRepo(database), cleanup
 }

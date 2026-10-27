@@ -1102,6 +1102,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
   ],
   "cx": [
     {
+      "id": "transcribe",
+      "name": "Codex Transcription"
+    },
+    {
       "id": "gpt-6.1-sol",
       "name": "GPT 6.1 Sol",
       "upstreamModelId": "gpt-6.1-sol"
@@ -1602,6 +1606,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "DeepSeek V4 Flash"
     },
     {
+      "id": "moonshotai/Kimi-K3.1-Pro",
+      "name": "Kimi K3.1 Pro"
+    },
+    {
       "id": "moonshotai/Kimi-K2.7-Code",
       "name": "Kimi K2.7 Code"
     },
@@ -1797,6 +1805,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "deepseek-v4-flash-vision-exp",
       "name": "DeepSeek V4 Flash Vision (Exp)"
+    },
+    {
+      "id": "deepseek-flash",
+      "name": "DeepSeek Flash"
     },
     {
       "id": "deepseek-chat",
@@ -2647,6 +2659,22 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "grok-4.2",
       "name": "Grok 4.2 (4.20 Beta)"
+    },
+    {
+      "id": "grok-4.20",
+      "name": "Grok 4.20"
+    },
+    {
+      "id": "grok-4.20-beta",
+      "name": "Grok 4.20 Beta"
+    },
+    {
+      "id": "grok-image",
+      "name": "Grok Imagine Image"
+    },
+    {
+      "id": "grok-video",
+      "name": "Grok Imagine Video"
     }
   ],
   "groq": [
@@ -3983,6 +4011,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Kimi K3"
     },
     {
+      "id": "kimi-k3.1-pro",
+      "name": "Kimi K3.1 Pro"
+    },
+    {
       "id": "deepseek-v4-pro",
       "name": "DeepSeek V4 Pro"
     },
@@ -4863,6 +4895,14 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "id": "mmodel",
       "name": "MiniMax-M3"
     },
+    {
+      "id": "smodel",
+      "name": "Sonus"
+    },
+    {
+      "id": "cmodel",
+      "name": "Cantus"
+    },
   ],
   "qd": [
     {
@@ -4928,6 +4968,14 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "mmodel",
       "name": "MiniMax-M3"
+    },
+    {
+      "id": "smodel",
+      "name": "Sonus"
+    },
+    {
+      "id": "cmodel",
+      "name": "Cantus"
     }
   ],
   "recraft": [

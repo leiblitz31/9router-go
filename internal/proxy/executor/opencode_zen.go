@@ -271,6 +271,9 @@ func forwardZenChat(w http.ResponseWriter, req *Request, cleanModel, sourceForma
 	var zenToolNameMap map[string]string
 	if free {
 		body, zenToolNameMap = translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+		if req.IsStream {
+			w = NewOpenCodeExecuteBridgeWriter(w)
+		}
 	} else {
 		body, zenToolNameMap = translator.ConcealFingerprintTools(body)
 	}
@@ -326,6 +329,9 @@ func forwardZenChat(w http.ResponseWriter, req *Request, cleanModel, sourceForma
 	if converted, ok := sseToOpenAIJSON(data); ok {
 		data = converted
 	}
+	if free {
+		data = bridgeOpenCodeExecuteToolCallsJSON(data)
+	}
 	return jsonResponse(req.Ctx, w, bytes.NewReader(data), req.TranslateResp, req.ResponseBuf)
 }
 
@@ -376,6 +382,13 @@ func forwardZenResponses(w http.ResponseWriter, req *Request, cleanModel, source
 	cfg.StaticHeaders = zenHeaders(&cfg, zenHint, req.IsStream, free)
 
 	ctx := reqCtx(req)
+	if free && req.IsStream && !translator.IsResponsesClient(ctx) {
+		// A chat-completions client on the responses lane receives converted
+		// chat chunks, so the execute/CALL_TOOL bridge applies. A native
+		// Responses client gets the event stream passed through, where the
+		// bridge's line protocol does not apply.
+		w = NewOpenCodeExecuteBridgeWriter(w)
+	}
 	resp, err := forwardOpenCodeRotating(ctx, func() (*http.Response, error) {
 		if free {
 			return forwardOpencodeRequest(ctx, req.Client, &cfg, req.APIKey, body, req.IsStream)

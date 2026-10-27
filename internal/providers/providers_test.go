@@ -41,6 +41,23 @@ func TestKnownProviders_AuthSchemes(t *testing.T) {
 	}
 }
 
+func TestKnownProviders_PerplexityWebIsParked(t *testing.T) {
+	// Upstream 38a0c449 parks perplexity-web with serviceKinds: [] — no
+	// executor sits behind it, so it must stay out of the pickers while the
+	// cookie probe and any saved connection keep resolving. Hidden is that
+	// contract on this side: offered nowhere, reachable everywhere.
+	cfg := KnownProviders["perplexity-web"]
+	if !cfg.Hidden {
+		t.Error("perplexity-web expected Hidden=true (parked, upstream serviceKinds: [])")
+	}
+	if models := ProviderModels["perplexity-web"]; len(models) == 0 {
+		t.Error("perplexity-web expected its model catalog kept so stored connections still resolve")
+	}
+	if got := ResolveAlias("pw"); got != "perplexity-web" {
+		t.Errorf("ResolveAlias(pw) = %q, want perplexity-web", got)
+	}
+}
+
 func TestKnownProviders_NoAuthOverridesScheme(t *testing.T) {
 	// mimo-free has NoAuth=true and a DefaultAPIKey fallback.
 	cfg := KnownProviders["mimo-free"]
@@ -63,6 +80,21 @@ func TestKnownProviders_NoAuthOverridesScheme(t *testing.T) {
 	}
 	if got := ResolveAlias("mmf"); got != "mimo-free" {
 		t.Errorf("ResolveAlias(mmf) = %q, want mimo-free", got)
+	}
+}
+
+func TestKnownProviders_RequireClaudeToolType(t *testing.T) {
+	for _, p := range []string{"minimax", "minimax-cn", "minimax-code", "minimax-code-global"} {
+		cfg, ok := KnownProviders[p]
+		if !ok {
+			t.Fatalf("provider %s not found in KnownProviders", p)
+		}
+		if !cfg.RequireClaudeToolType {
+			t.Errorf("provider %s expected RequireClaudeToolType=true", p)
+		}
+	}
+	if KnownProviders["openai"].RequireClaudeToolType {
+		t.Error("provider openai expected RequireClaudeToolType=false")
 	}
 }
 
