@@ -135,9 +135,9 @@ func forwardOpenCode(ctx context.Context, send, sendDirect func() (*http.Respons
 // conversation: with a freshly minted session id and a fresh budget. When the
 // gate answers 429 FreeUsageLimitError on a router-minted stable session, the
 // same recovery applies — rotate() installs a new session on the request and
-// the replay goes out once on it. A client-supplied session travels as rotate
-// == nil: it identifies the caller's own conversation upstream and is never
-// swapped behind its back.
+// the replay goes out once on it. On a keyed lane rotate is always nil:
+// quota is accounted per key, so sessions are never swapped. On the free
+// lane the router owns the session, so rotation is always armed.
 //
 // Deliberately one rotation, like the refusal retry above: if the fresh
 // session also answers 429, the limit is not the session's (an egress-wide

@@ -109,8 +109,8 @@ func TestOpencodeStableSessionKey(t *testing.T) {
 		t.Errorf("free lane without a client session: got key %q", got)
 	}
 	withSession := &Request{ConnectionID: "conn-1", SessionID: "ses_client"}
-	if got := opencodeStableSessionKey(withSession, true); got != "" {
-		t.Errorf("a client session must never be rotated, got key %q", got)
+	if got := opencodeStableSessionKey(withSession, true); got != "opencode:conn:conn-1" {
+		t.Errorf("free lane ignores a client session, got key %q", got)
 	}
 	keyed := &Request{ConnectionID: "conn-1"}
 	if got := opencodeStableSessionKey(keyed, false); got != "" {
@@ -125,7 +125,7 @@ func TestOpencodeStableSessionKey(t *testing.T) {
 // yields no hook at all.
 func TestRotateOpencodeStableSession(t *testing.T) {
 	if rotateOpencodeStableSession("", "ses_x", func(string) {}) != nil {
-		t.Error("a client-supplied session must yield no rotation hook")
+		t.Error("an empty key must yield no rotation hook")
 	}
 
 	id := proxy.StableOpenCodeSessionID("rotate-test")
