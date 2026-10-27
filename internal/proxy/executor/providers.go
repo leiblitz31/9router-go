@@ -871,7 +871,8 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 
 	cfg := *req.Config
 	var targetURL string
-	if isRelayConfig(&cfg) {
+	isRelay := isRelayConfig(&cfg)
+	if isRelay {
 		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
 		cfg.StaticHeaders["x-relay-path"] = "/inference/openai/v1/chat/completions"
 		targetURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
@@ -891,8 +892,20 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		headers := proxy.BuildOpenCodeHeaders(rawHeaders, session, true)
 		return proxy.DoRequest(ctx, req.Client, "POST", targetURL, headers, b)
 	}
-	resp, toolNameMap, _, err := opencodeGateRequest(send, opencodeSessionHint(req, true), firstBody, firstMap,
+	hint := opencodeSessionHint(req, true)
+	resp, toolNameMap, sessionUsed, err := opencodeGateRequest(send, hint, firstBody, firstMap,
 		func() ([]byte, map[string]string) { return firstBody, firstMap })
+	status := -1
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	// Diagnostic only: one line per free-lane chat attempt so a failing
+	// agent-originated request can be diffed against a passing probe.
+	// Body content is never logged, only its SHA-256.
+	log.Info("ocdbg", "free chat attempt", "model", cleanModel, "conn", req.ConnectionID,
+		"clientSession", req.SessionID, "hint", hint, "session", sessionUsed,
+		"url", targetURL, "relay", isRelay, "bodyHash", opencodeDebugHash(firstBody),
+		"bodyLen", len(firstBody), "clientStream", req.IsStream, "status", status)
 	if err != nil {
 		return fmt.Errorf("ForwardOpencode: %w", err)
 	}
