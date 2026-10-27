@@ -14,8 +14,8 @@ import (
 
 const (
 	// DefaultOpenCodeUA is the official OpenCode fingerprint User-Agent.
-	// OpenCode v2 fingerprint required by the free-tier /inference/v1 API.
-	DefaultOpenCodeUA = "opencode/latest/2.0.29/cli"
+	// OpenCode v2 fingerprint required by the free-tier /inference/openai/v1 API.
+	DefaultOpenCodeUA = "opencode/latest/2.1.4/cli"
 
 	// DefaultOpenCodeV1UA is the pre-v2 identity kept by the keyed lanes
 	// (opencode-zen, opencode-go): upstream decolua/9router#4842 moves only

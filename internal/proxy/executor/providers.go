@@ -787,12 +787,12 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 			for k, v := range req.Config.StaticHeaders {
 				cfg.StaticHeaders[k] = v
 			}
-			cfg.StaticHeaders["x-relay-path"] = "/inference/v1/responses"
+			cfg.StaticHeaders["x-relay-path"] = "/inference/openai/v1/responses"
 			targetURL = strings.TrimRight(cfg.BaseURL, "/")
 		} else {
 			baseURL := strings.TrimRight(cfg.BaseURL, "/")
 			baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
-			targetURL = opencodeInferenceBase(baseURL) + "/responses"
+			targetURL = opencodeFreeInferenceBase(baseURL) + "/responses"
 		}
 		rawHeaders := cfg.StaticHeaders
 		ctx := req.Ctx
@@ -873,7 +873,7 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	var targetURL string
 	if isRelayConfig(&cfg) {
 		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
-		cfg.StaticHeaders["x-relay-path"] = "/inference/v1/chat/completions"
+		cfg.StaticHeaders["x-relay-path"] = "/inference/openai/v1/chat/completions"
 		targetURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
 	} else {
 		targetURL = opencodeChatURL(cfg.BaseURL)
@@ -923,7 +923,9 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 // gate's /inference/v1 prefix. Any host mirroring the zen layout follows the
 // same migration, so the rewrite keys off the prefix rather than the host. A
 // base with no zen prefix — a custom endpoint, or the registry default that
-// already points at /inference/v1 — is returned untouched.
+// already points at /inference/v1 — is returned untouched. This stays the
+// zen lane's mapping: only the keyless oc free lane moves to openai/v1
+// (opencodeFreeInferenceBase), never the keyed zen lane.
 func opencodeInferenceBase(base string) string {
 	base = strings.TrimRight(base, "/")
 	base = strings.TrimSuffix(base, "/chat/completions")
@@ -939,16 +941,37 @@ func opencodeInferenceBase(base string) string {
 	}
 }
 
+// opencodeFreeInferenceBase rewrites a base URL to the free tier's current
+// OpenAI-compatible gate prefix, /inference/openai/v1 (luqman-v1/9router-go
+// #724; azrinaldi/opencode-free-bridge routes its chat and responses lanes
+// there). The legacy /inference/v1 prefix is what the gate answers with
+// intermittent 429 FreeUsageLimitError, so the keyless oc lane maps both the
+// zen layout and the legacy prefix onto openai/v1. A base that already
+// points at openai/v1, or at anything else, is returned untouched.
+func opencodeFreeInferenceBase(base string) string {
+	base = strings.TrimRight(base, "/")
+	base = strings.TrimSuffix(base, "/chat/completions")
+	base = strings.TrimSuffix(base, "/messages")
+	base = strings.TrimSuffix(base, "/responses")
+	switch {
+	case strings.HasSuffix(base, "/zen/v1"):
+		return strings.TrimSuffix(base, "/zen/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/v1"):
+		return strings.TrimSuffix(base, "/inference/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/openai/v1"):
+		return base
+	default:
+		return base
+	}
+}
+
 func opencodeChatURL(base string) string {
 	base = strings.TrimRight(base, "/")
 	if !strings.HasSuffix(base, "/chat/completions") {
 		return base
 	}
 	trimmed := strings.TrimSuffix(base, "/chat/completions")
-	if strings.HasSuffix(trimmed, "/zen/v1") {
-		return strings.TrimSuffix(trimmed, "/zen/v1") + "/inference/v1/chat/completions"
-	}
-	return base
+	return opencodeFreeInferenceBase(trimmed) + "/chat/completions"
 }
 
 // isOpenCodeAutoToolChoiceModel ports the upstream forceAutoToolChoiceModels
