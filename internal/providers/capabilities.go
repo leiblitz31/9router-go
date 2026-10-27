@@ -195,7 +195,7 @@ type Capabilities struct {
 	// ThinkingCanDisable reports whether thinking can be turned off. It is a
 	// pointer because a plain bool cannot say "not specified": upstream's
 	// default is true, and a table entry that names a thinking format without
-	// this flag must still resolve to true. See canDisableThinking.
+	// this flag must still resolve to true. See CanDisableThinking.
 	ThinkingCanDisable *bool
 	// ThinkingRange is the {min, max} budget clamp for budget-based formats.
 	ThinkingRange *ThinkingRange
@@ -215,10 +215,10 @@ type ThinkingRange struct {
 	Max int `json:"max"`
 }
 
-// canDisableThinking resolves the tri-state ThinkingCanDisable flag: an unset
+// CanDisableThinking resolves the tri-state ThinkingCanDisable flag: an unset
 // entry means "not specified", which is upstream's default — thinking can be
 // switched off.
-func canDisableThinking(c Capabilities) bool {
+func (c Capabilities) CanDisableThinking() bool {
 	return c.ThinkingCanDisable == nil || *c.ThinkingCanDisable
 }
 
@@ -249,7 +249,7 @@ var modelCapabilities = map[string]Capabilities{
 	"claude-opus-5.5-thinking-agentic": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	// Opus 5.5 on Antigravity (upstream v0.5.99, a07ed95b): all five
 	// effort spellings, 1M window / 128K output. thinkingCanDisable:false is
-	// representable here — without it canDisableThinking defaults to true and
+	// representable here — without it CanDisableThinking defaults to true and
 	// the translator drops thinking on any turn that asked for no reasoning,
 	// which Anthropic answers with a 400 on the thinking.type field.
 	//
@@ -317,10 +317,11 @@ var modelCapabilities = map[string]Capabilities{
 	// window. Upstream decolua/9router#4656: z.ai's docs state that "GLM-5.3
 	// and GLM-5.3-FLASH no longer support disabling thinking (an error will
 	// occur if the thinking.type parameter is set to disabled)". Left unset,
-	// canDisableThinking reports true and the translator emits
+	// CanDisableThinking reports true and the translator emits
 	// enable_thinking:false on any turn that asked for no reasoning — z.ai
 	// answers 400 code 1210 "Invalid API parameter". It looked intermittent
 	// because only some turns ask.
+
 	"glm-5.3-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
 	// claude-fable-5 (no -1 suffix) is adaptive-only like fable-5-1; upstream
 	// capabilities.js only matches it through *claude*fable* -> claude-budget,
@@ -353,8 +354,10 @@ var modelCapabilities = map[string]Capabilities{
 	// pattern and lost its vision and 1M window.
 	"deepseek-v4-1-flash":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
 	"deepseek-flash":                  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
-	"muse-spark-1.2-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
-	"muse-spark-1.3-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	"muse-spark-1.2-contributor":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+	"muse-spark-1.3-contributor":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+	"muse-spark-1.2-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+	"muse-spark-1.3-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
 	"nemotron-3-ultra-free":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
 	"nemotron-3.5-lightning-free":     {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
 	"nemotron-3.5-super-vl-free":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144},
@@ -1497,7 +1500,7 @@ func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 		Reasoning:               caps.Reasoning,
 		Jailbreak:               caps.Jailbreak || IsJailbreakModel(model),
 		ThinkingFormat:          thinkingFormat,
-		ThinkingCanDisable:      canDisableThinking(caps),
+		ThinkingCanDisable:      caps.CanDisableThinking(),
 		ThinkingRange:           thinkingRange,
 		ThinkingEffortSupported: caps.ThinkingEffortSupported,
 		ThinkingLevels:          GetThinkingLevels(provider, model),

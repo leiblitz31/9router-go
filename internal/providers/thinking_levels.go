@@ -186,10 +186,7 @@ func codexModelLevels(provider, model string) []string {
 	if provider != "codex" {
 		return nil
 	}
-	base := model
-	if open := strings.LastIndex(base, "("); open != -1 && strings.HasSuffix(base, ")") {
-		base = strings.TrimSpace(base[:open])
-	}
+	base, _ := splitThinkingSuffix(model)
 	return codexModelThinkingLevels[base]
 }
 
@@ -223,7 +220,7 @@ func GetThinkingLevels(provider, model string) []string {
 			}
 		}
 	}
-	if !canDisableThinking(caps) {
+	if !caps.CanDisableThinking() {
 		levels = withoutLevel(levels, "none")
 	}
 	return append([]string(nil), levels...)

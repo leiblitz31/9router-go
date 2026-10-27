@@ -681,7 +681,7 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 				upstreamBody["model"] = modelInfo.Model
 				repairToolCallIDsInMap(upstreamBody)
 				ctx = h.applyJailbreak(ctx, upstreamBody, comboName, jailbreakLegIDs(modelInfo.Provider, modelInfo.Model)...)
-				upstreamJSON, err := json.Marshal(upstreamBody)
+				upstreamJSON, err := json.Marshal(upstreamBody, json.Deterministic(true))
 				if err != nil {
 					break
 				}
@@ -698,6 +698,7 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 				}
 				if modelInfo.Provider == "mimo-free" {
 					comboMetrics := &streamMetrics{}
+					upstreamJSON = clampMimoFreeReasoning(upstreamJSON, modelInfo.Model)
 					fwdErr = h.MimoFreeChat(fwdCtx, targetWriter, upstreamJSON, isStream, comboMetrics)
 				} else {
 					fwdErr = h.tryForwardWithConnection(forwardRequestParams{
@@ -977,7 +978,7 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 				entryBody["model"] = modelInfo.Model
 				ctx = h.applyJailbreak(ctx, entryBody, comboName, jailbreakLegIDs(modelInfo.Provider, modelInfo.Model)...)
 
-				upstreamJSON, err := json.Marshal(entryBody)
+				upstreamJSON, err := json.Marshal(entryBody, json.Deterministic(true))
 				if err != nil {
 					break
 				}

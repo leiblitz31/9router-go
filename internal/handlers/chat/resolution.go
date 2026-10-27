@@ -9,6 +9,7 @@ import (
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/proxy/oauth"
+	"9router/proxy/internal/thinking"
 	json "encoding/json/v2"
 	"fmt"
 	"net/http"
@@ -228,6 +229,10 @@ func (h *ChatHandler) resolveModel(modelStr string) (*ModelInfo, error) {
 	}
 	// Strip [1m] context marker before resolution (PR #3691)
 	modelStr = stripModelContextMarker(modelStr)
+	// A "(level)" thinking suffix is a request override, not part of the model
+	// id, so it comes off before the name is resolved against the aliases and
+	// the combos — otherwise "mycombo(high)" resolves to neither.
+	modelStr, _ = thinking.ParseSuffix(modelStr)
 
 	// Cloudflare Workers AI ids are scoped: "@cf/<vendor>/<model>" is the
 	// full upstream id, scope included. Clients that copy the id from
