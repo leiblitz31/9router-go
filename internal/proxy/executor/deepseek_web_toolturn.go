@@ -32,7 +32,7 @@ import (
 // The accumulator is the caller's: what the stream said about the answer — the
 // upstream's message id, whether it signed off, whether it refused — outlives
 // this read, because it decides whether the conversation can be continued.
-func deepSeekToolTurnToClient(w http.ResponseWriter, req *Request, upstream io.Reader, envelope deepSeekRequestEnvelope, accumulator *deepSeekStreamAccumulator) error {
+func deepSeekToolTurnToClient(w http.ResponseWriter, req *Request, upstream io.Reader, envelope deepSeekRequestEnvelope, accumulator *deepSeekStreamAccumulator, prompt string) error {
 	if err := deepSeekDrain(upstream, accumulator); err != nil {
 		return deepSeekFailure(http.StatusBadGateway, "deepseek-web: "+err.Error())
 	}
@@ -70,7 +70,7 @@ func deepSeekToolTurnToClient(w http.ResponseWriter, req *Request, upstream io.R
 		preamble := deepSeekSurroundingText(text, raws...)
 
 		if !req.IsStream {
-			return deepSeekWriteToolCalls(w, req, envelope.Model, calls, preamble)
+			return deepSeekWriteToolCalls(w, req, envelope.Model, calls, preamble, prompt)
 		}
 		return deepSeekWriteStreamedToolCalls(w, req, envelope.Model, calls, preamble)
 	}
@@ -84,7 +84,7 @@ func deepSeekToolTurnToClient(w http.ResponseWriter, req *Request, upstream io.R
 	}
 
 	if !req.IsStream {
-		return deepSeekWritePlainAnswer(w, req, envelope.Model, accumulator, text)
+		return deepSeekWritePlainAnswer(w, req, envelope.Model, accumulator, text, prompt)
 	}
 	return deepSeekWriteStreamedAnswer(w, req, envelope.Model, accumulator, text)
 }
@@ -108,31 +108,38 @@ func deepSeekToolPlainText(accumulator *deepSeekStreamAccumulator) string {
 
 // deepSeekWriteToolCall answers with an OpenAI tool_calls message, keeping any
 // text the model wrote around the calls.
-func deepSeekWriteToolCall(w http.ResponseWriter, req *Request, model string, call deepSeekToolRequest, preamble string) error {
-	return deepSeekWriteToolCalls(w, req, model, []deepSeekToolRequest{call}, preamble)
+func deepSeekWriteToolCall(w http.ResponseWriter, req *Request, model string, call deepSeekToolRequest, preamble string, prompt string) error {
+	return deepSeekWriteToolCalls(w, req, model, []deepSeekToolRequest{call}, preamble, prompt)
 }
 
 // deepSeekWriteToolCalls answers with an OpenAI tool_calls message.
-func deepSeekWriteToolCalls(w http.ResponseWriter, req *Request, model string, calls []deepSeekToolRequest, preamble string) error {
-	return deepSeekWriteJSON(w, req, model, deepSeekToolCallMessage(calls, preamble))
+func deepSeekWriteToolCalls(w http.ResponseWriter, req *Request, model string, calls []deepSeekToolRequest, preamble string, prompt string) error {
+	return deepSeekWriteJSON(w, req, model, deepSeekToolCallMessage(calls, preamble), prompt)
 }
 
 // deepSeekWritePlainAnswer answers with the model's text when no declared tool
 // was called.
-func deepSeekWritePlainAnswer(w http.ResponseWriter, req *Request, model string, accumulator *deepSeekStreamAccumulator, text string) error {
+func deepSeekWritePlainAnswer(w http.ResponseWriter, req *Request, model string, accumulator *deepSeekStreamAccumulator, text string, prompt string) error {
 	message := map[string]any{"role": "assistant", "content": text}
 	if thinking := accumulator.thinkingText(); thinking != "" {
 		message["reasoning_content"] = thinking
 	}
-	return deepSeekWriteJSON(w, req, model, message)
+	return deepSeekWriteJSON(w, req, model, message, prompt)
 }
 
 // deepSeekWriteJSON writes one chat.completion.
-func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, message map[string]any) error {
+func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, message map[string]any, prompt string) error {
 	content, _ := message["content"].(string)
 	if content != "" && req.ResponseBuf != nil {
 		req.ResponseBuf.Write([]byte(content))
 	}
+	answer := content
+	if calls, ok := message["tool_calls"]; ok {
+		if encoded, err := json.Marshal(calls); err == nil {
+			answer += string(encoded)
+		}
+	}
+	reasoning, _ := message["reasoning_content"].(string)
 
 	payload := map[string]any{
 		"id":      deepSeekResponseID(),
@@ -144,7 +151,7 @@ func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, messag
 			"message":       message,
 			"finish_reason": deepSeekFinishReason(message),
 		}},
-		"usage": map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+		"usage": deepSeekBuildUsage(prompt, answer, reasoning),
 	}
 
 	encoded, err := json.Marshal(payload)

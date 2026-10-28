@@ -187,13 +187,13 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 	var runErr error
 	switch {
 	case len(envelope.Tools) > 0:
-		runErr = deepSeekToolTurnToClient(w, req, response.Body, envelope, accumulator)
+		runErr = deepSeekToolTurnToClient(w, req, response.Body, envelope, accumulator, prompt)
 	default:
 		forwardUpstreamResponseHeaders(w, response.Header)
 		if req.IsStream {
 			runErr = deepSeekStreamToClient(w, req, response.Body, envelope.Model, accumulator)
 		} else {
-			runErr = deepSeekCollectToClient(w, req, response.Body, envelope.Model, accumulator)
+			runErr = deepSeekCollectToClient(w, req, response.Body, envelope.Model, accumulator, prompt)
 		}
 	}
 
@@ -207,6 +207,16 @@ func ForwardDeepSeekWeb(w http.ResponseWriter, req *Request) error {
 	}
 	return runErr
 }
+
+// deepSeekToolRetryHint is appended to the tool block on this provider's path
+// only: a tool result that reports an error or an unsupported combination is
+// not yet a failure — one retry with a different or reversed combination is
+// allowed. It does not override the rules in the tool block: repeating the
+// identical call is still an error, and data the tool did not return must
+// never be invented.
+const deepSeekToolRetryHint = "If a tool result reports an error or an unsupported parameter combination, " +
+	"you may retry once with a different or reversed combination before reporting failure. " +
+	"Do not repeat the identical call, and do not invent data the tool did not return."
 
 // deepSeekTurnPrompt renders the conversation as the single prompt string the
 // web API accepts, with the tool declarations folded in.
@@ -224,7 +234,7 @@ func deepSeekTurnPrompt(envelope deepSeekRequestEnvelope, req *Request, stealth 
 	if prompt == "" || len(envelope.Tools) == 0 {
 		return prompt
 	}
-	return deepSeekRenderTools(envelope.Tools) + "\n\n" + prompt
+	return deepSeekRenderTools(envelope.Tools) + "\n\n" + deepSeekToolRetryHint + "\n\n" + prompt
 }
 
 // deepSeekSession is the session one turn runs against, and the claim that
@@ -416,6 +426,12 @@ func deepSeekStreamToClient(w http.ResponseWriter, req *Request, upstream io.Rea
 	// Reasoning and visible text are separate channels on the wire. The role
 	// delta rides whichever channel opens first, and each channel is emitted as
 	// a delta from what the client has already been sent.
+	//
+	// DeepSeek's web models reach for their native DSML tool syntax even when
+	// the request declared no tools, and that markup is not an answer. The
+	// scrubber drops it as it arrives, so the client sees the prose around it
+	// and never the tags.
+	var scrubber deepSeekDSMLScrubber
 	thinkingSent, contentSent, roleAnnounced := 0, 0, false
 	scanErr := proxy.ScanStream(upstream, func(payload []byte) {
 		if emitErr != nil {
@@ -437,9 +453,11 @@ func deepSeekStreamToClient(w http.ResponseWriter, req *Request, upstream io.Rea
 			}
 			_ = emit(delta, nil)
 		}
-		if content, sent := deepSeekDeltaFrom(accumulator.contentText(), contentSent); content != "" {
-			contentSent = sent
-			delta := map[string]any{"content": content}
+		contentTail := accumulator.contentText()[contentSent:]
+		clean, consumed := scrubber.scrub(contentTail)
+		contentSent += consumed
+		if clean != "" {
+			delta := map[string]any{"content": clean}
 			if !roleAnnounced {
 				roleAnnounced = true
 				delta["role"] = "assistant"
@@ -499,7 +517,7 @@ func deepSeekReportStreamAbort(hw *proxy.HeartbeatWriter, flusher http.Flusher, 
 
 // deepSeekCollectToClient drives the same stream to completion and returns one
 // chat.completion document.
-func deepSeekCollectToClient(w http.ResponseWriter, req *Request, upstream io.Reader, model string, accumulator *deepSeekStreamAccumulator) error {
+func deepSeekCollectToClient(w http.ResponseWriter, req *Request, upstream io.Reader, model string, accumulator *deepSeekStreamAccumulator, prompt string) error {
 	if err := deepSeekDrain(upstream, accumulator); err != nil {
 		return deepSeekFailure(http.StatusBadGateway, "deepseek-web: "+err.Error())
 	}
@@ -511,8 +529,13 @@ func deepSeekCollectToClient(w http.ResponseWriter, req *Request, upstream io.Re
 			"deepseek-web: stream ended before completion — the upstream session was cut off")
 	}
 
-	message := map[string]any{"role": "assistant", "content": accumulator.contentText()}
-	if thinking := accumulator.thinkingText(); thinking != "" {
+	text := accumulator.contentText()
+	if deepSeekHasDSML(text) {
+		text = deepSeekStripDSML(text)
+	}
+	thinking := accumulator.thinkingText()
+	message := map[string]any{"role": "assistant", "content": text}
+	if thinking != "" {
 		message["reasoning_content"] = thinking
 	}
 	body := map[string]any{
@@ -521,7 +544,7 @@ func deepSeekCollectToClient(w http.ResponseWriter, req *Request, upstream io.Re
 		"created": time.Now().Unix(),
 		"model":   model,
 		"choices": []map[string]any{{"index": 0, "message": message, "finish_reason": "stop"}},
-		"usage":   map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+		"usage":   deepSeekBuildUsage(prompt, text, thinking),
 	}
 
 	encoded, err := json.Marshal(body)
