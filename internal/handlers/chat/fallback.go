@@ -792,7 +792,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	if connData != nil && (connData.ProxyPoolID != "" || connData.ConnectionProxyEnabled || connData.StrictProxy) {
 		ctx = internalproxy.WithStrictProxy(ctx, true)
 	}
-	if providers.IsLocalByDesign(provider) {
+	if providers.IsLocalByDesign(provider) || h.isLoopbackCustomNode(provider) {
 		ctx = internalproxy.WithAllowLoopback(ctx)
 	}
 	sessionID := handlerutil.GetSessionID(ctx)
