@@ -286,3 +286,38 @@ func TestDeepSeekAccumulateReportsTransportError(t *testing.T) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+// A malformed DSML turn must not leak as content. The 19860 turn closed its
+// calls wrapper without closing the invoke, named a tool the client never
+// declared, and reached Telegram as a wall of tags because the old guard kept
+// the original text whenever the strip came back empty. The answer path now
+// drops the markup whole, leaving an empty answer rather than the leak.
+func TestDeepSeekToolTurnMalformedDSMLIsDropped(t *testing.T) {
+	var spec deepSeekToolSpec
+	spec.Function.Name = "get_weather"
+
+	var env deepSeekRequestEnvelope
+	env.Model = "deepseek-v4-flash"
+	env.Messages = []deepSeekMessage{{Role: "user", Content: jsontext.Value("hi")}}
+	env.Tools = []deepSeekToolSpec{spec}
+
+	req := &Request{IsStream: false, Ctx: context.Background()}
+	rec := httptest.NewRecorder()
+
+	answer := "<｜｜DSML｜｜ calls>\n" +
+		"<｜｜DSML｜｜ invoke name=\"terminal\">\n" +
+		"<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">echo hi</｜｜DSML｜｜ parameter>\n" +
+		"<｜｜DSML｜｜ timeout>30</｜｜DSML｜｜ timeout>\n" +
+		"</｜｜DSML｜｜ calls>"
+
+	if err := deepSeekToolTurnToClient(rec, req, newSignedOffTurn(t, answer), env, newDeepSeekStreamAccumulator(env.Model), ""); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "DSML") {
+		t.Errorf("malformed DSML leaked into the answer:\n%s", body)
+	}
+	if !strings.Contains(body, `"content":""`) {
+		t.Errorf("content is not empty after dropping a markup-only answer:\n%s", body)
+	}
+}

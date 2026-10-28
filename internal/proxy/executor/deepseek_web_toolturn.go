@@ -77,10 +77,12 @@ func deepSeekToolTurnToClient(w http.ResponseWriter, req *Request, upstream io.R
 	// A DSML block that named a tool the client never declared, or that named one
 	// at all, is markup rather than an answer. Leaving it in shows the user a wall
 	// of `parameter>` tags for something that was meant to be a tool call.
+	// The strip is applied unconditionally: a malformed block whose strip comes
+	// back empty is markup only, and keeping the original text in that case is
+	// exactly how such a turn leaked into Telegram. An empty answer is honest
+	// about a turn that contained no prose.
 	if deepSeekHasDSML(text) {
-		if stripped := deepSeekStripDSML(text); stripped != "" {
-			text = stripped
-		}
+		text = deepSeekStripDSML(text)
 	}
 
 	if !req.IsStream {

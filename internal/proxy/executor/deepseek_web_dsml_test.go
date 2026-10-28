@@ -461,3 +461,86 @@ func TestDeepSeekScrubberHoldsPartialTagFrames(t *testing.T) {
 		t.Fatalf("scrubbed = %q, want %q", got, "Awal\n\nAkhir")
 	}
 }
+
+// An invoke whose closer never arrives still ends where its calls wrapper
+// closes: the 19860 turn opened an invoke, closed its command parameter, wrote
+// a stray timeout element, closed calls, and never closed the invoke. Dropping
+// it cost the client the whole call; recovering it at the calls close keeps the
+// command, and the stray element is ignored because it is not a parameter.
+func TestDeepSeekDSMLInvokesRecoversMissingClose(t *testing.T) {
+	terminal := func() deepSeekToolSpec {
+		var spec deepSeekToolSpec
+		spec.Function.Name = "terminal"
+		return spec
+	}()
+
+	missingClose := "<｜｜DSML｜｜ calls>\n" +
+		"<｜｜DSML｜｜ invoke name=\"terminal\">\n" +
+		"<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">echo hi</｜｜DSML｜｜ parameter>\n" +
+		"<｜｜DSML｜｜ timeout>30</｜｜DSML｜｜ timeout>\n" +
+		"</｜｜DSML｜｜ calls>"
+	noCallsClose := "<｜｜DSML｜｜ invoke name=\"terminal\">\n" +
+		"<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">echo hi</｜｜DSML｜｜ parameter>\n"
+	closedNormally := "<｜｜DSML｜｜ calls>\n" +
+		"<｜｜DSML｜｜ invoke name=\"terminal\">\n" +
+		"<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">echo hi</｜｜DSML｜｜ parameter>\n" +
+		"</｜｜DSML｜｜ invoke>\n" +
+		"</｜｜DSML｜｜ calls>"
+	firstClosedSecondRecovered := "<｜｜DSML｜｜ calls>\n" +
+		"<｜｜DSML｜｜ invoke name=\"read\">\n" +
+		"<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">/tmp/a</｜｜DSML｜｜ parameter>\n" +
+		"</｜｜DSML｜｜ invoke>\n" +
+		"<｜｜DSML｜｜ invoke name=\"read\">\n" +
+		"<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">/tmp/b</｜｜DSML｜｜ parameter>\n" +
+		"</｜｜DSML｜｜ calls>"
+
+	tests := []struct {
+		name      string
+		text      string
+		tools     []deepSeekToolSpec
+		wantCalls int
+		wantArgs  []string
+	}{
+		{
+			name:      "missing close recovered at calls close",
+			text:      missingClose,
+			tools:     []deepSeekToolSpec{terminal},
+			wantCalls: 1,
+			wantArgs:  []string{`{"command":"echo hi"}`},
+		},
+		{
+			name:      "no calls close either is not recovered",
+			text:      noCallsClose,
+			tools:     []deepSeekToolSpec{terminal},
+			wantCalls: 0,
+		},
+		{
+			name:      "closed invoke before calls close is unchanged",
+			text:      closedNormally,
+			tools:     []deepSeekToolSpec{terminal},
+			wantCalls: 1,
+			wantArgs:  []string{`{"command":"echo hi"}`},
+		},
+		{
+			name:      "first closed second recovered",
+			text:      firstClosedSecondRecovered,
+			tools:     []deepSeekToolSpec{readTool()},
+			wantCalls: 2,
+			wantArgs:  []string{`{"path":"/tmp/a"}`, `{"path":"/tmp/b"}`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := deepSeekExtractToolCalls(tt.text, tt.tools)
+			if len(calls) != tt.wantCalls {
+				t.Fatalf("extracted %d calls, want %d", len(calls), tt.wantCalls)
+			}
+			for i, want := range tt.wantArgs {
+				if calls[i].Arguments != want {
+					t.Errorf("call %d arguments = %s, want %s", i, calls[i].Arguments, want)
+				}
+			}
+		})
+	}
+}

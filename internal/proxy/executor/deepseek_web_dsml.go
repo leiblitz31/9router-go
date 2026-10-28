@@ -131,12 +131,26 @@ func deepSeekDSMLInvokes(text string) []string {
 		head := rest[:openEnd+1]
 		rest = rest[openEnd+1:]
 
+		// An invoke whose closer never arrives is not dropped outright: a
+		// model that stops writing the invoke but still closes the calls
+		// wrapper meant the call to end there. The 19860 turn did exactly
+		// this — invoke opened, command parameter closed, a stray timeout
+		// element, calls closed, no invoke close — and dropping it cost
+		// the client the whole call. Elements that are not parameters are
+		// ignored when the recovered invoke is parsed, so the stray element
+		// cannot smuggle anything into the arguments.
 		closeAt := deepSeekDSMLInvokeClose.FindStringIndex(rest)
-		if closeAt == nil {
+		callsAt := deepSeekDSMLCallsClose.FindStringIndex(rest)
+		switch {
+		case closeAt != nil && (callsAt == nil || closeAt[0] < callsAt[0]):
+			invokes = append(invokes, head+rest[:closeAt[1]])
+			rest = rest[closeAt[1]:]
+		case callsAt != nil:
+			invokes = append(invokes, head+rest[:callsAt[0]])
+			rest = rest[callsAt[1]:]
+		default:
 			return invokes
 		}
-		invokes = append(invokes, head+rest[:closeAt[1]])
-		rest = rest[closeAt[1]:]
 	}
 }
 
