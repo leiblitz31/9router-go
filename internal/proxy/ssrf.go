@@ -327,6 +327,24 @@ func NewSafeTransportWithProxy(proxyURL string, insecure bool) *http.Transport {
 	)
 }
 
+// NewSafeTransportWithProxySpec is NewSafeTransportWithProxy with a custom
+// ClientHello spec factory for the uTLS handshake. A nil factory keeps the
+// default Chrome fingerprint. It is how one lane — currently only the
+// OpenCode free lane — presents a different hello through an assigned HTTP
+// proxy without changing any other lane's transport (upstream
+// decolua/9router#5297 parity: the TLS-impersonating fetch rides the
+// connection proxy instead of falling back to the native stack, whose
+// ClientHello the free-tier JA4 gate refuses).
+func NewSafeTransportWithProxySpec(proxyURL string, insecure bool, specFactory ClientHelloSpecFactory) *http.Transport {
+	if proxyURL == "" {
+		return newTransportWithUTLS(&utlsDialer{insecureSkipVerify: insecure, specFactory: specFactory}, proxyKindNone, "")
+	}
+	return newTransportWithUTLS(
+		&utlsDialer{explicitProxyURL: proxyURL, insecureSkipVerify: insecure, specFactory: specFactory},
+		proxyKindExplicit, proxyURL,
+	)
+}
+
 // NewSafeTransportForProxy is the upstream (decolua/9router-go) spelling of
 // NewSafeTransportWithProxy kept for callers ported from upstream: an empty
 // proxyURL returns the ambient-environment transport, a non-empty one returns

@@ -226,6 +226,20 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData, provider 
 	}
 
 	if proxyType == "http" || proxyType == "" {
+		// The OpenCode free lane presents Bun's ClientHello on this
+		// transport too (see isOpencodeFreeLane): through an HTTP proxy
+		// the default Chrome list is refused by the free-tier JA4 gate,
+		// exactly as on the DoH transport. The variant is cached under
+		// its own key so no other provider ever shares it.
+		if isOpencodeFreeLane(provider) {
+			bunKey := "http\x00bun\x00" + proxyURLStr
+			if strictProxy {
+				bunKey = strictCachePrefix + bunKey
+			}
+			return h.cachedProxyClient(bunKey, strictProxy, func() *http.Transport {
+				return internalproxy.NewSafeTransportWithProxySpec(parsedURL.String(), false, executor.OpencodeBunSpecFactory())
+			}), nil
+		}
 		cacheKey := proxyURLStr
 		if strictProxy {
 			cacheKey = strictCachePrefix + proxyURLStr
