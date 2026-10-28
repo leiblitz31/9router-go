@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"9router/proxy/internal/handlerutil"
@@ -27,6 +28,76 @@ var (
 	zedDefaultPort  = 58443
 	zedKeyPrefix    = "zed-rsa-pkcs1:"
 )
+
+// zedKeyRing holds recently minted Zed private keys in memory only (never
+// persisted, never logged). Every authorize click mints a fresh keypair, but
+// the dialog only holds the latest verifier — so a callback from an earlier
+// authorize (double-tap, stale tab, reopened dialog) can never decrypt
+// against the current verifier, even though it is perfectly valid. The ring
+// lets the exchange try every recent key, so any recent callback succeeds.
+type zedRingKey struct {
+	priv *rsa.PrivateKey
+	at   time.Time
+}
+
+const (
+	zedKeyRingMax = 50
+	zedKeyRingTTL = 15 * time.Minute
+)
+
+var (
+	zedKeyRingMu sync.Mutex
+	zedKeyRing   []zedRingKey
+)
+
+func zedKeyRingAdd(priv *rsa.PrivateKey) {
+	zedKeyRingMu.Lock()
+	defer zedKeyRingMu.Unlock()
+	now := time.Now()
+	kept := zedKeyRing[:0]
+	for _, k := range zedKeyRing {
+		if now.Sub(k.at) < zedKeyRingTTL {
+			kept = append(kept, k)
+		}
+	}
+	kept = append(kept, zedRingKey{priv: priv, at: now})
+	if len(kept) > zedKeyRingMax {
+		kept = kept[len(kept)-zedKeyRingMax:]
+	}
+	zedKeyRing = kept
+}
+
+func zedKeyRingReset() {
+	zedKeyRingMu.Lock()
+	zedKeyRing = nil
+	zedKeyRingMu.Unlock()
+}
+
+// zedKeyRingTry decrypts cipher with any recent key, newest first. It reports
+// only whether some key decrypted the block; callers keep the original error
+// when none did, so a genuinely wrong-key failure still surfaces the RSA error.
+func zedKeyRingTry(cipher []byte) (string, bool) {
+	zedKeyRingMu.Lock()
+	now := time.Now()
+	kept := zedKeyRing[:0]
+	for _, k := range zedKeyRing {
+		if now.Sub(k.at) < zedKeyRingTTL {
+			kept = append(kept, k)
+		}
+	}
+	zedKeyRing = kept
+	keys := make([]*rsa.PrivateKey, 0, len(kept))
+	for i := len(kept) - 1; i >= 0; i-- {
+		keys = append(keys, kept[i].priv)
+	}
+	zedKeyRingMu.Unlock()
+	for _, priv := range keys {
+		if plain, err := decryptZedWithKey(priv, cipher); err == nil {
+			return plain, true
+		}
+	}
+	return "", false
+}
 
 // HandleZedAuthorize generates an RSA-2048 keypair and returns the native_app_signin URL.
 // GET /api/oauth/zed/authorize?port=... — mirrors upstream zedAuth.js (no local listener;
@@ -44,6 +115,7 @@ func (h *OAuthHandler) HandleZedAuthorize(w http.ResponseWriter, r *http.Request
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "generate RSA keypair failed")
 		return
 	}
+	zedKeyRingAdd(priv)
 	derPub := x509.MarshalPKCS1PublicKey(&priv.PublicKey)
 	pubB64 := base64.URLEncoding.EncodeToString(derPub)
 	privPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
@@ -139,6 +211,19 @@ func decryptZedToken(encrypted, verifier string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("decode Zed token failed: %v", err)
 	}
+	if plain, err := decryptZedWithKey(priv, cipher); err == nil {
+		return plain, nil
+	} else if ringPlain, ok := zedKeyRingTry(cipher); ok {
+		return ringPlain, nil
+	} else {
+		return "", err
+	}
+}
+
+// decryptZedWithKey tries OAEP-SHA256 first, then PKCS#1 v1.5. The v1.5
+// fallback is not integrity-checked, so replacement chars prove garbage
+// output and must fail instead of being stored.
+func decryptZedWithKey(priv *rsa.PrivateKey, cipher []byte) (string, error) {
 	oaepErr := error(nil)
 	if plain, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, priv, cipher, nil); err == nil {
 		return string(plain), nil
@@ -146,8 +231,6 @@ func decryptZedToken(encrypted, verifier string) (string, error) {
 		oaepErr = err
 	}
 	if plain, err := rsa.DecryptPKCS1v15(rand.Reader, priv, cipher); err == nil {
-		// PKCS#1 v1.5 unpadding is not integrity-checked: replacement chars
-		// prove garbage output — fail loudly instead of storing it.
 		if strings.ContainsRune(string(plain), '�') {
 			return "", fmt.Errorf("failed to decrypt Zed access token: %v", oaepErr)
 		}
