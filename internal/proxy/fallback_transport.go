@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 )
@@ -55,7 +57,17 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		if req.GetBody != nil {
 			directReq.Body, _ = req.GetBody()
 		}
-		return direct.RoundTrip(directReq)
+		directResp, directErr := direct.RoundTrip(directReq)
+		if err != nil && directErr != nil && errors.Is(directErr, ErrSSRFBlocked) {
+			// The direct fallback can never succeed where the target
+			// resolves to a private/reserved address (e.g. a sandbox whose
+			// DNS maps every external host to a sentinel range): the guard
+			// refuses the dial by design. Reporting the SSRF refusal would
+			// bury the primary proxy failure that actually needs attention,
+			// so surface the primary error and note the refused fallback.
+			return nil, fmt.Errorf("FallbackTransport: primary proxy error (direct fallback refused by SSRF protection): %w", err)
+		}
+		return directResp, directErr
 	}
 	return resp, err
 }
