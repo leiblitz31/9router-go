@@ -23,6 +23,11 @@ const maxProxyClients = 128
 // connection asked second.
 const strictCachePrefix = "strict\x00"
 
+// directBunCacheKey namespaces the direct-path Bun client for the OpenCode
+// free lane, so it never shares a transport with the Chrome plain client
+// or the pooled variants.
+const directBunCacheKey = "direct\x00bun\x00"
+
 var (
 	proxyClientsMu sync.RWMutex
 	proxyClients   = make(map[string]*http.Client)
@@ -169,6 +174,18 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData, provider 
 			// address while the dashboard shows it proxied (#4333).
 			log.Error("proxy", "strict proxy enabled but none resolved", "pool", connData.ProxyPoolID, "proxyUrl", connData.ConnectionProxyURL)
 			return nil, fmt.Errorf("%w: the connection enables a proxy but resolves none", internalproxy.ErrStrictProxyRequired)
+		}
+		// The OpenCode free lane presents Bun's ClientHello on the direct
+		// path too (decolua/9router#5310 principle: the TLS fingerprint
+		// must ride every path, not just the proxied ones). Without a pool
+		// or proxy the plain client sends Chrome's list and the free-tier
+		// JA4 gate refuses it, exactly as it did through an HTTP proxy
+		// before a741dcaf. The strict marker is deliberately not applied:
+		// a direct dial is the path itself here, not a fallback to forbid.
+		if isOpencodeFreeLane(provider) {
+			return h.cachedProxyClient(directBunCacheKey, false, func() *http.Transport {
+				return internalproxy.NewSafeTransportWithProxySpec("", false, executor.OpencodeBunSpecFactory())
+			}), nil
 		}
 		return h.Client, nil
 	}
