@@ -425,13 +425,13 @@ var qoderCapabilities = map[string]Capabilities{
 	"qmodel_38max":  {Vision: true, Reasoning: true, ContextWindow: 200000, MaxOutput: 65536},
 	"qmodel_latest": {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
 	"qmodel":        {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
-	"qfmodel":       {Vision: true, Reasoning: true, ContextWindow: 200000, MaxOutput: 65536},
+	"qfmodel":       {Vision: true, Reasoning: true, ContextWindow: 180000, MaxOutput: 65536},
 	"kmodel_latest": {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
 	"kmodel":        {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
 	"gmodel":        {Vision: true, Reasoning: true, ContextWindow: 200000, MaxOutput: 65536},
 	"gfmodel":       {Vision: true, Reasoning: true, ContextWindow: 200000, MaxOutput: 65536},
 	"dmodel":        {Vision: true, Reasoning: true, ContextWindow: 200000, MaxOutput: 65536},
-	"dfmodel":       {Vision: true, Reasoning: true, ContextWindow: 200000, MaxOutput: 65536},
+	"dfmodel":       {Vision: true, Reasoning: true, ContextWindow: 1000000, MaxOutput: 65536},
 	"mmodel":        {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
 	// Frontier reasoning pair; absent from many per-account catalogs, so they
 	// are routed through a static model_config.
