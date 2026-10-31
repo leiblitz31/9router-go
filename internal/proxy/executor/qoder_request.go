@@ -454,7 +454,7 @@ func buildQoderChatRequest(body []byte, modelConfig map[string]any, creds QoderC
 		"model_config": modelConfig,
 		"business": map[string]any{
 			"product":  "cli",
-			"version":  "1.0.0",
+			"version":  qoderClientVersion,
 			"type":     "agent",
 			"stage":    "start",
 			"id":       uuid.NewString(),

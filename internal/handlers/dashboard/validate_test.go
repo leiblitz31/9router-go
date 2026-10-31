@@ -502,7 +502,7 @@ func TestHandleValidateProvider_QoderPATExchangesAndListsModels(t *testing.T) {
 	if !strings.Contains(exchange.body, `"personal_token":"pt-personal-token"`) {
 		t.Errorf("exchange body missing PAT: %s", exchange.body)
 	}
-	if got := exchange.headers.Get("User-Agent"); got != "qodercli/1.0.0" {
+	if got := exchange.headers.Get("User-Agent"); got != "qodercli/1.1.75" {
 		t.Errorf("unexpected exchange user agent %q", got)
 	}
 
