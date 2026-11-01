@@ -1,0 +1,4 @@
+### Qoder: advertise qfmodel's context window as 1000000
+
+- `qoderCapabilities` declared 180000 for `qfmodel` (Qwen3.8-Flash), mirroring Qoder's live per-account catalog. Needle probes against the upstream on 2026-11-01 disproved that figure: prompts of 192000, 295378, 492228, 738227 and 974574 tokens were all processed in full (HTTP 200, needle at the very start of the prompt returned verbatim), while ~984500 tokens and above were rejected by the upstream with HTTP 400. The model's real ceiling is ~975-985K tokens — the 1M class, same as `dfmodel`.
+- The table now advertises 1000000 for `qfmodel`. Why it matters: this block is what `/v1/models` publishes as `capabilities.contextWindow`, and at 180000 clients (Hermes) compacted sessions at 180K even though the model accepts roughly 5x that.

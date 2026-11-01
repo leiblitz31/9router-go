@@ -425,7 +425,7 @@ var qoderCapabilities = map[string]Capabilities{
 	"qmodel_38max":  {Vision: true, Reasoning: true, ContextWindow: 200000, MaxOutput: 65536},
 	"qmodel_latest": {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
 	"qmodel":        {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
-	"qfmodel":       {Vision: true, Reasoning: true, ContextWindow: 180000, MaxOutput: 65536},
+	"qfmodel":       {Vision: true, Reasoning: true, ContextWindow: 1000000, MaxOutput: 65536},
 	"kmodel_latest": {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
 	"kmodel":        {Vision: true, ContextWindow: 200000, MaxOutput: 65536},
 	"gmodel":        {Vision: true, Reasoning: true, ContextWindow: 200000, MaxOutput: 65536},
