@@ -229,6 +229,26 @@ func qwenWebBuildMessages(in []qwenWebInputMsg, model string, thinking bool) []q
 	return out
 }
 
+// qwenWebSharedClient is the lane's own HTTP client. The router's shared
+// client dials upstream hosts directly, and chat.qwen.ai's risk control
+// refuses this gateway's direct egress — the lane only passes from the
+// operator's configured proxy egress, which the reference wrappers reach
+// through the standard proxy environment. A dedicated transport with
+// ProxyFromEnvironment is therefore part of the lane's wire contract, the
+// same reason deepseek-web builds its own transport. No client timeout:
+// a completion stream is bounded by the request context, not the clock.
+var qwenWebSharedClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	},
+}
+
+func qwenWebHTTPClient() *http.Client { return qwenWebSharedClient }
+
 func qwenWebFailure(status int, message string) error {
 	return proxy.UpstreamFailure(status, message)
 }
