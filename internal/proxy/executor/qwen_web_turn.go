@@ -54,9 +54,14 @@ func qwenWebTurn(ctx context.Context, client *http.Client, req *Request, cred *q
 		"qw-web: risk control refused the request after a token refresh (RGV587) — "+lastErr.Error())
 }
 
-func qwenWebTurnOnce(ctx context.Context, client *http.Client, model string, messages []qwenWebWireMessage, cred qwenWebCredential, forceUMID bool, onDelta func(reasoning, answer string) error) (*qwenWebAccumulator, error) {
+func qwenWebTurnOnce(ctx context.Context, client *http.Client, model string, messages []qwenWebWireMessage, cred qwenWebCredential, _ bool, onDelta func(reasoning, answer string) error) (*qwenWebAccumulator, error) {
 	bxUA := qwenWebBXUA()
-	umid := qwenWebUMIDToken(ctx, client, forceUMID)
+	// A fresh umid per turn, not the shared cache: every verified pass of
+	// this lane (the reference wrappers' runs and this gateway's live
+	// tests) paired one freshly fetched umid with one chat, while a umid
+	// reused across many chats in one process drew refusals. The cache
+	// remains as the fetch's fallback and for the auth paths.
+	umid := qwenWebUMIDToken(ctx, client, true)
 	headers := qwenWebHeaders(bxUA, umid)
 	qwenWebApplyAuth(headers, cred)
 

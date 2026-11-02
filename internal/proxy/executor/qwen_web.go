@@ -55,11 +55,7 @@ func ForwardQwenWeb(w http.ResponseWriter, req *Request) error {
 		return qwenWebFailure(http.StatusBadRequest, "qw-web received a request with no text content")
 	}
 
-	client := req.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return qwenWebExecute(w, req, ctx, client, qwenWebCredentialFor(req), model, messages, thinking)
+	return qwenWebExecute(w, req, ctx, qwenWebHTTPClient(), qwenWebCredentialFor(req), model, messages, thinking)
 }
 
 type qwenWebRequestEnvelope struct {
@@ -167,76 +163,78 @@ type extraMeta struct {
 	} `json:"meta"`
 }
 
-// qwenWebBuildMessages converts the OpenAI history into the wire array,
-// chained fid→parentId in order. Only the final message carries the
-// feature_config and the models list, as in the site's own requests.
-// Returns nil when no message carries text.
+// qwenWebBuildMessages converts the OpenAI history into the wire array.
 //
-// System and developer messages need care: the site's own client has no
-// such role, and a wire message with role "system" is refused by risk
-// control (RGV587 — verified live 2026-11-02, which is also what the
-// router's own token-saver system-prompt injection would otherwise trip
-// on every request). System text is therefore folded into the first user
-// message, the flattening the reference wrappers apply to history, and a
-// system message appearing later in the history becomes a user message
-// in place.
+// The array holds exactly ONE user message, always. That is a measured
+// wire constraint, not a style choice (verified live 2026-11-02): the
+// site's own client only ever sends one new message per completion — the
+// thread lives server-side, chained by parent_id — and risk control
+// refuses a completion whose messages carry any other shape this gateway
+// tried: a "system" role message (RGV587) and a multi-message array with
+// an "assistant" history entry (RGV587). The reference wrappers converge
+// on the same answer: flatten the history into one string.
+//
+// So: a lone user message goes out verbatim, exactly as the web client
+// would send it. Anything longer becomes a transcript — system text first
+// as an unlabeled instruction block, then "User:"/"Assistant:" turns — in
+// a single user message. The turn stays stateless (a fresh upstream chat
+// per router request) and the model still sees the whole history.
 func qwenWebBuildMessages(in []qwenWebInputMsg, model string, thinking bool) []qwenWebWireMessage {
-	in = qwenWebFoldSystem(in)
-	texts := make([]string, len(in))
-	anyText := false
-	for i, m := range in {
-		texts[i] = qwenWebTextContent(m.Content)
-		if texts[i] != "" {
-			anyText = true
+	type turn struct{ role, text string }
+	var turns []turn
+	for _, m := range in {
+		text := qwenWebTextContent(m.Content)
+		if text == "" {
+			continue
 		}
-	}
-	if !anyText {
-		return nil
-	}
-	fids := make([]string, len(in))
-	for i := range fids {
-		fids[i] = qwenWebUUID()
-	}
-	now := time.Now().Unix()
-	out := make([]qwenWebWireMessage, len(in))
-	for i, m := range in {
 		role := m.Role
 		if role == "" {
 			role = "user"
 		}
-		msg := qwenWebWireMessage{
-			Fid:         fids[i],
-			Role:        role,
-			Content:     texts[i],
-			Files:       []any{},
-			Timestamp:   now,
-			Model:       "",
-			ChatType:    "t2t",
-			SubChatType: "t2t",
-		}
-		if i > 0 {
-			msg.ParentID = fids[i-1]
-			msg.ParentIDAlt = fids[i-1]
-		}
-		if i+1 < len(in) {
-			msg.ChildrenIDs = []string{fids[i+1]}
-		} else {
-			msg.ChildrenIDs = []string{qwenWebUUID()}
-		}
-		if role == "user" {
-			msg.UserAction = "chat"
-		}
-		out[i] = msg
+		turns = append(turns, turn{role, text})
 	}
-	last := &out[len(out)-1]
-	last.Models = []string{model}
+	if len(turns) == 0 {
+		return nil
+	}
+	content := turns[0].text
+	if len(turns) > 1 || turns[0].role != "user" {
+		var b strings.Builder
+		for _, t := range turns {
+			if b.Len() > 0 {
+				b.WriteString("\n\n")
+			}
+			switch t.role {
+			case "system", "developer":
+				b.WriteString(t.text)
+			case "assistant":
+				b.WriteString("Assistant: " + t.text)
+			default:
+				b.WriteString("User: " + t.text)
+			}
+		}
+		content = b.String()
+	}
+	fid := qwenWebUUID()
+	msg := qwenWebWireMessage{
+		Fid:         fid,
+		Role:        "user",
+		Content:     content,
+		UserAction:  "chat",
+		Files:       []any{},
+		Timestamp:   time.Now().Unix(),
+		Model:       "",
+		ChatType:    "t2t",
+		SubChatType: "t2t",
+		ChildrenIDs: []string{qwenWebUUID()},
+		Models:      []string{model},
+	}
 	fc := featureConfig{ThinkingEnabled: thinking, OutputSchema: "phase", ResearchMode: "normal",
 		AutoThinking: true, ThinkingMode: "Auto", ThinkingFormat: "summary", AutoSearch: true}
-	last.FeatureConfig = &fc
+	msg.FeatureConfig = &fc
 	extra := extraMeta{}
 	extra.Meta.SubChatType = "t2t"
-	last.Extra = &extra
-	return out
+	msg.Extra = &extra
+	return []qwenWebWireMessage{msg}
 }
 
 // qwenWebSharedClient is the lane's own HTTP client. The router's shared
@@ -259,57 +257,6 @@ var qwenWebSharedClient = &http.Client{
 }
 
 func qwenWebHTTPClient() *http.Client { return qwenWebSharedClient }
-
-// qwenWebJSONString renders s as a JSON string value for a message body.
-func qwenWebJSONString(s string) jsontext.Value {
-	raw, err := json.Marshal(s)
-	if err != nil {
-		return jsontext.Value(`""`)
-	}
-	return jsontext.Value(raw)
-}
-
-// qwenWebFoldSystem rewrites system/developer messages for the wire:
-// leading ones merge into the first user message's content; any later one
-// becomes a user message where it stands.
-func qwenWebFoldSystem(in []qwenWebInputMsg) []qwenWebInputMsg {
-	out := make([]qwenWebInputMsg, 0, len(in))
-	var pending []string
-	flushed := false
-	flushInto := func(m qwenWebInputMsg) qwenWebInputMsg {
-		if len(pending) == 0 {
-			return m
-		}
-		head := strings.Join(pending, "\n\n")
-		pending = nil
-		flushed = true
-		text := qwenWebTextContent(m.Content)
-		if text != "" {
-			head += "\n\n" + text
-		}
-		return qwenWebInputMsg{Role: "user", Content: qwenWebJSONString(head)}
-	}
-	for _, m := range in {
-		if m.Role == "system" || m.Role == "developer" {
-			if !flushed && len(out) == 0 {
-				if t := qwenWebTextContent(m.Content); t != "" {
-					pending = append(pending, t)
-				}
-				continue
-			}
-			out = append(out, qwenWebInputMsg{Role: "user", Content: m.Content})
-			continue
-		}
-		if m.Role == "user" && !flushed {
-			m = flushInto(m)
-		}
-		out = append(out, m)
-	}
-	if len(pending) > 0 {
-		out = append(out, qwenWebInputMsg{Role: "user", Content: qwenWebJSONString(strings.Join(pending, "\n\n"))})
-	}
-	return out
-}
 
 func qwenWebFailure(status int, message string) error {
 	return proxy.UpstreamFailure(status, message)

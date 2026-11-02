@@ -90,31 +90,47 @@ func TestQwenWebAccumulatorPhases(t *testing.T) {
 	}
 }
 
-func TestQwenWebBuildMessagesChain(t *testing.T) {
-	in := []qwenWebInputMsg{
-		{Role: "user", Content: jsontext.Value(`"Ingat angka 4217"`)},
-		{Role: "assistant", Content: jsontext.Value(`"Baik, 4217."`)},
-		{Role: "user", Content: jsontext.Value(`"Berapa angkanya?"`)},
+func TestQwenWebBuildMessagesFlatten(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []qwenWebInputMsg
+		wantSub []string
+	}{
+		{"lone user message goes out verbatim", []qwenWebInputMsg{
+			{Role: "user", Content: jsontext.Value(`"ping"`)},
+		}, []string{"ping"}},
+		{"history flattens to a transcript", []qwenWebInputMsg{
+			{Role: "user", Content: jsontext.Value(`"Ingat angka 4217"`)},
+			{Role: "assistant", Content: jsontext.Value(`"Baik, 4217."`)},
+			{Role: "user", Content: jsontext.Value(`"Berapa angkanya?"`)},
+		}, []string{"User: Ingat angka 4217", "Assistant: Baik, 4217.", "User: Berapa angkanya?"}},
+		{"system folds in as an unlabeled head block", []qwenWebInputMsg{
+			{Role: "system", Content: jsontext.Value(`"Jawab singkat."`)},
+			{Role: "user", Content: jsontext.Value(`"halo"`)},
+		}, []string{"Jawab singkat.", "User: halo"}},
 	}
-	msgs := qwenWebBuildMessages(in, "qwen3.7-plus", true)
-	if len(msgs) != 3 {
-		t.Fatalf("messages = %d, want 3", len(msgs))
-	}
-	if msgs[0].ParentID != nil {
-		t.Errorf("first message parentId = %v, want nil", msgs[0].ParentID)
-	}
-	if msgs[1].ParentID != msgs[0].Fid || msgs[2].ParentID != msgs[1].Fid {
-		t.Errorf("fid chain broken: %+v", msgs)
-	}
-	last := msgs[2]
-	if last.FeatureConfig == nil || !last.FeatureConfig.ThinkingEnabled {
-		t.Errorf("last message feature_config = %+v, want thinking enabled", last.FeatureConfig)
-	}
-	if len(last.Models) != 1 || last.Models[0] != "qwen3.7-plus" {
-		t.Errorf("last message models = %v", last.Models)
-	}
-	if msgs[0].FeatureConfig != nil {
-		t.Errorf("non-final message carries feature_config")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgs := qwenWebBuildMessages(tt.in, "qwen3.7-plus", true)
+			if len(msgs) != 1 {
+				t.Fatalf("wire messages = %d, want exactly 1", len(msgs))
+			}
+			m := msgs[0]
+			if m.Role != "user" {
+				t.Errorf("wire role = %q, want user", m.Role)
+			}
+			for _, sub := range tt.wantSub {
+				if !strings.Contains(m.Content, sub) {
+					t.Errorf("content %q missing %q", m.Content, sub)
+				}
+			}
+			if m.FeatureConfig == nil || !m.FeatureConfig.ThinkingEnabled {
+				t.Errorf("feature_config = %+v, want thinking enabled", m.FeatureConfig)
+			}
+			if len(m.Models) != 1 || m.Models[0] != "qwen3.7-plus" {
+				t.Errorf("models = %v", m.Models)
+			}
+		})
 	}
 }
 
