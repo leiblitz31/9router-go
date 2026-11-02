@@ -24,7 +24,8 @@ import (
 // guest mode never pretends to be an account.
 //
 // Qwen's advantage over deepseek-web, and the reason this file exists: the
-// JWT can be re-minted from the session cookie via POST /api/v1/auths/, so
+// JWT can be re-minted from the session cookie via the frontend's refresh
+// call (GET auth.qwen.ai/api/v2/auths/refresh, see qwen_web_mint.go), so
 // an expired token is not automatically a dead connection. The refresh is
 // opportunistic and bounded: validate once, mint once, retry once — and if
 // the mint fails, the error says the token is dead rather than quietly
@@ -271,77 +272,31 @@ func qwenWebApplyAuth(h http.Header, cred qwenWebCredential) {
 	}
 }
 
-// qwenWebMintToken exchanges the session cookie for a fresh JWT via
-// POST /api/v1/auths/. The token's location in the response varies across
-// the site's builds (data.token / data.access_token / data.data.token /
-// token), so all documented shapes are tried.
-func qwenWebMintToken(ctx context.Context, client *http.Client, cred qwenWebCredential) (string, error) {
-	if cred.Cookie == "" {
-		return "", fmt.Errorf("no session cookie stored on the connection")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, qwenWebBaseURL+"/api/v1/auths/", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header = qwenWebHeaders(qwenWebBXUA(), qwenWebUMIDToken(ctx, client, false))
-	req.Header.Set("Cookie", cred.Cookie)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("mint request: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	if err != nil {
-		return "", fmt.Errorf("read mint response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("mint refused with HTTP %d", resp.StatusCode)
-	}
-	if token := qwenWebFindMintedToken(body); token != "" {
-		return token, nil
-	}
-	return "", fmt.Errorf("mint response carried no token")
-}
-
-func qwenWebFindMintedToken(body []byte) string {
-	var root map[string]any
-	if err := json.Unmarshal(body, &root); err != nil {
-		return ""
-	}
-	get := func(m map[string]any, keys ...string) string {
-		for _, k := range keys {
-			if s, ok := m[k].(string); ok && s != "" {
-				return s
-			}
-		}
-		return ""
-	}
-	if s := get(root, "token", "access_token"); s != "" {
-		return s
-	}
-	if data, ok := root["data"].(map[string]any); ok {
-		if s := get(data, "token", "access_token"); s != "" {
-			return s
-		}
-		if nested, ok := data["data"].(map[string]any); ok {
-			return get(nested, "token", "access_token")
-		}
-	}
-	return ""
-}
+// The mint itself (qwenWebMintToken) lives in qwen_web_mint.go: the
+// refresh call belongs to the auth host, not the chat host, and carries
+// its own header set.
 
 // qwenWebRefreshToken runs the one mint the lane allows itself and, on
 // success, stores the new JWT back on the connection row (the ds-web
-// renewal pattern: only the data column is written, and only its apiKey
-// field changes) so the next request starts from the fresh token. A store
-// failure does not fail the refresh — the fresh token still serves this
-// request — it is logged and left for the next mint to retry.
+// renewal pattern: only the data column is written) so the next request
+// starts from the fresh token. The refresh also rotates the session
+// cookie (the response's Set-Cookie carries the next refresh_token), so
+// a rotated cookie is stored back in providerSpecificData.qwenCookie
+// alongside the token — persisting the token alone would leave the next
+// mint presenting a refresh_token the auth server already consumed. A
+// store failure does not fail the refresh — the fresh token still
+// serves this request — it is logged and left for the next mint to
+// retry.
 func qwenWebRefreshToken(ctx context.Context, client *http.Client, req *Request, cred *qwenWebCredential) error {
-	fresh, err := qwenWebMintToken(ctx, client, *cred)
+	fresh, mergedCookie, err := qwenWebMintToken(ctx, client, *cred)
 	if err != nil {
 		return err
 	}
 	cred.Token = fresh
+	cookieRotated := mergedCookie != "" && mergedCookie != cred.Cookie
+	if cookieRotated {
+		cred.Cookie = mergedCookie
+	}
 	if req.ConnectionID == "" {
 		return nil
 	}
@@ -361,6 +316,14 @@ func qwenWebRefreshToken(ctx context.Context, client *http.Client, req *Request,
 		_ = json.Unmarshal([]byte(row.Data), &data)
 	}
 	data["apiKey"] = fresh
+	if cookieRotated {
+		psd, _ := data["providerSpecificData"].(map[string]any)
+		if psd == nil {
+			psd = map[string]any{}
+			data["providerSpecificData"] = psd
+		}
+		psd["qwenCookie"] = mergedCookie
+	}
 	encoded, err := json.Marshal(data)
 	if err != nil {
 		return nil
