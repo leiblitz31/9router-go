@@ -61,6 +61,9 @@ const ICON_ALIASES: Record<string, string> = {
   // served (getIconPath resolves the alias first) and only drifts from the
   // original, so the artwork stays in one place.
   'zcode': 'glm',
+  // Qwen Web is the Qwen brand's chat surface, so it wears the shipped Qwen
+  // mark (`qwen.png`) — same alias-over-copy reasoning as `zcode` above.
+  'qw-web': 'qwen',
 }
 
 export function getIconPath(id?: string | null, apiType?: string): string {

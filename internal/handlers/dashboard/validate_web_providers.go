@@ -218,6 +218,55 @@ const geminiWebUnsignedCookieAdvice = "this cookie carries no __Secure-1PSIDTS, 
 const geminiWebStaleCookieAdvice = "gemini.google.com refused this cookie — re-copy the whole cookie header " +
 	"(__Secure-1PSID, SAPISID and __Secure-1PSIDTS when present) from a signed-in gemini.google.com tab"
 
+// validateQwenWeb checks a pasted Qwen session token against the chat
+// history list — the endpoint the executor's own pre-turn validation
+// probes — through the executor's probe implementation, so the header
+// set (synthetic Baxia tokens included) is the one the real turn sends
+// and a passing probe is evidence about the credential.
+//
+// Qwen Web is a NoAuth provider: with no token there is nothing to check
+// and nothing to complain about, because guest mode reaches every model
+// anonymously. A pasted token is the operator asking to run as an
+// account, and then "Check" has to be able to tell a working token from
+// a dead one — the executor refuses to fall back to guest mode behind a
+// dead account, so a validator that waved a dead token through would
+// only move the failure to the first real request.
+func validateQwenWeb(ctx context.Context, apiKey string, providerData map[string]any) validateOutcome {
+	if executor.QwenWebToken(apiKey, providerData) == "" {
+		return validateOutcome{valid: true, supported: true,
+			message: "No token configured — qw-web still works in guest mode, which reaches every model " +
+				"anonymously. Paste the token from a signed-in chat.qwen.ai tab (DevTools → Console: " +
+				"copy(localStorage.getItem('token'))) to run as your account instead."}
+	}
+
+	status, body, err := executor.QwenWebProbeSession(ctx, qwenWebProbeDoer(ctx), apiKey, providerData)
+	if err != nil {
+		return validateOutcome{supported: true, message: err.Error()}
+	}
+	// A dead qwen token is refused two ways (see QwenWebSessionRejected):
+	// a bare 401, or a 200 carrying an unauthorized envelope. The status
+	// alone would call the envelope shape "valid".
+	if executor.QwenWebSessionRejected(status, body) || status == http.StatusForbidden {
+		return validateOutcome{supported: true,
+			message: "token invalid or expired — salin ulang dari chat.qwen.ai localStorage"}
+	}
+	if status != http.StatusOK {
+		return validateOutcome{supported: true,
+			message: "chat.qwen.ai returned HTTP " + http.StatusText(status)}
+	}
+	return validateOutcome{valid: true, supported: true}
+}
+
+// qwenWebProbeDoer adapts the dashboard's probe seam to the executor's
+// transport interface, so chat and the dashboard share one session-probe
+// implementation while the dashboard keeps its own transport (the probe
+// honours a connection's proxy-bound client and is stubbed in tests).
+func qwenWebProbeDoer(ctx context.Context) executor.QwenWebDoer {
+	return func(innerCtx context.Context, method, rawURL string, headers map[string]string, body []byte) (int, []byte, error) {
+		return validateProbeDo(innerCtx, method, rawURL, headers, body)
+	}
+}
+
 // geminiWebProbeHeaders mirrors what the executor sends, so a probe that passes
 // is evidence about the credential rather than about the header set.
 //

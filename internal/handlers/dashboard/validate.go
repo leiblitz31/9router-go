@@ -422,7 +422,7 @@ func (h *DashboardHandler) validateProviderNodeConnection(
 // (GET /models, falling back to a minimal chat request).
 func validateProviderKey(ctx context.Context, provider string, cfg providers.ProviderConfig, apiKey string, psd map[string]any) validateOutcome {
 	if cfg.NoAuth {
-		// gemini-web is the one NoAuth provider whose credential is optional
+		// gemini-web is a NoAuth provider whose credential is optional
 		// rather than absent: the site serves an anonymous visitor, and a pasted
 		// cookie only raises the set of models the session may be served. So it
 		// is still probed when one is supplied — "Check" has to be able to tell
@@ -430,6 +430,12 @@ func validateProviderKey(ctx context.Context, provider string, cfg providers.Pro
 		// error and is not probed.
 		if provider == "gemini-web" && strings.TrimSpace(apiKey) != "" {
 			return validateGeminiWeb(ctx, apiKey)
+		}
+		// qw-web is the second: guest mode needs no credential at all, but a
+		// pasted account token still has to be probed, and the empty case is
+		// answered by validateQwenWeb itself — so it is routed whole.
+		if provider == "qw-web" {
+			return validateQwenWeb(ctx, apiKey, psd)
 		}
 		return validateOutcome{valid: true, supported: true}
 	}
@@ -461,6 +467,8 @@ func validateProviderKey(ctx context.Context, provider string, cfg providers.Pro
 		return validateDeepSeekWeb(ctx, apiKey, psd)
 	case "gemini-web":
 		return validateGeminiWeb(ctx, apiKey)
+	case "qw-web":
+		return validateQwenWeb(ctx, apiKey, psd)
 	case "qoder", "qoder-cn":
 		return validateQoder(ctx, provider, apiKey, psd)
 	case "v1m":

@@ -1,9 +1,11 @@
 package executor
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -233,6 +235,114 @@ func TestQwenWebFindMintedToken(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := qwenWebFindMintedToken([]byte(tt.body)); got != tt.want {
 				t.Errorf("minted = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestQwenWebToken pins the dashboard-facing parse: every paste form the
+// add form accepts resolves to the same JWT the executor would present,
+// and the guest forms resolve to "".
+func TestQwenWebToken(t *testing.T) {
+	tests := []struct {
+		name         string
+		apiKey       string
+		providerData map[string]any
+		want         string
+	}{
+		{"empty is guest", "", nil, ""},
+		{"guest placeholder is guest", "guest", nil, ""},
+		{"bare jwt", "jwt-1", nil, "jwt-1"},
+		{"value wrapper", `{"value":"jwt-2"}`, nil, "jwt-2"},
+		{"cookie header paste", "cna=x; token=jwt-3", nil, "jwt-3"},
+		{"stored cookie carries the token", "", map[string]any{"qwenCookie": "token=jwt-4; cna=x"}, "jwt-4"},
+		{"stored cookie without a token cookie is guest", "", map[string]any{"qwenCookie": "cna=x"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := QwenWebToken(tt.apiKey, tt.providerData); got != tt.want {
+				t.Errorf("QwenWebToken() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestQwenWebProbeSession runs the dashboard probe over a fake transport:
+// the session endpoint is hit with the executor's own headers and the
+// pasted credential, and the upstream status is the verdict. A guest
+// credential is never probed at all.
+func TestQwenWebProbeSession(t *testing.T) {
+	type call struct {
+		url     string
+		headers map[string]string
+	}
+	var calls []call
+	do := func(_ context.Context, _, rawURL string, headers map[string]string, _ []byte) (int, []byte, error) {
+		calls = append(calls, call{rawURL, headers})
+		if strings.Contains(rawURL, "wu.json") {
+			return http.StatusOK, []byte(`umx.wu('T2gAfakeumid')`), nil
+		}
+		return http.StatusUnauthorized, []byte(`{}`), nil
+	}
+
+	status, body, err := QwenWebProbeSession(context.Background(), do, "jwt-9", nil)
+	if err != nil {
+		t.Fatalf("probe error = %v", err)
+	}
+	if status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", status)
+	}
+	if !QwenWebSessionRejected(status, body) {
+		t.Errorf("QwenWebSessionRejected(401, %s) = false, want true", body)
+	}
+	var probe *call
+	for i := range calls {
+		if strings.Contains(calls[i].url, "/api/v2/chats/") {
+			probe = &calls[i]
+		}
+	}
+	if probe == nil {
+		t.Fatalf("no session probe call recorded in %v", calls)
+	}
+	if got := probe.headers["Authorization"]; got != "Bearer jwt-9" {
+		t.Errorf("Authorization = %q, want the pasted token as Bearer", got)
+	}
+	if probe.headers["Bx-Ua"] == "" {
+		t.Errorf("probe carried no bx-ua header: %v", probe.headers)
+	}
+
+	calls = nil
+	status, body, err = QwenWebProbeSession(context.Background(), do, "", nil)
+	if err != nil || status != 0 || body != nil {
+		t.Errorf("guest probe = (%d, %s, %v), want (0, nil, nil)", status, body, err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("guest probe made %d calls, want none", len(calls))
+	}
+}
+
+// TestQwenWebSessionRejected pins the two refusal shapes measured live:
+// a bare 401, and a 200 carrying an unauthorized envelope — plus the
+// neighbours that must NOT count as rejections.
+func TestQwenWebSessionRejected(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"bare 401", http.StatusUnauthorized, `{}`, true},
+		{"unauthorized envelope", http.StatusOK,
+			`{"success":false,"request_id":"x","data":{"code":"unauthorized","details":"Your session has expired, or the token is no longer valid. Please sign in again to proceed."}}`, true},
+		{"healthy session list", http.StatusOK, `{"success":true,"data":[{"id":"chat-1"}]}`, false},
+		{"other failure envelope", http.StatusOK, `{"success":false,"data":{"code":"rate_limited"}}`, false},
+		{"envelope without success field", http.StatusOK, `{"data":{"code":"unauthorized"}}`, false},
+		{"403 is not an executor rejection", http.StatusForbidden, `{}`, false},
+		{"unparsable body", http.StatusOK, `not json`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := QwenWebSessionRejected(tt.status, []byte(tt.body)); got != tt.want {
+				t.Errorf("QwenWebSessionRejected(%d, %s) = %v, want %v", tt.status, tt.body, got, tt.want)
 			}
 		})
 	}

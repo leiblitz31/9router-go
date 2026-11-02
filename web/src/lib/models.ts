@@ -115,6 +115,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "poolside": "ps",
   "qoder": "qd",
   "qoder-cn": "qdcn",
+  "qw-web": "qw",
   "recraft": "recraft",
   "runwayml": "runway",
   "sambanova": "samba",
@@ -2385,6 +2386,36 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-4-argon",
       "name": "Gemini 4 Argon"
+    }
+  ],
+  "qw-web": [
+    {
+      "id": "qwen3.7-plus",
+      "name": "Qwen3.7 Plus"
+    },
+    {
+      "id": "qwen3.8-max",
+      "name": "Qwen3.8 Max"
+    },
+    {
+      "id": "qwen3.8-omni-flash",
+      "name": "Qwen3.8 Omni Flash"
+    },
+    {
+      "id": "qwen3.7-max",
+      "name": "Qwen3.7 Max"
+    },
+    {
+      "id": "qwen3.6-plus",
+      "name": "Qwen3.6 Plus"
+    },
+    {
+      "id": "qwen3.5-plus",
+      "name": "Qwen3.5 Plus"
+    },
+    {
+      "id": "qwen3.5-omni-plus",
+      "name": "Qwen3.5 Omni Plus"
     }
   ],
   "gh": [

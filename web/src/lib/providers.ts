@@ -2385,6 +2385,21 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "qw-web",
+    "name": "Qwen Web",
+    "category": "webCookie",
+    "alias": "qw",
+    "color": "#6C33FF",
+    "icon": "auto_awesome",
+    "website": "https://chat.qwen.ai",
+    "authType": "cookie",
+    "authHint": "Optional. Qwen Web works with no connection at all — guest mode reaches every model anonymously. To run as your account instead, paste the session token from a signed-in chat.qwen.ai tab: DevTools → Console → copy(localStorage.getItem('token')), then paste the result here. Do NOT sign out of that tab afterwards — signing out revokes the token. The session cookie (the field below) is optional too: stored, it lets the router mint a fresh token when this one expires instead of the connection going dead.",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
     "id": "selfhosted-tts",
     "name": "Self-Hosted TTS",
     "category": "apikey",

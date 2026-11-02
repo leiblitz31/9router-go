@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	json "encoding/json/v2"
@@ -124,27 +125,139 @@ func (e *qwenWebAuthError) Error() string {
 	return "qw-web: account token rejected (401) at " + e.stage
 }
 
-// qwenWebValidateToken probes an endpoint only a session can answer — the
-// chat history list — so a 401 here is a real auth verdict, unlike the
-// public /api/models. Non-401 failures are not auth verdicts and do not
-// block the turn.
-func qwenWebValidateToken(ctx context.Context, client *http.Client, cred qwenWebCredential) error {
+// qwenWebSessionProbe performs the session probe and returns the
+// upstream status and body: GET the chat history list — an endpoint only
+// a session can answer, so a refusal here is a real auth verdict, unlike
+// the public /api/models. It is the one implementation behind both the
+// executor's pre-turn validation and the dashboard's "Check" probe, so
+// the two judge a credential under the same header set.
+func qwenWebSessionProbe(ctx context.Context, client *http.Client, cred qwenWebCredential) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, qwenWebBaseURL+"/api/v2/chats/?page=1", nil)
 	if err != nil {
-		return nil
+		return 0, nil, err
 	}
 	req.Header = qwenWebHeaders(qwenWebBXUA(), qwenWebUMIDToken(ctx, client, false))
 	qwenWebApplyAuth(req.Header, cred)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode == http.StatusUnauthorized {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, body, nil
+}
+
+// QwenWebSessionRejected reports whether a session-probe response is an
+// auth refusal. The site answers a dead token two ways: a bare HTTP 401,
+// and — the shape measured live on 2026-11-02 — HTTP 200 with a
+// {"success":false,"data":{"code":"unauthorized"}} envelope ("Your
+// session has expired, or the token is no longer valid"). A probe that
+// trusted the status alone would call every dead token valid, and the
+// user would only find out on their first real request. Other
+// success:false codes are not auth verdicts and do not count.
+func QwenWebSessionRejected(status int, body []byte) bool {
+	if status == http.StatusUnauthorized {
+		return true
+	}
+	if status != http.StatusOK {
+		return false
+	}
+	var envelope struct {
+		Success *bool `json:"success"`
+		Data    struct {
+			Code string `json:"code"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return false
+	}
+	return envelope.Success != nil && !*envelope.Success && envelope.Data.Code == "unauthorized"
+}
+
+// qwenWebValidateToken probes an endpoint only a session can answer — the
+// chat history list — so a refusal here is a real auth verdict, unlike
+// the public /api/models. Non-auth failures are not auth verdicts and do
+// not block the turn.
+func qwenWebValidateToken(ctx context.Context, client *http.Client, cred qwenWebCredential) error {
+	status, body, err := qwenWebSessionProbe(ctx, client, cred)
+	if err != nil {
+		return nil
+	}
+	if QwenWebSessionRejected(status, body) {
 		return &qwenWebAuthError{stage: "validation"}
 	}
 	return nil
+}
+
+// QwenWebToken parses a pasted qw-web credential down to its JWT: the
+// apiKey in any form the add form accepts (bare JWT, {"value": …}
+// wrapper, JSON object, raw Cookie header) plus the cookie half in
+// providerSpecificData.qwenCookie. "" means guest mode — no account
+// credential was pasted. It is the dashboard validator's half of
+// qwenWebCredentialFor, exported so the parsing lives in exactly one
+// place.
+func QwenWebToken(apiKey string, providerData map[string]any) string {
+	return qwenWebCredentialFor(&Request{APIKey: apiKey, ConnData: providerData}).Token
+}
+
+// QwenWebDoer is the transport the dashboard's probe seam speaks: one
+// request in, status and body out. The dashboard adapts its stubbed,
+// proxy-aware probe function to it (the qoderProbeDoer pattern), so the
+// session probe below runs on the dashboard's transport while keeping
+// the executor's own headers and credential handling.
+type QwenWebDoer func(ctx context.Context, method, rawURL string, headers map[string]string, body []byte) (int, []byte, error)
+
+// qwenWebDoerTransport carries an http.Client's requests over a
+// QwenWebDoer, so the probe implementation (Baxia headers, umid fetch,
+// auth) is shared verbatim instead of re-derived per caller. Response
+// headers do not survive the seam; the one consumer that read one (the
+// umid ETag fallback) simply falls back to the body's token pattern,
+// then to the synthetic token — the same fallbacks, one rung shorter.
+type qwenWebDoerTransport struct{ do QwenWebDoer }
+
+func (t qwenWebDoerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		sent, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		body = sent
+	}
+	headers := make(map[string]string, len(req.Header))
+	for name := range req.Header {
+		headers[name] = req.Header.Get(name)
+	}
+	status, respBody, err := t.do(req.Context(), req.Method, req.URL.String(), headers, body)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		StatusCode:    status,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(bytes.NewReader(respBody)),
+		ContentLength: int64(len(respBody)),
+		Request:       req,
+	}, nil
+}
+
+// QwenWebProbeSession is the dashboard-validator form of the executor's
+// pre-turn session validation: the same probe (qwenWebSessionProbe) with
+// the credential parsed the same way, executed over the caller's
+// transport. It returns the upstream HTTP status and body — the caller
+// reads the verdict with QwenWebSessionRejected. (0, nil, nil) means the
+// credential parses to guest mode and there is nothing to probe.
+func QwenWebProbeSession(ctx context.Context, do QwenWebDoer, apiKey string, providerData map[string]any) (int, []byte, error) {
+	cred := qwenWebCredentialFor(&Request{APIKey: apiKey, ConnData: providerData})
+	if !cred.LoggedIn {
+		return 0, nil, nil
+	}
+	client := &http.Client{Transport: qwenWebDoerTransport{do: do}}
+	return qwenWebSessionProbe(ctx, client, cred)
 }
 
 // qwenWebApplyAuth sets the account headers on an upstream request.
