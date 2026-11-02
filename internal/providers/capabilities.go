@@ -643,17 +643,17 @@ func init() {
 		"gemini-4-argon":        geminiWebCaps,
 	}
 
-	// qw-web overrides the generic *qwen* pattern rows: the web surface in
-	// v1 is text chat with thinking — tool calling there is a
-	// prompt-injected protocol the executor does not implement yet, so
-	// Tools stays false rather than advertising a control that does
-	// nothing. Context windows: the site advertises a 1M-token window for
-	// the current Max/Plus line (research report 2026-11-02); the two Omni
-	// models are not in that line, so they carry a conservative 256K —
-	// a stated guess, not a measured figure.
-	qwenWebText := Capabilities{Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 1000000}
-	qwenWebVision := Capabilities{Vision: true, Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 1000000}
-	qwenWebOmni := Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 262144}
+	// qw-web overrides the generic *qwen* pattern rows. Tool calling on
+	// the web surface is a prompt-injected protocol (the bracket-marker
+	// format of executor/qwen_web_tools.go, phase 2) — Tools is true
+	// because the executor implements it, verified live on staging
+	// 2026-11-02. Context windows: the site advertises a 1M-token window
+	// for the current Max/Plus line (research report 2026-11-02); the
+	// two Omni models are not in that line, so they carry a conservative
+	// 256K — a stated guess, not a measured figure.
+	qwenWebText := Capabilities{Tools: true, Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 1000000}
+	qwenWebVision := Capabilities{Vision: true, Tools: true, Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 1000000}
+	qwenWebOmni := Capabilities{Vision: true, AudioInput: true, VideoInput: true, Tools: true, Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 262144}
 	providerCapabilities["qw-web"] = map[string]Capabilities{
 		"qwen3.7-plus":       qwenWebVision,
 		"qwen3.8-max":        qwenWebText,

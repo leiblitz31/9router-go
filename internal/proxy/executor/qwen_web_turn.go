@@ -216,18 +216,51 @@ func qwenWebSnippet(b []byte) string {
 // only when the first delta exists, so a turn that fails early still
 // surfaces its real status), and otherwise drains the turn into one
 // chat.completion body.
-func qwenWebExecute(w http.ResponseWriter, req *Request, ctx context.Context, client *http.Client, cred qwenWebCredential, model string, messages []qwenWebWireMessage, thinking bool) error {
+func qwenWebExecute(w http.ResponseWriter, req *Request, ctx context.Context, client *http.Client, cred qwenWebCredential, model string, messages []qwenWebWireMessage, thinking bool, toolCtx *qwenWebToolContext) error {
 	if cred.LoggedIn {
 		if err := qwenWebEnsureAuth(ctx, client, req, &cred); err != nil {
 			return err
 		}
 	}
 	emitter := &qwenWebEmitter{w: w, req: req, model: model, id: "chatcmpl-qw-" + strconv.FormatInt(time.Now().UnixNano(), 36), created: time.Now().Unix()}
+	var toolRt *qwenWebToolRuntime
+	if toolCtx != nil {
+		toolRt = newQwenWebToolRuntime(toolCtx.allowed)
+	}
 	acc, err := qwenWebTurn(ctx, client, req, &cred, model, messages, func(rd, ad string) error {
-		if !req.IsStream {
-			return nil // deltas are folded into acc; the body is written whole below
+		if toolRt == nil {
+			if !req.IsStream {
+				return nil // deltas are folded into acc; the body is written whole below
+			}
+			return emitter.delta(rd, ad)
 		}
-		return emitter.delta(rd, ad)
+		// Tool mode: the answer runs through the scanner; only cleaned
+		// prose and completed calls reach the client. Reasoning is not
+		// scanned (a call shape inside the reasoning phase is evidence,
+		// never a call — the wrapper rule).
+		if rd != "" && req.IsStream {
+			if err := emitter.delta(rd, ""); err != nil {
+				return err
+			}
+		}
+		if ad == "" {
+			return nil
+		}
+		prose, newCalls, base := toolRt.feed(ad)
+		if !req.IsStream {
+			return nil
+		}
+		if prose != "" {
+			if err := emitter.delta("", prose); err != nil {
+				return err
+			}
+		}
+		for i, call := range newCalls {
+			if err := emitter.toolCallFrame(base+i, call); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		if emitter.opened {
@@ -236,8 +269,26 @@ func qwenWebExecute(w http.ResponseWriter, req *Request, ctx context.Context, cl
 		}
 		return err
 	}
+	if toolRt != nil {
+		prose, newCalls, base := toolRt.finish()
+		if req.IsStream {
+			if prose != "" {
+				_ = emitter.delta("", prose)
+			}
+			for i, call := range newCalls {
+				_ = emitter.toolCallFrame(base+i, call)
+			}
+		}
+	}
 	if req.IsStream {
-		return emitter.finish(acc)
+		reason := "stop"
+		if toolRt != nil && len(toolRt.calls) > 0 {
+			reason = "tool_calls"
+		}
+		return emitter.finishWithReason(acc, reason)
+	}
+	if toolRt != nil {
+		return emitter.writeWholeTools(acc, toolRt.prose.String(), toolRt.calls)
 	}
 	return emitter.writeWhole(acc)
 }
@@ -298,14 +349,41 @@ func (e *qwenWebEmitter) delta(reasoning, answer string) error {
 	return nil
 }
 
-func (e *qwenWebEmitter) finish(acc *qwenWebAccumulator) error {
+func (e *qwenWebEmitter) finishWithReason(acc *qwenWebAccumulator, reason string) error {
 	e.open()
-	e.frame(map[string]any{}, "stop", acc.usage)
+	e.frame(map[string]any{}, reason, acc.usage)
 	_, _ = e.w.Write([]byte("data: [DONE]\n\n"))
 	if e.flusher != nil {
 		e.flusher.Flush()
 	}
 	return nil
+}
+
+// toolCallFrame streams one completed call as a single tool_calls delta
+// (id, name and the full canonical arguments in one fragment — clients
+// reassemble fragments, and one whole fragment is the least corruptible
+// shape).
+func (e *qwenWebEmitter) toolCallFrame(index int, call qwenWebToolCall) error {
+	e.open()
+	e.frame(map[string]any{
+		"tool_calls": []map[string]any{qwenWebToolCallJSON(index, call)},
+	}, nil, nil)
+	return nil
+}
+
+// qwenWebToolCallJSON is the OpenAI tool_calls entry for one call; the id
+// is minted locally (the upstream protocol has no call ids).
+func qwenWebToolCallJSON(index int, call qwenWebToolCall) map[string]any {
+	id := "call_" + strings.ReplaceAll(qwenWebUUID(), "-", "")[:24] + "_" + strconv.Itoa(index)
+	return map[string]any{
+		"index": index,
+		"id":    id,
+		"type":  "function",
+		"function": map[string]any{
+			"name":      call.Name,
+			"arguments": call.Arguments,
+		},
+	}
 }
 
 func (e *qwenWebEmitter) errorFrame(message string) {
@@ -322,16 +400,36 @@ func (e *qwenWebEmitter) errorFrame(message string) {
 }
 
 func (e *qwenWebEmitter) writeWhole(acc *qwenWebAccumulator) error {
-	message := map[string]any{"role": "assistant", "content": acc.answer.String()}
+	return e.writeWholeBody(acc, acc.answer.String(), nil)
+}
+
+// writeWholeTools is the non-streaming tool-mode body: the content is
+// the scanner-cleaned prose, and validated calls ride as tool_calls with
+// finish_reason "tool_calls".
+func (e *qwenWebEmitter) writeWholeTools(acc *qwenWebAccumulator, prose string, calls []qwenWebToolCall) error {
+	return e.writeWholeBody(acc, prose, calls)
+}
+
+func (e *qwenWebEmitter) writeWholeBody(acc *qwenWebAccumulator, content string, calls []qwenWebToolCall) error {
+	message := map[string]any{"role": "assistant", "content": content}
 	if acc.reasoning.Len() > 0 {
 		message["reasoning_content"] = acc.reasoning.String()
+	}
+	finishReason := "stop"
+	if len(calls) > 0 {
+		encoded := make([]map[string]any, 0, len(calls))
+		for i, call := range calls {
+			encoded = append(encoded, qwenWebToolCallJSON(i, call))
+		}
+		message["tool_calls"] = encoded
+		finishReason = "tool_calls"
 	}
 	body := map[string]any{
 		"id":      e.id,
 		"object":  "chat.completion",
 		"created": e.created,
 		"model":   e.model,
-		"choices": []map[string]any{{"index": 0, "message": message, "finish_reason": "stop"}},
+		"choices": []map[string]any{{"index": 0, "message": message, "finish_reason": finishReason}},
 	}
 	if acc.usage != nil {
 		body["usage"] = qwenWebUsageJSON(acc.usage)
@@ -341,7 +439,7 @@ func (e *qwenWebEmitter) writeWhole(acc *qwenWebAccumulator) error {
 		return fmt.Errorf("qw-web: marshal response: %w", err)
 	}
 	if e.req.ResponseBuf != nil {
-		_, _ = e.req.ResponseBuf.Write([]byte(acc.answer.String()))
+		_, _ = e.req.ResponseBuf.Write([]byte(content))
 	}
 	e.w.Header().Set("Content-Type", "application/json")
 	e.w.WriteHeader(http.StatusOK)

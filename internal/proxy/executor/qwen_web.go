@@ -6,6 +6,7 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,9 +28,10 @@ import (
 // client chains a thread. Nothing is pinned between turns, so there is no
 // session to expire, leak or misattribute.
 //
-// v1 scope: text chat with thinking, streaming and non-streaming. Tool
-// calling (a prompt-injected protocol on this surface, as on deepseek-web)
-// and account/token mode are deliberately not in v1.
+// Scope: text chat with thinking, streaming and non-streaming, account
+// mode, and (phase 2) prompt-injected tool calling in the bracket-marker
+// protocol of qwen_web_tools.go — active only when the client declares
+// tools; a request without tools follows the v1 path byte for byte.
 func ForwardQwenWeb(w http.ResponseWriter, req *Request) error {
 	var envelope qwenWebRequestEnvelope
 	if err := json.Unmarshal(req.Body, &envelope); err != nil {
@@ -50,12 +52,13 @@ func ForwardQwenWeb(w http.ResponseWriter, req *Request) error {
 		return qwenWebFailure(http.StatusBadRequest, "qw-web received an empty messages array")
 	}
 	thinking := qwenWebThinkingEnabled(envelope)
-	messages := qwenWebBuildMessages(envelope.Messages, model, thinking)
+	toolCtx := qwenWebNewToolContext(envelope.Tools, envelope.ToolChoice)
+	messages := qwenWebBuildMessagesWithTools(envelope.Messages, model, thinking, toolCtx)
 	if messages == nil {
 		return qwenWebFailure(http.StatusBadRequest, "qw-web received a request with no text content")
 	}
 
-	return qwenWebExecute(w, req, ctx, qwenWebHTTPClient(), qwenWebCredentialFor(req), model, messages, thinking)
+	return qwenWebExecute(w, req, ctx, qwenWebHTTPClient(), qwenWebCredentialFor(req), model, messages, thinking, toolCtx)
 }
 
 type qwenWebRequestEnvelope struct {
@@ -64,11 +67,27 @@ type qwenWebRequestEnvelope struct {
 	ReasoningEffort string            `json:"reasoning_effort"`
 	EnableThinking  *bool             `json:"enable_thinking"`
 	Messages        []qwenWebInputMsg `json:"messages"`
+	Tools           []qwenWebToolDef  `json:"tools"`
+	ToolChoice      jsontext.Value    `json:"tool_choice"`
 }
 
 type qwenWebInputMsg struct {
-	Role    string         `json:"role"`
-	Content jsontext.Value `json:"content"`
+	Role         string                 `json:"role"`
+	Content      jsontext.Value         `json:"content"`
+	ToolCalls    []qwenWebInputToolCall `json:"tool_calls"`
+	FunctionCall *qwenWebInputToolCall  `json:"function_call"`
+	ToolCallID   string                 `json:"tool_call_id"`
+	Name         string                 `json:"name"`
+}
+
+// allCalls returns the message's tool calls in order, folding the legacy
+// single function_call into the same shape.
+func (m qwenWebInputMsg) allCalls() []qwenWebInputToolCall {
+	calls := m.ToolCalls
+	if m.FunctionCall != nil && m.FunctionCall.Name != "" {
+		calls = append(calls, *m.FunctionCall)
+	}
+	return calls
 }
 
 // qwenWebModels is the v1 catalogue: the seven models the site's own picker
@@ -180,39 +199,13 @@ type extraMeta struct {
 // a single user message. The turn stays stateless (a fresh upstream chat
 // per router request) and the model still sees the whole history.
 func qwenWebBuildMessages(in []qwenWebInputMsg, model string, thinking bool) []qwenWebWireMessage {
-	type turn struct{ role, text string }
-	var turns []turn
-	for _, m := range in {
-		text := qwenWebTextContent(m.Content)
-		if text == "" {
-			continue
-		}
-		role := m.Role
-		if role == "" {
-			role = "user"
-		}
-		turns = append(turns, turn{role, text})
-	}
-	if len(turns) == 0 {
+	return qwenWebBuildMessagesWithTools(in, model, thinking, nil)
+}
+
+func qwenWebBuildMessagesWithTools(in []qwenWebInputMsg, model string, thinking bool, toolCtx *qwenWebToolContext) []qwenWebWireMessage {
+	content := qwenWebFlattenContent(in, toolCtx)
+	if content == "" {
 		return nil
-	}
-	content := turns[0].text
-	if len(turns) > 1 || turns[0].role != "user" {
-		var b strings.Builder
-		for _, t := range turns {
-			if b.Len() > 0 {
-				b.WriteString("\n\n")
-			}
-			switch t.role {
-			case "system", "developer":
-				b.WriteString(t.text)
-			case "assistant":
-				b.WriteString("Assistant: " + t.text)
-			default:
-				b.WriteString("User: " + t.text)
-			}
-		}
-		content = b.String()
 	}
 	fid := qwenWebUUID()
 	msg := qwenWebWireMessage{
@@ -235,6 +228,161 @@ func qwenWebBuildMessages(in []qwenWebInputMsg, model string, thinking bool) []q
 	extra.Meta.SubChatType = "t2t"
 	msg.Extra = &extra
 	return []qwenWebWireMessage{msg}
+}
+
+// qwenWebFlattenContent renders the OpenAI history as the single user
+// message's text. With no tool context it is the v1 rendering, unchanged:
+// a lone user message verbatim, anything longer a labelled transcript.
+func qwenWebFlattenContent(in []qwenWebInputMsg, toolCtx *qwenWebToolContext) string {
+	if toolCtx != nil {
+		return qwenWebFlattenToolContent(in, toolCtx)
+	}
+	type turn struct{ role, text string }
+	var turns []turn
+	for _, m := range in {
+		text := qwenWebTextContent(m.Content)
+		if text == "" {
+			continue
+		}
+		role := m.Role
+		if role == "" {
+			role = "user"
+		}
+		turns = append(turns, turn{role, text})
+	}
+	if len(turns) == 0 {
+		return ""
+	}
+	if len(turns) == 1 && turns[0].role == "user" {
+		return turns[0].text
+	}
+	var b strings.Builder
+	for _, t := range turns {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		switch t.role {
+		case "system", "developer":
+			b.WriteString(t.text)
+		case "assistant":
+			b.WriteString("Assistant: " + t.text)
+		default:
+			b.WriteString("User: " + t.text)
+		}
+	}
+	return b.String()
+}
+
+// qwenWebFlattenToolContent is the tool-mode rendering: the protocol
+// block heads the transcript (after any system text), past calls and
+// results are folded into the bracket-marker forms the protocol teaches,
+// numbered in call order across the whole history, each result echoing
+// its call's arguments next to the result body (the ds-web binding rule
+// for calls whose id is missing or unusable). A lone user message still
+// goes out bare — protocol head plus the raw question, no label.
+func qwenWebFlattenToolContent(in []qwenWebInputMsg, toolCtx *qwenWebToolContext) string {
+	var head []string
+	var parts []string
+	type callRef struct {
+		ordinal int
+		name    string
+		args    string
+	}
+	byID := map[string]callRef{}
+	ordinal := 0
+	loneUser := ""
+	for _, m := range in {
+		text := qwenWebTextContent(m.Content)
+		role := m.Role
+		if role == "" {
+			role = "user"
+		}
+		switch role {
+		case "system", "developer":
+			if text != "" {
+				head = append(head, text)
+			}
+		case "assistant":
+			calls := m.allCalls()
+			if len(calls) == 0 {
+				if text != "" {
+					parts = append(parts, "Assistant: "+text)
+				}
+				continue
+			}
+			blocks := make([]string, 0, len(calls))
+			for _, c := range calls {
+				id, name, args := c.resolved()
+				if name == "" {
+					continue
+				}
+				ordinal++
+				if id != "" {
+					byID[id] = callRef{ordinal, name, args}
+				}
+				blocks = append(blocks, fmt.Sprintf("[TOOL CALL #%d]\n{\"name\": %s, \"arguments\": %s}\n[END TOOL CALL]",
+					ordinal, strconv.Quote(name), args))
+			}
+			if len(blocks) == 0 {
+				if text != "" {
+					parts = append(parts, "Assistant: "+text)
+				}
+				continue
+			}
+			label := "Assistant:"
+			if text != "" {
+				label = "Assistant: " + text
+			}
+			parts = append(parts, label+"\n"+strings.Join(blocks, "\n"))
+		case "tool", "function":
+			body := text
+			if body == "" {
+				body = "(empty)"
+			}
+			ref, known := byID[m.ToolCallID]
+			var header string
+			if known {
+				header = fmt.Sprintf("[TOOL RESULT #%d: %s]", ref.ordinal, qwenWebMarkerName(ref.name))
+			} else {
+				name := m.Name
+				if name == "" {
+					name = "tool"
+				}
+				header = fmt.Sprintf("[TOOL RESULT: %s]", qwenWebMarkerName(name))
+			}
+			block := header + "\n"
+			if known {
+				block += "Arguments: " + ref.args + "\n"
+			}
+			block += body + "\n[END TOOL RESULT]"
+			parts = append(parts, "User:\n"+block)
+		default: // user and anything else lands on the user side
+			if text != "" {
+				parts = append(parts, "User: "+text)
+				loneUser = text
+			}
+		}
+	}
+	head = append(head, toolCtx.protocol)
+	if len(parts) == 1 && loneUser != "" && strings.HasPrefix(parts[0], "User: ") {
+		return strings.Join(head, "\n\n") + "\n\n" + loneUser
+	}
+	return strings.Join(append(head, parts...), "\n\n")
+}
+
+// qwenWebMarkerName keeps a tool name inside one marker line.
+func qwenWebMarkerName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if r == '[' || r == ']' || r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, name)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "tool"
+	}
+	return name
 }
 
 // qwenWebSharedClient is the lane's own HTTP client. The router's shared
