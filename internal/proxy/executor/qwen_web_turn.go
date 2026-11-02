@@ -215,14 +215,25 @@ func qwenWebSnippet(b []byte) string {
 // OpenAI chunks when the client asked for a stream (headers are committed
 // only when the first delta exists, so a turn that fails early still
 // surfaces its real status), and otherwise drains the turn into one
-// chat.completion body.
-func qwenWebExecute(w http.ResponseWriter, req *Request, ctx context.Context, client *http.Client, cred qwenWebCredential, model string, messages []qwenWebWireMessage, thinking bool, toolCtx *qwenWebToolContext) error {
+// chat.completion body. Oversized context is externalized (or compacted)
+// before the turn runs — see qwen_web_context.go.
+func qwenWebExecute(w http.ResponseWriter, req *Request, ctx context.Context, client *http.Client, cred qwenWebCredential, model string, parts *qwenWebContextParts, thinking bool, toolCtx *qwenWebToolContext) error {
 	if cred.LoggedIn {
 		if err := qwenWebEnsureAuth(ctx, client, req, &cred); err != nil {
 			return err
 		}
 	}
+	build := func(content string, files []any) []qwenWebWireMessage {
+		return qwenWebWireFromParts(model, thinking, content, files)
+	}
+	messages, err := qwenWebPrepareContext(ctx, client, cred, parts, toolCtx, build)
+	if err != nil {
+		return err
+	}
 	emitter := &qwenWebEmitter{w: w, req: req, model: model, id: "chatcmpl-qw-" + strconv.FormatInt(time.Now().UnixNano(), 36), created: time.Now().Unix()}
+	if toolCtx != nil && toolCtx.needsGate() {
+		return qwenWebExecuteGated(emitter, req, ctx, client, cred, model, messages, toolCtx)
+	}
 	var toolRt *qwenWebToolRuntime
 	if toolCtx != nil {
 		toolRt = newQwenWebToolRuntime(toolCtx.allowed)
@@ -291,6 +302,62 @@ func qwenWebExecute(w http.ResponseWriter, req *Request, ctx context.Context, cl
 		return emitter.writeWholeTools(acc, toolRt.prose.String(), toolRt.calls)
 	}
 	return emitter.writeWhole(acc)
+}
+
+// qwenWebExecuteGated serves a request whose tool_choice demands a call
+// ("required" or a named function). The turn is buffered whole — nothing
+// reaches the client until the gate decides — because a streamed reply
+// cannot be taken back when it turns out to carry prose instead of the
+// required call. A call-less first attempt earns exactly ONE correction
+// retry with a hint appended (the wrappers measured retry chains on this
+// upstream as a WAF trigger, and a fresh chat per attempt keeps ours
+// uncorrelated); a second miss is an explicit error, never a fake stop.
+func qwenWebExecuteGated(emitter *qwenWebEmitter, req *Request, ctx context.Context, client *http.Client, cred qwenWebCredential, model string, messages []qwenWebWireMessage, toolCtx *qwenWebToolContext) error {
+	run := func(msgs []qwenWebWireMessage) (*qwenWebAccumulator, *qwenWebToolRuntime, error) {
+		rt := newQwenWebToolRuntime(toolCtx.allowed)
+		acc, err := qwenWebTurn(ctx, client, req, &cred, model, msgs, func(_, ad string) error {
+			if ad != "" {
+				rt.feed(ad)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		rt.finish()
+		return acc, rt, nil
+	}
+
+	acc, toolRt, err := run(messages)
+	if err != nil {
+		return err
+	}
+	if len(toolRt.calls) == 0 {
+		hint := "\n\n[Correction] Your previous reply contained no valid tool call, but this request requires one. Emit the required [TOOL CALL] block now, with no prose before it."
+		retried := make([]qwenWebWireMessage, len(messages))
+		copy(retried, messages)
+		retried[len(retried)-1].Content += hint
+		if acc2, rt2, err2 := run(retried); err2 == nil {
+			acc, toolRt = acc2, rt2
+		}
+	}
+	if len(toolRt.calls) == 0 {
+		return qwenWebFailure(http.StatusBadGateway,
+			"qw-web: the request required a tool call but the model produced none after a correction retry")
+	}
+	if !req.IsStream {
+		return emitter.writeWholeTools(acc, toolRt.prose.String(), toolRt.calls)
+	}
+	if acc.reasoning.Len() > 0 {
+		_ = emitter.delta(acc.reasoning.String(), "")
+	}
+	if toolRt.prose.Len() > 0 {
+		_ = emitter.delta("", toolRt.prose.String())
+	}
+	for i, call := range toolRt.calls {
+		_ = emitter.toolCallFrame(i, call)
+	}
+	return emitter.finishWithReason(acc, "tool_calls")
 }
 
 type qwenWebEmitter struct {

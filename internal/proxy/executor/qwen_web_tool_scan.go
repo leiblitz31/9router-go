@@ -105,15 +105,39 @@ func qwenWebParseToolOutput(text string, allowed map[string]bool) (prose string,
 
 // qwenWebToolRuntime is the execute path's tool state for one turn: the
 // scanner plus every validated call in order (its index in calls is the
-// OpenAI tool_calls index) and the cleaned prose.
+// OpenAI tool_calls index) and the cleaned prose. The runtime is also
+// the runaway guard (the wrappers' measured cap): a turn admits at most
+// qwenWebMaxCallsPerTurn calls, and an exact duplicate of a call already
+// admitted this turn is dropped — a model narrating the same call in a
+// loop must not fan out into dozens of identical executions.
 type qwenWebToolRuntime struct {
 	scanner *qwenWebToolScanner
 	calls   []qwenWebToolCall
 	prose   strings.Builder
+	seen    map[string]bool
+	dropped int
 }
 
+const qwenWebMaxCallsPerTurn = 24
+
 func newQwenWebToolRuntime(allowed map[string]bool) *qwenWebToolRuntime {
-	return &qwenWebToolRuntime{scanner: newQwenWebToolScanner(allowed)}
+	return &qwenWebToolRuntime{scanner: newQwenWebToolScanner(allowed), seen: map[string]bool{}}
+}
+
+// admit filters one batch of freshly validated calls through the
+// runaway guard and returns the ones this turn may actually emit.
+func (r *qwenWebToolRuntime) admit(batch []qwenWebToolCall) []qwenWebToolCall {
+	kept := batch[:0]
+	for _, call := range batch {
+		key := call.Name + "\x00" + call.Arguments
+		if r.seen[key] || len(r.calls)+len(kept) >= qwenWebMaxCallsPerTurn {
+			r.dropped++
+			continue
+		}
+		r.seen[key] = true
+		kept = append(kept, call)
+	}
+	return kept
 }
 
 // feed runs one answer delta through the scanner, accumulating the
@@ -121,7 +145,8 @@ func newQwenWebToolRuntime(allowed map[string]bool) *qwenWebToolRuntime {
 // indices start at base, captured before the call).
 func (r *qwenWebToolRuntime) feed(chunk string) (prose string, newCalls []qwenWebToolCall, base int) {
 	base = len(r.calls)
-	prose, newCalls = r.scanner.feed(chunk)
+	prose, fresh := r.scanner.feed(chunk)
+	newCalls = r.admit(fresh)
 	r.calls = append(r.calls, newCalls...)
 	r.prose.WriteString(prose)
 	return prose, newCalls, base
@@ -130,7 +155,8 @@ func (r *qwenWebToolRuntime) feed(chunk string) (prose string, newCalls []qwenWe
 // finish flushes the scanner at end of stream, same contract as feed.
 func (r *qwenWebToolRuntime) finish() (prose string, newCalls []qwenWebToolCall, base int) {
 	base = len(r.calls)
-	prose, newCalls = r.scanner.finish()
+	prose, fresh := r.scanner.finish()
+	newCalls = r.admit(fresh)
 	r.calls = append(r.calls, newCalls...)
 	r.prose.WriteString(prose)
 	return prose, newCalls, base

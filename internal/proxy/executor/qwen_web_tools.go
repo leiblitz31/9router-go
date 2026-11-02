@@ -135,8 +135,16 @@ func qwenWebToolChoice(raw jsontext.Value) (mode, forcedName string) {
 // transcript renderer and the execute path. A nil context is the v1
 // no-tools request, untouched.
 type qwenWebToolContext struct {
-	protocol string
-	allowed  map[string]bool
+	protocol   string
+	allowed    map[string]bool
+	mode       string // tool_choice resolution: "auto" | "required" | "forced" | other client strings
+	forcedName string
+}
+
+// needsGate reports whether this request must not complete without a
+// validated tool call (tool_choice "required" or a named function).
+func (c *qwenWebToolContext) needsGate() bool {
+	return c != nil && (c.mode == "required" || c.mode == "forced")
 }
 
 // qwenWebNewToolContext builds the context, or nil when the request does
@@ -156,8 +164,10 @@ func qwenWebNewToolContext(tools []qwenWebToolDef, choiceRaw jsontext.Value) *qw
 		return nil
 	}
 	return &qwenWebToolContext{
-		protocol: qwenWebToolProtocol(tools, mode, forced),
-		allowed:  allowed,
+		protocol:   qwenWebToolProtocol(tools, mode, forced),
+		allowed:    allowed,
+		mode:       mode,
+		forcedName: forced,
 	}
 }
 
