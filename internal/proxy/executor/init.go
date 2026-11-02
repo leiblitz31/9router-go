@@ -74,6 +74,10 @@ func RegisterAll() {
 	// the session tokens, the nested request array and the line stream are not
 	// anything the shared passthrough can express.
 	Register("gemini-web", func() Executor { return ForwardGeminiWeb })
+	// qw-web talks to chat.qwen.ai in guest mode: two JSON calls and a
+	// phase-tagged SSE stream behind synthetic Baxia tokens — the shared
+	// passthrough can express none of that.
+	Register("qw-web", func() Executor { return ForwardQwenWeb })
 	// grok-web posts to grok.com's conversations/new behind Cloudflare with a
 	// browser Cookie header and answers NDJSON, not an OpenAI stream — the
 	// shared passthrough cannot express the handshake or the wire shape.

@@ -39,6 +39,7 @@ var ProviderAliasMap = map[string]string{
 	"dg":             "deepgram",
 	"ds":             "deepseek",
 	"ds-web":         "deepseek-web",
+	"qw":             "qw-web",
 	"sp":             "sumopod",
 	"el":             "elevenlabs",
 	"fal":            "fal-ai",

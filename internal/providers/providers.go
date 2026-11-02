@@ -413,6 +413,18 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	// Qwen Web: chat.qwen.ai reached in its anonymous guest mode. There is
+	// no credential at all — the site answers a guest carrying only the
+	// synthetic Baxia anti-bot tokens the executor generates (verified live
+	// from this gateway's egress, 2026-11-02) — so the entry is NoAuth like
+	// gemini-web's, with a placeholder key for the plumbing that wants one.
+	"qw-web": {
+		BaseURL:       "https://chat.qwen.ai/api/v2/chat/completions",
+		AuthHeader:    "Authorization",
+		AuthScheme:    "bearer",
+		DefaultAPIKey: "guest",
+		NoAuth:        true,
+	},
 	// SumoPod — Indonesian AI gateway (ai.sumopod.com), OpenAI-compatible
 	// chat completions with 60+ models across Claude, Gemini, GPT, DeepSeek,
 	// Qwen, GLM, Kimi, MiniMax, Seed, Grok, Hy and Mimo.

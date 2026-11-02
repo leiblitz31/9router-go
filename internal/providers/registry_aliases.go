@@ -33,6 +33,7 @@ var RegistryAliases = map[string]string{
 	"deepgram":          "dg",
 	"deepseek":          "ds",
 	"deepseek-web":      "ds-web",
+	"qw-web":            "qw",
 	"sumopod":           "sp",
 	"daoxe":             "dx",
 	"elevenlabs":        "el",
