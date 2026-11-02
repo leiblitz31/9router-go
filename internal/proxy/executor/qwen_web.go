@@ -171,7 +171,17 @@ type extraMeta struct {
 // chained fid→parentId in order. Only the final message carries the
 // feature_config and the models list, as in the site's own requests.
 // Returns nil when no message carries text.
+//
+// System and developer messages need care: the site's own client has no
+// such role, and a wire message with role "system" is refused by risk
+// control (RGV587 — verified live 2026-11-02, which is also what the
+// router's own token-saver system-prompt injection would otherwise trip
+// on every request). System text is therefore folded into the first user
+// message, the flattening the reference wrappers apply to history, and a
+// system message appearing later in the history becomes a user message
+// in place.
 func qwenWebBuildMessages(in []qwenWebInputMsg, model string, thinking bool) []qwenWebWireMessage {
+	in = qwenWebFoldSystem(in)
 	texts := make([]string, len(in))
 	anyText := false
 	for i, m := range in {
@@ -249,6 +259,57 @@ var qwenWebSharedClient = &http.Client{
 }
 
 func qwenWebHTTPClient() *http.Client { return qwenWebSharedClient }
+
+// qwenWebJSONString renders s as a JSON string value for a message body.
+func qwenWebJSONString(s string) jsontext.Value {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return jsontext.Value(`""`)
+	}
+	return jsontext.Value(raw)
+}
+
+// qwenWebFoldSystem rewrites system/developer messages for the wire:
+// leading ones merge into the first user message's content; any later one
+// becomes a user message where it stands.
+func qwenWebFoldSystem(in []qwenWebInputMsg) []qwenWebInputMsg {
+	out := make([]qwenWebInputMsg, 0, len(in))
+	var pending []string
+	flushed := false
+	flushInto := func(m qwenWebInputMsg) qwenWebInputMsg {
+		if len(pending) == 0 {
+			return m
+		}
+		head := strings.Join(pending, "\n\n")
+		pending = nil
+		flushed = true
+		text := qwenWebTextContent(m.Content)
+		if text != "" {
+			head += "\n\n" + text
+		}
+		return qwenWebInputMsg{Role: "user", Content: qwenWebJSONString(head)}
+	}
+	for _, m := range in {
+		if m.Role == "system" || m.Role == "developer" {
+			if !flushed && len(out) == 0 {
+				if t := qwenWebTextContent(m.Content); t != "" {
+					pending = append(pending, t)
+				}
+				continue
+			}
+			out = append(out, qwenWebInputMsg{Role: "user", Content: m.Content})
+			continue
+		}
+		if m.Role == "user" && !flushed {
+			m = flushInto(m)
+		}
+		out = append(out, m)
+	}
+	if len(pending) > 0 {
+		out = append(out, qwenWebInputMsg{Role: "user", Content: qwenWebJSONString(strings.Join(pending, "\n\n"))})
+	}
+	return out
+}
 
 func qwenWebFailure(status int, message string) error {
 	return proxy.UpstreamFailure(status, message)
