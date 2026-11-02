@@ -240,6 +240,7 @@ func qwenWebBuildMessages(in []qwenWebInputMsg, model string, thinking bool) []q
 var qwenWebSharedClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     true,
 		MaxIdleConnsPerHost:   4,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,

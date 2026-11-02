@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+
+	"9router/proxy/internal/log"
 	"crypto/md5" //nolint:gosec // canvas-hash parity with the reference fingerprint, not a security use
 	"crypto/rand"
 	"encoding/base64"
@@ -144,6 +146,9 @@ func qwenWebUMIDToken(ctx context.Context, client *http.Client, force bool) stri
 	token := qwenWebFetchUMID(ctx, client)
 	if token == "" {
 		token = qwenWebFallbackUMID()
+		log.Warn("qw-web", "umid fetch failed, using the synthetic fallback token")
+	} else {
+		log.Debug("qw-web", "umid token fetched", "len", len(token), "prefix", token[:min(5, len(token))])
 	}
 	qwenWebUMIDCache.token = token
 	qwenWebUMIDCache.expiry = time.Now().Add(qwenWebUMIDTTL)
