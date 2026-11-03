@@ -2,7 +2,6 @@ package providers
 
 import (
 	"net/http"
-	"os"
 	"strings"
 )
 
@@ -316,22 +315,6 @@ func MergeHeaderOverrides(headers, overrides map[string]string) map[string]strin
 }
 
 // KnownProviders maps provider IDs to their upstream configuration.
-// cloudflareAIBaseURL builds the Workers AI chat-completions route. The
-// account id is per-connection state — every cloudflare-ai connection stores
-// its own in providerSpecificData — so the registry cannot bake one in. A
-// CLOUDFLARE_ACCOUNT_ID env var still wins for single-account deployments;
-// without it the URL keeps an {accountId} placeholder that the chat layer
-// fills from the selected connection (see getProviderConfig). Baking the
-// env var in unconditionally sent every cf/* request to /accounts//ai/v1/...
-// whenever the variable was unset, and Cloudflare answered 7003.
-func cloudflareAIBaseURL() string {
-	account := strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCOUNT_ID"))
-	if account == "" {
-		account = "{accountId}"
-	}
-	return "https://api.cloudflare.com/client/v4/accounts/" + account + "/ai/v1/chat/completions"
-}
-
 var KnownProviders = map[string]ProviderConfig{
 	"openai": {
 		BaseURL:    "https://api.openai.com/v1/chat/completions",
@@ -592,9 +575,10 @@ var KnownProviders = map[string]ProviderConfig{
 		ImageURL:   "https://token.sensenova.cn/v1/images/generations",
 	},
 	"cloudflare-ai": {
-		BaseURL:    cloudflareAIBaseURL(),
-		AuthHeader: "Authorization",
-		AuthScheme: "bearer",
+		BaseURL:        "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
+		AuthHeader:     "Authorization",
+		AuthScheme:     "bearer",
+		ThinkingFormat: "openai",
 	},
 	"mimo-free": {
 		BaseURL:       "https://api.xiaomimimimo.com/api/free-ai/openai/chat",
