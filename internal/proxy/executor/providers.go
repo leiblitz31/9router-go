@@ -433,6 +433,15 @@ func toCommandcodeImageBlock(part map[string]any) map[string]any {
 // buildCommandcodeBody transforms OpenAI request payload into CommandCode schema
 // {threadId, memory, config, params} matching upstream openaiToCommandCodeRequest.
 func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
+	return buildCommandcodeBodyForSession(body, model, "")
+}
+
+// buildCommandcodeBodyForSession is buildCommandcodeBody with a
+// conversation-stable threadId derived from commandcodeSessionKey (headers,
+// body session fields, conversation prefix, connection id — in that order),
+// matching upstream toCommandCodeSessionUuid. An empty key yields a random
+// UUID.
+func buildCommandcodeBodyForSession(body []byte, model, sessionID string) ([]byte, error) {
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return body, err
@@ -688,7 +697,15 @@ func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 		log.Warn("executor", "commandcode unmarshal body", "error", err)
 	}
 
-	reqBody, err := buildCommandcodeBody(req.Body, oreq.Model)
+	body := InjectReasoningContent(req.Body, "commandcode")
+	// commandcodeSessionKey, not req.SessionID alone: the upstream prompt
+	// cache is keyed on the threadId/x-session-id pair, and a client that
+	// carries its session in the body (Claude Code's metadata.user_id) or
+	// sends no session at all must not fall through to a per-request random
+	// id — that re-cached the whole prefix on every request (upstream
+	// decolua/9router#5006 measured 0 cache reads on 4.7B prompt tokens).
+	reqBody, err := buildCommandcodeBodyForSession(body, oreq.Model,
+		commandcodeSessionKey(body, req.SessionID, req.ConnectionID))
 	if err != nil {
 		return fmt.Errorf("marshal commandcode body: %w", err)
 	}
