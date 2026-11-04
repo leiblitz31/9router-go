@@ -8,12 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -447,19 +447,46 @@ func buildCommandcodeBodyForSession(body []byte, model, sessionID string) ([]byt
 		return body, err
 	}
 
-	// If already wrapped in params, ensure required top-level fields
-	if _, hasParams := m["params"]; hasParams {
+	// If already wrapped in params, keep the native envelope but re-derive
+	// the fields the gateway owns. A client-supplied params object is a
+	// request to the provider, so it goes through the same whitelist the
+	// flat path builds: without it a client could set the model or any
+	// parameter the provider accepts.
+	if rawParams, hasParams := m["params"]; hasParams {
+		p, ok := rawParams.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("buildCommandcodeBody: params must be an object")
+		}
+		params := map[string]any{}
+		for _, k := range []string{"messages", "stream", "temperature", "top_p", "tools", "reasoning_effort", "system"} {
+			if v, ok := p[k]; ok && v != nil {
+				params[k] = v
+			}
+		}
+		if _, ok := params["stream"]; !ok {
+			params["stream"] = true
+		}
+		if _, ok := params["messages"]; !ok {
+			params["messages"] = []any{}
+		}
+		// The model is the gateway's to decide: the client asked for a
+		// model, the gateway resolved one, and the provider is called with
+		// the resolved id. The budget follows the flat path: the client's
+		// own value when it set one, the 1024 default otherwise.
+		params["model"] = model
+		params["max_tokens"] = commandcodeMaxTokens(p)
+		m["params"] = params
 		if _, hasThread := m["threadId"]; !hasThread {
-			m["threadId"] = uuid.New().String()
+			m["threadId"] = commandcodeSessionUUID(sessionID)
 		}
 		if _, hasMem := m["memory"]; !hasMem {
 			m["memory"] = ""
 		}
 		if _, hasCfg := m["config"]; !hasCfg {
 			m["config"] = map[string]any{
-				"workingDir":    "/",
+				"workingDir":    commandcodeWorkingDir,
 				"date":          time.Now().UTC().Format("2006-01-02"),
-				"environment":   runtime.GOOS,
+				"environment":   providers.NodePlatform(),
 				"structure":     []any{},
 				"isGitRepo":     false,
 				"currentBranch": "",
@@ -468,213 +495,52 @@ func buildCommandcodeBodyForSession(body []byte, model, sessionID string) ([]byt
 				"recentCommits": []any{},
 			}
 		}
-		return json.Marshal(m)
+		// marshalStable, not json.Marshal: CommandCode is a prefix-caching
+		// upstream, so the same logical request has to serialise identically
+		// or every call after the first misses the prompt cache.
+		return marshalStable(m)
 	}
 
-	params := make(map[string]any, len(m))
-	for k, v := range m {
-		params[k] = v
+	// Build params from an explicit whitelist (upstream openai-to-commandcode.js:187-199).
+	// Copying every client key leaks OpenAI-only fields (stream_options, store,
+	// metadata, tool_choice, …) into the provider payload.
+	params := map[string]any{
+		"model":      model,
+		"messages":   []any{},
+		"stream":     true,
+		"max_tokens": commandcodeMaxTokens(m),
 	}
-	if model != "" {
-		params["model"] = model
+	if temp, ok := m["temperature"]; ok && temp != nil {
+		params["temperature"] = temp
+	} else {
+		params["temperature"] = 0.3
 	}
-	params["stream"] = true
-	// Upstream caps generation via params.max_tokens (openaiToCommandCodeRequest
-	// parity: body.max_tokens ?? body.max_output_tokens ?? DEFAULT_MAX_TOKENS).
-	// Without it a "hi" ping can burn the budget on chain-of-thought and the
-	// gateway answers with a bare error event instead of text.
-	if _, ok := params["max_tokens"]; !ok {
-		if _, ok := params["max_output_tokens"]; !ok {
-			params["max_tokens"] = 1024
-		}
+	if top, ok := m["top_p"]; ok && top != nil {
+		params["top_p"] = top
 	}
-
-	// Tools: upstream validates Anthropic-shaped definitions ({name, input_schema}).
-	// OpenAI's {"type":"function","function":{…}} is rejected with
-	// 400 "expected string, received undefined at params.tools[0].name".
-	if rawTools, ok := params["tools"].([]any); ok {
-		tools := make([]any, 0, len(rawTools))
-		for _, rt := range rawTools {
-			tm, ok := rt.(map[string]any)
-			if !ok {
-				continue
-			}
-			if fn, ok := tm["function"].(map[string]any); ok {
-				name, _ := fn["name"].(string)
-				if name == "" {
-					continue
-				}
-				out := map[string]any{"name": name}
-				if d, _ := fn["description"].(string); d != "" {
-					out["description"] = d
-				}
-				if p, ok := fn["parameters"]; ok && p != nil {
-					out["input_schema"] = p
-				} else {
-					out["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
-				}
-				tools = append(tools, out)
-				continue
-			}
-			if _, ok := tm["name"].(string); ok { // already Anthropic-shaped / provider tool
-				tools = append(tools, tm)
-			}
-		}
-		if len(tools) == 0 {
-			delete(params, "tools")
-			delete(params, "tool_choice")
-		} else {
-			params["tools"] = tools
-		}
+	if tools, ok := m["tools"].([]any); ok && len(tools) > 0 {
+		params["tools"] = commandcodeTools(convertOpenAIToolsToClaude(tools))
 	}
-
-	// tool_choice: upstream takes Anthropic strings only ("auto"/"any"/{type:"tool",name}).
-	switch tc := params["tool_choice"].(type) {
-	case string:
-		switch tc {
-		case "required":
-			params["tool_choice"] = map[string]any{"type": "any"}
-		case "auto":
-			params["tool_choice"] = map[string]any{"type": "auto"}
-		default: // "none"/unknown
-			delete(params, "tool_choice")
-		}
-	case map[string]any:
-		if fn, ok := tc["function"].(map[string]any); ok {
-			name, _ := fn["name"].(string)
-			if name == "" {
-				delete(params, "tool_choice")
-			} else {
-				params["tool_choice"] = map[string]any{"type": "tool", "name": name}
-			}
-		}
+	if effort, ok := m["reasoning_effort"]; ok && effort != nil {
+		params["reasoning_effort"] = effort
 	}
 
 	// CommandCode messages require content as array of blocks (never raw string)
 	if rawMsgs, ok := m["messages"].([]any); ok {
-		var systemTexts []string
-		convertedMsgs := make([]any, 0, len(rawMsgs))
-		toolNames := map[string]string{} // tool_call_id → function name (tool msgs often omit it)
-		for _, rawMsg := range rawMsgs {
-			msgMap, ok := rawMsg.(map[string]any)
-			if !ok {
-				continue
-			}
-			role, _ := msgMap["role"].(string)
-			contentVal := msgMap["content"]
-
-			if role == "system" || role == "developer" {
-				if s, ok := contentVal.(string); ok && s != "" {
-					systemTexts = append(systemTexts, s)
-				}
-				continue
-			}
-
-			// OpenAI tool result → AI-SDK tool message; toolName is required there.
-			if role == "tool" {
-				callID, _ := msgMap["tool_call_id"].(string)
-				name, _ := msgMap["name"].(string)
-				if name == "" {
-					name = toolNames[callID]
-				}
-				convertedMsgs = append(convertedMsgs, map[string]any{
-					"role": "tool",
-					"content": []any{map[string]any{
-						"type":       "tool-result",
-						"toolCallId": callID,
-						"toolName":   name,
-						"output":     map[string]any{"type": "text", "value": blockText(contentVal)},
-					}},
-				})
-				continue
-			}
-
-			var contentBlocks []any
-			if strContent, ok := contentVal.(string); ok {
-				contentBlocks = append(contentBlocks, map[string]any{
-					"type": "text",
-					"text": strContent,
-				})
-			} else if arrContent, ok := contentVal.([]any); ok {
-				for _, part := range arrContent {
-					if partMap, ok := part.(map[string]any); ok {
-						pType, _ := partMap["type"].(string)
-						if pType == "text" {
-							txt, _ := partMap["text"].(string)
-							contentBlocks = append(contentBlocks, map[string]any{
-								"type": "text",
-								"text": txt,
-							})
-						} else if imgBlock := toCommandcodeImageBlock(partMap); imgBlock != nil {
-							contentBlocks = append(contentBlocks, imgBlock)
-						} else if txt, ok := partMap["text"].(string); ok {
-							contentBlocks = append(contentBlocks, map[string]any{
-								"type": "text",
-								"text": txt,
-							})
-						}
-					}
-				}
-			} else {
-				contentBlocks = append(contentBlocks, map[string]any{
-					"type": "text",
-					"text": "",
-				})
-			}
-
-			// OpenAI assistant tool_calls → AI-SDK tool-call blocks.
-			if tcs, ok := msgMap["tool_calls"].([]any); ok {
-				for _, rawTC := range tcs {
-					tc, ok := rawTC.(map[string]any)
-					if !ok {
-						continue
-					}
-					fn, _ := tc["function"].(map[string]any)
-					name, _ := fn["name"].(string)
-					if name == "" {
-						continue
-					}
-					callID, _ := tc["id"].(string)
-					args := fn["arguments"]
-					argStr, _ := args.(string)
-					var input any = map[string]any{}
-					if argStr != "" && json.Unmarshal([]byte(argStr), &input) != nil {
-						input = map[string]any{}
-					} else if args != nil && argStr == "" {
-						input = args
-					}
-					contentBlocks = append(contentBlocks, map[string]any{
-						"type":       "tool-call",
-						"toolCallId": callID,
-						"toolName":   name,
-						"input":      input,
-					})
-					toolNames[callID] = name
-				}
-				if len(contentBlocks) == 0 {
-					contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": ""})
-				}
-			}
-
-			convertedMsg := map[string]any{
-				"role":    role,
-				"content": contentBlocks,
-			}
-			convertedMsgs = append(convertedMsgs, convertedMsg)
-		}
-		params["messages"] = convertedMsgs
-		if len(systemTexts) > 0 {
-			params["system"] = strings.Join(systemTexts, "\n\n")
+		messages, system := commandcodeConvertMessages(rawMsgs)
+		params["messages"] = messages
+		if system != "" {
+			params["system"] = system
 		}
 	}
 
 	payload := map[string]any{
-		"threadId": uuid.New().String(),
+		"threadId": commandcodeSessionUUID(sessionID),
 		"memory":   "",
 		"config": map[string]any{
-			"workingDir":    "/",
+			"workingDir":    commandcodeWorkingDir,
 			"date":          time.Now().UTC().Format("2006-01-02"),
-			"environment":   runtime.GOOS,
+			"environment":   providers.NodePlatform(),
 			"structure":     []any{},
 			"isGitRepo":     false,
 			"currentBranch": "",
@@ -685,10 +551,16 @@ func buildCommandcodeBodyForSession(body []byte, model, sessionID string) ([]byt
 		"params": params,
 	}
 
+	// json.Marshal is fine here: encoding/json sorts map keys, and threadId
+	// is derived from the client session, so a repeat turn from one session
+	// serialises byte-identically for the prefix cache. The caller-shaped
+	// `params` path above keeps marshalStable for the same reason.
 	return json.Marshal(payload)
 }
 
 // ForwardCommandcode forwards to CommandCode with NDJSON→SSE translation.
+// 502/503/504 (HTTP status or in-stream error before any byte is written)
+// are retried twice with a linear backoff, as upstream's executor does.
 func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 	var oreq struct {
 		Model string `json:"model"`
@@ -709,21 +581,56 @@ func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 	if err != nil {
 		return fmt.Errorf("marshal commandcode body: %w", err)
 	}
-	// Build request with custom headers (not using proxy.ForwardCommandcode)
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var envelope struct {
+		ThreadID string `json:"threadId"`
+	}
+	_ = json.Unmarshal(reqBody, &envelope)
+	for attempt := 0; ; attempt++ {
+		err = forwardCommandcodeOnce(ctx, w, req, reqBody, envelope.ThreadID, oreq.Model)
+		if attempt >= commandcodeMaxRetries || !isCommandcodeRetryable(err) {
+			return err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func isCommandcodeRetryable(err error) bool {
+	var ue *proxy.UpstreamError
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.StatusCode == http.StatusBadGateway ||
+		ue.StatusCode == http.StatusServiceUnavailable ||
+		ue.StatusCode == http.StatusGatewayTimeout
+}
+
+func forwardCommandcodeOnce(ctx context.Context, w http.ResponseWriter, req *Request, reqBody []byte, threadID, model string) error {
 	r, err := http.NewRequestWithContext(ctx, "POST", req.Config.BaseURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+req.APIKey)
-	r.Header.Set("x-session-id", uuid.New().String())
-	r.Header.Set("x-command-code-version", "0.25.7")
-	r.Header.Set("x-cli-environment", "cli")
-	r.Header.Set("User-Agent", "commandcode/0.25.7 (cli)")
+	// x-session-id mirrors the body's threadId, as the official CLI does.
+	r.Header.Set("x-session-id", threadID)
+	r.Header.Set("x-project-slug", commandcodeProjectSlug)
+	// Defaults mirror the registry StaticHeaders (command-code@1.88.0);
+	// the loop below lets a configured value win.
+	r.Header.Set("User-Agent", "cli")
+	r.Header.Set("x-command-code-version", "1.88.0")
+	r.Header.Set("x-cli-environment", "production")
+	r.Header.Set("x-cli-surface", "cli")
+	r.Header.Set("x-taste-learning", "false")
 	r.Header.Set("Accept", "text/event-stream")
 	if req.Config != nil && req.Config.StaticHeaders != nil {
 		for k, v := range req.Config.StaticHeaders {
@@ -744,9 +651,13 @@ func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody}
 	}
 
-	return handleCommandcodeStream(w, req, resp.Body, oreq.Model)
+	if !req.IsStream {
+		return handleCommandcodeNonStream(w, req, resp.Body, model)
+	}
+	return handleCommandcodeStream(w, req, resp.Body, model)
 }
 
+// ForwardOpencode handles requests for opencode (free tier).
 // ForwardOpencode handles requests for opencode (free tier).
 // The free-tier gate is keyless: every request travels with the v2 CLI
 // fingerprint and "Bearer public" (stamped by proxy.BuildOpenCodeHeaders),

@@ -1089,6 +1089,9 @@ type CommandcodeStreamState struct {
 	OutputLength  int
 	FinishReason  string
 	Finished      bool
+	// Usage is the upstream token usage (finish totalUsage, or the last
+	// finish-step usage); nil until one arrives.
+	Usage map[string]any
 }
 
 func BuildCommandcodeChunk(state *CommandcodeStreamState, delta map[string]any, finishReason string) string {
@@ -1255,15 +1258,15 @@ func handleCommandcodeStream(w http.ResponseWriter, req *Request, upstream io.Re
 // cmdcodeFinishReason maps upstream AI-SDK finish reasons to OpenAI wire values.
 func cmdcodeFinishReason(r string) string {
 	switch r {
-	case "tool-calls":
+	case "tool-calls", "tool_use":
 		return "tool_calls"
-	case "length", "stop", "content-filter", "error":
-		if r == "content-filter" {
-			return "content_filter"
-		}
+	case "content-filter":
+		return "content_filter"
+	case "error", "":
+		return "stop"
+	default:
 		return r
 	}
-	return r
 }
 
 func ProcessCommandcodeEvent(event map[string]any, eventType string, state *CommandcodeStreamState) []string {
@@ -1397,6 +1400,9 @@ func ProcessCommandcodeEvent(event map[string]any, eventType string, state *Comm
 		if reason, ok := event["finishReason"].(string); ok {
 			state.FinishReason = cmdcodeFinishReason(reason)
 		}
+		if u, ok := event["usage"].(map[string]any); ok {
+			state.Usage = u
+		}
 
 	case "finish":
 		reason := cmdcodeFinishReason(state.FinishReason)
@@ -1412,15 +1418,34 @@ func ProcessCommandcodeEvent(event map[string]any, eventType string, state *Comm
 
 		chunk := BuildCommandcodeChunk(state, map[string]any{}, reason)
 
-		if totalUsage, ok := event["totalUsage"].(map[string]any); ok {
+		totalUsage, ok := event["totalUsage"].(map[string]any)
+		if ok {
+			state.Usage = totalUsage
+		}
+		if totalUsage = state.Usage; len(totalUsage) > 0 {
 			usage := map[string]any{}
-			if pt, ok := totalUsage["promptTokens"].(float64); ok {
+			if pt, ok := commandcodeTokenField(totalUsage, "inputTokens", "promptTokens"); ok {
 				usage["prompt_tokens"] = int(pt)
 			}
-			if ct, ok := totalUsage["completionTokens"].(float64); ok {
+			if ct, ok := commandcodeTokenField(totalUsage, "outputTokens", "completionTokens"); ok {
 				usage["completion_tokens"] = int(ct)
 			}
+			// Cache reads and reasoning tokens are billed at their own
+			// rate; dropping them reports every turn as fully uncached.
+			if cr, ok := totalUsage["cachedInputTokens"].(float64); ok && cr > 0 {
+				usage["prompt_tokens_details"] = map[string]any{"cached_tokens": int(cr)}
+			}
+			if rt, ok := totalUsage["reasoningTokens"].(float64); ok && rt > 0 {
+				usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": int(rt)}
+			}
 			if len(usage) > 0 {
+				total, hasTotal := totalUsage["totalTokens"].(float64)
+				if !hasTotal {
+					pt, _ := usage["prompt_tokens"].(int)
+					ct, _ := usage["completion_tokens"].(int)
+					total = float64(pt + ct)
+				}
+				usage["total_tokens"] = int(total)
 				var parsed map[string]any
 				if err := json.Unmarshal([]byte(chunk), &parsed); err != nil {
 					log.Warn("executor", "commandcode unmarshal chunk", "error", err)
@@ -1454,4 +1479,54 @@ func ProcessCommandcodeEvent(event map[string]any, eventType string, state *Comm
 	}
 
 	return out
+}
+
+// commandcodeTokenField reads the first present numeric token field among
+// keys (Command Code spells them inputTokens/outputTokens; the gateway's
+// own spelling is promptTokens/completionTokens).
+func commandcodeTokenField(m map[string]any, keys ...string) (float64, bool) {
+	for _, k := range keys {
+		if v, ok := m[k].(float64); ok {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// commandcodeUsage builds the gateway's usage record: real upstream counts
+// (input, output, cache reads, reasoning) when Command Code reported them,
+// the output-length estimate otherwise.
+func commandcodeUsage(state *CommandcodeStreamState) *translator.OpenAIUsage {
+	if len(state.Usage) == 0 {
+		return &translator.OpenAIUsage{CompletionTokens: state.OutputLength / 4}
+	}
+	u := &translator.OpenAIUsage{}
+	if in, ok := commandcodeTokenField(state.Usage, "inputTokens", "promptTokens"); ok {
+		u.PromptTokens = int(in)
+	}
+	if out, ok := commandcodeTokenField(state.Usage, "outputTokens", "completionTokens"); ok {
+		u.CompletionTokens = int(out)
+	}
+	if c, ok := state.Usage["cachedInputTokens"].(float64); ok && c > 0 {
+		u.CachedTokens = int(c)
+		u.PromptTokensDetails = &translator.PromptTokensDetails{CachedTokens: int(c)}
+	}
+	if r, ok := state.Usage["reasoningTokens"].(float64); ok && r > 0 {
+		u.CompletionTokensDetails = &translator.CompletionTokensDetails{ReasoningTokens: int(r)}
+	}
+	return u
+}
+
+// handleCommandcodeNonStream serves a non-streaming client by collecting
+// the SSE stream and folding it into a single OpenAI completion JSON.
+func handleCommandcodeNonStream(w http.ResponseWriter, req *Request, upstream io.Reader, model string) error {
+	collect := &sseCollectWriter{}
+	if err := handleCommandcodeStream(collect, req, upstream, model); err != nil {
+		return err
+	}
+	folded, ok := sseToOpenAIJSON(collect.buf.Bytes())
+	if !ok {
+		return proxy.UpstreamFailure(http.StatusBadGateway, proxy.NoCompletionInStream)
+	}
+	return jsonResponse(req.Ctx, w, bytes.NewReader(folded), req.TranslateResp, req.ResponseBuf)
 }
