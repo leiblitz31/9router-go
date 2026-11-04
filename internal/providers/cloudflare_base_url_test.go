@@ -5,23 +5,21 @@ import (
 	"testing"
 )
 
-// The registry URL for cloudflare-ai must never carry an empty account
-// segment: an explicit CLOUDFLARE_ACCOUNT_ID wins, otherwise the {accountId}
-// placeholder stays for the chat layer to fill per connection.
-func TestCloudflareAIBaseURL(t *testing.T) {
-	t.Run("env unset keeps placeholder", func(t *testing.T) {
-		t.Setenv("CLOUDFLARE_ACCOUNT_ID", "")
-		got := cloudflareAIBaseURL()
-		if !strings.Contains(got, "/accounts/{accountId}/ai/v1/chat/completions") {
-			t.Errorf("cloudflareAIBaseURL() = %q, want {accountId} placeholder", got)
-		}
-	})
-
-	t.Run("env set wins", func(t *testing.T) {
-		t.Setenv("CLOUDFLARE_ACCOUNT_ID", "acc999")
-		got := cloudflareAIBaseURL()
-		if !strings.Contains(got, "/accounts/acc999/ai/v1/chat/completions") {
-			t.Errorf("cloudflareAIBaseURL() = %q, want env account id", got)
-		}
-	})
+// The registry URL for cloudflare-ai always carries the {accountId}
+// placeholder: the account id is per-connection state that the chat layer
+// resolves from providerSpecificData (CLOUDFLARE_ACCOUNT_ID remains a
+// resolution-time fallback there). Baking an env var into the registry
+// sent every cf/* request to /accounts//ai/v1/... (Cloudflare 7003)
+// whenever the variable was unset.
+func TestCloudflareAIRegistryURLPlaceholder(t *testing.T) {
+	cfg, ok := KnownProviders["cloudflare-ai"]
+	if !ok {
+		t.Fatal("cloudflare-ai missing from KnownProviders")
+	}
+	if !strings.Contains(cfg.BaseURL, "/accounts/{accountId}/ai/v1/chat/completions") {
+		t.Errorf("registry BaseURL = %q, want {accountId} placeholder", cfg.BaseURL)
+	}
+	if strings.Contains(cfg.BaseURL, "/accounts//") {
+		t.Errorf("registry BaseURL = %q, must never contain an empty account segment", cfg.BaseURL)
+	}
 }
