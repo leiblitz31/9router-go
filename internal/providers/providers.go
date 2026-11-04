@@ -26,6 +26,10 @@ type ProviderConfig struct {
 	SearchURL     string            // /v1/search endpoint. Empty means the provider has no search lane.
 	SearchMethod  string            // HTTP method for search: GET or POST (default POST)
 	UsageURL      string            // override /usage endpoint (quota tracker)
+	// ThinkingFormat mirrors the upstream registry's transport.thinkingFormat:
+	// the wire dialect this provider expects for reasoning fields ("" = the
+	// model's capability decides). Consumed by internal/thinking.resolveFormat.
+	ThinkingFormat string
 
 	// UpstreamIsAnthropic marks an entry whose upstream speaks Anthropic Messages while
 	// the client may speak OpenAI, on a host that is not api.anthropic.com. The existing
