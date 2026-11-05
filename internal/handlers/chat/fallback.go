@@ -254,7 +254,7 @@ func (h *ChatHandler) handleAccountFallback(
 			// selector can skip this account before spending a request
 			// (upstream applyErrorState). Only lock if error is account-scoped,
 			// not model-scoped (e.g. 401 auth issues), so unrelated models stay available.
-			if isModelScopedError(ue.StatusCode, errorText, model, ue.Body) {
+			if isModelScopedError(ue.StatusCode, errorText, model, ue.Body) || isCommandCodeModelRefusal(provider, ue.StatusCode, ue.Body) {
 				if recErr := h.Repo.RecordConnectionScopedError(connObj.ID, model, "chat", ue.StatusCode, errorText, classification.NewBackoffLevel); recErr != nil {
 					log.Warn("fallback", "record connection error failed", "conn", connObj.ID, "error", recErr)
 				}
@@ -1575,6 +1575,26 @@ func mentionsGate(lower string) bool {
 		strings.Contains(lower, "not supported") ||
 		strings.Contains(lower, "model access is disabled") ||
 		strings.Contains(lower, "endpoint is unavailable")
+}
+
+// isCommandCodeModelRefusal reports whether a Command Code failure is a
+// deterministic per-model verdict delivered in its structured envelope
+// ({"success":false,"error":{"code":"FORBIDDEN",...}}): a retired free tier
+// ("The free Laguna S 2.1 tier ended on November 4, 2026") or an
+// unrecognized model id ("Model/provider not recognized:
+// anthropic:mimo-v2.6-flash"). Neither says anything about the account —
+// Command Code reports credential failures as 401 — so the refusal is
+// model-scoped: lock the model, never park the whole connection behind a
+// rate-limit cooldown that takes every healthy model down with it.
+func isCommandCodeModelRefusal(provider string, statusCode int, body []byte) bool {
+	if statusCode != http.StatusForbidden {
+		return false
+	}
+	if provider != "commandcode" && provider != "cmc" {
+		return false
+	}
+	return bytes.Contains(body, []byte(`"code":"FORBIDDEN"`)) ||
+		bytes.Contains(body, []byte(`"code": "FORBIDDEN"`))
 }
 
 // isModelScopedError reports whether an upstream retryable error is
