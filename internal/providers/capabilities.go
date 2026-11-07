@@ -643,6 +643,21 @@ func init() {
 		"gemini-4-argon":        geminiWebCaps,
 	}
 
+	// mimo-web overrides any generic *mimo* pattern rows. The web surface
+	// has no native tool channel and the executor does not synthesize one,
+	// so Tools stays false. Context windows are the Studio's own published
+	// figures (its /open-apis/bot/config) for the v2.6 line; the v2.5 line
+	// publishes none there, so it carries none here rather than a guess.
+	mimoWebCaps := Capabilities{Vision: true, Reasoning: true, Search: true, ContextWindow: 1000000}
+	mimoWebLegacyCaps := Capabilities{Vision: true, Reasoning: true, Search: true}
+	providerCapabilities["mimo-web"] = map[string]Capabilities{
+		"mimo-v2.6-flash":                 mimoWebCaps,
+		"mimo-v2.6-pro":                   mimoWebCaps,
+		"mimo-v2.6-pro-ultraspeed-studio": mimoWebCaps,
+		"mimo-v2.5-pro":                   mimoWebLegacyCaps,
+		"mimo-v2.5":                       mimoWebLegacyCaps,
+	}
+
 	providerCapabilities["opencode-go"] = map[string]Capabilities{
 		"glm-5.3-flash": {
 			Vision: true, VideoInput: true, PDF: true, Reasoning: true, Tools: true,

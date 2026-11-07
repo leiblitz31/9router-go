@@ -413,6 +413,18 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	// Xiaomi MiMo Studio: the signed-in web chat at aistudio.xiaomimimo.com.
+	// A distinct deployment from the `xiaomi-mimo` API above, with its own
+	// credential and quota, so it is never aliased onto it (section 3.A).
+	// The credential is the captured Studio session (the serviceToken,
+	// userId and xiaomichatbot_ph cookies); the executor presents them as
+	// cookies itself, and the bearer declaration only feeds the plumbing
+	// that wants a header shape, as deepseek-web's does.
+	"mimo-web": {
+		BaseURL:    "https://aistudio.xiaomimimo.com/open-apis/react/chat",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	// SumoPod — Indonesian AI gateway (ai.sumopod.com), OpenAI-compatible
 	// chat completions with 60+ models across Claude, Gemini, GPT, DeepSeek,
 	// Qwen, GLM, Kimi, MiniMax, Seed, Grok, Hy and Mimo.
