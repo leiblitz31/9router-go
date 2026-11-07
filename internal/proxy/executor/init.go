@@ -82,6 +82,10 @@ func RegisterAll() {
 	// browser Cookie header and answers NDJSON, not an OpenAI stream — the
 	// shared passthrough cannot express the handshake or the wire shape.
 	Register("grok-web", func() Executor { return ForwardGrokWeb })
+	// mimo-web talks to Xiaomi MiMo Studio (aistudio.xiaomimimo.com) with a
+	// captured login session: one POST answers an SSE event stream whose
+	// names and payload shape no shared passthrough speaks.
+	Register("mimo-web", func() Executor { return ForwardMimoWeb })
 	// One executor serves both Bedrock entries: the registry entry's Format picks the
 	// wire shape (Anthropic Messages vs OpenAI Chat Completions), the way one Vertex
 	// executor serves vertex and vertex-partner.

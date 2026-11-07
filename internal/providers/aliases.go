@@ -68,6 +68,7 @@ var ProviderAliasMap = map[string]string{
 	"km":             "kimi",
 	"kr":             "kiro",
 	"mimo":           "xiaomi-mimo",
+	"mw":             "mimo-web",
 	"mm":             "minimax",
 	// MiniMax Code (mcode). Upstream publishes the China entry as "mm", which
 	// this table already carries for the API-key `minimax` provider and which
