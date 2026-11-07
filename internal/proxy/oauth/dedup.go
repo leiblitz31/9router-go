@@ -126,3 +126,11 @@ func ResetRefreshCache() {
 	defer refreshMu.Unlock()
 	refreshCache = make(map[string]refreshCacheEntry)
 }
+
+// ResetRefreshSlots clears per-connection refresh slot state between
+// tests. Upstream (68ec9f0b) keeps a refreshSlots map in singleflight.go;
+// this port's dedup design has no such map — refreshFlight self-forgets
+// on completion and the token cache is cleared by ResetRefreshCache —
+// so there is no slot state to reset. The function exists so the #945
+// oauth-lock tests keep their isolation contract on this architecture.
+func ResetRefreshSlots() {}
