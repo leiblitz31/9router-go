@@ -818,6 +818,18 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 			}
+			// Cloudflare AI image models answer /ai/run/<model>, which the
+			// generic forwarder cannot reach — dedicated lane for all of them.
+			if (endpoint == "/v1/images/generations" || endpoint == "/images/generations" ||
+				endpoint == "/v1/images/edits" || endpoint == "/images/edits") && isCloudflareImageModel(subInfo) {
+				if err := h.handleCloudflareImage(w, r, body, subInfo); err == nil {
+					return
+				} else {
+					lastErr = err.Error()
+					continue
+				}
+			}
+
 			if (endpoint == "/v1/audio/transcriptions" || endpoint == "/audio/transcriptions") && (subInfo.Provider == "antigravity" || subInfo.Provider == "ag") {
 				if err := h.handleAntigravitySTT(w, r, body, subInfo); err == nil {
 					return
@@ -866,6 +878,9 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			}
 
 			finalBody := handlerutil.UpdateModelInBody(body, subInfo.Model)
+			// Cloudflare AI's flux-1-schnell schema rejects width/height — handled
+			// by the cloudflare image lane, not here.
+
 			// The endpoint the caller used is a route on this gateway, not a
 			// path on the vendor's host: appending it to BaseURL built URLs the
 			// vendor never serves (tavily got api.tavily.com/search/v1/search,
@@ -996,6 +1011,15 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Cloudflare AI image models answer /ai/run/<model>, which the generic
+	// forwarder cannot reach — dedicated lane for all of them.
+	if (endpoint == "/v1/images/generations" || endpoint == "/images/generations" ||
+		endpoint == "/v1/images/edits" || endpoint == "/images/edits") && isCloudflareImageModel(modelInfo) {
+		if err := h.handleCloudflareImage(w, r, body, modelInfo); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
 	// UC web: the persona image API needs a minted Clerk session, not a bearer
 	// key, so the generic forward cannot reach it.
 	if (endpoint == "/v1/images/generations" || endpoint == "/images/generations") && (modelInfo.Provider == "uc-web" || modelInfo.Provider == "uc") {
@@ -1401,4 +1425,62 @@ func buildSystemoneURL(override, cfgURL, cfgPath string) string {
 		return base + path[len(prefix):]
 	}
 	return base + path
+}
+
+// forwardGeminiEmbeddingDimensions maps incoming OpenAI "dimensions" to
+// Google Gemini's "outputDimensionality" property (upstream decolua/9router#1366 parity).
+func forwardGeminiEmbeddingDimensions(body []byte) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	dimsRaw, exists := payload["dimensions"]
+	if !exists || dimsRaw == nil {
+		return body
+	}
+	dims := 0
+	switch v := dimsRaw.(type) {
+	case float64:
+		dims = int(v)
+	case int:
+		dims = v
+	case int64:
+		dims = int(v)
+	}
+	if dims <= 0 {
+		return body
+	}
+	payload["outputDimensionality"] = dims
+	if updated, err := json.Marshal(payload); err == nil {
+		return updated
+	}
+	return body
+}
+
+// isGitHubCopilotProvider reports whether the resolved provider is GitHub Copilot.
+func isGitHubCopilotProvider(provider string) bool {
+	return providers.ResolveAlias(provider) == "github"
+}
+
+// wrapCopilotEmbeddingInput wraps a bare "input" string into an array of
+// strings ([input]), which Copilot requires. It leaves an existing array
+// untouched and leaves bodies without "input" alone.
+func wrapCopilotEmbeddingInput(body []byte) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		return body
+	}
+	input, ok := payload["input"]
+	if !ok {
+		return body
+	}
+	if _, isArray := input.([]any); isArray {
+		return body
+	}
+	payload["input"] = []any{input}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
 }
