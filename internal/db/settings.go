@@ -97,7 +97,16 @@ type SettingsData struct {
 	// in, so "a URL exists" cannot stand in for "the operator turned this on".
 	// Off by default: an unconfigured proxy must not be a slow path on every
 	// request.
-	HeadroomEnabled            bool                            `json:"headroomEnabled"`
+	HeadroomEnabled bool `json:"headroomEnabled"`
+	// HeadroomAutostart launches the local Headroom proxy daemon on 9router boot.
+	// It is decoupled from HeadroomEnabled so operators who run Headroom standalone or
+	// selectively toggle request compression still have the proxy ready on startup.
+	HeadroomAutostart bool `json:"headroomAutostart"`
+	// HeadroomEngine selects the compression engine: "builtin" runs in-process
+	// with no dependency, "external" posts to HeadroomUrl. Empty means "builtin",
+	// so an existing settings row that never set the field gets the in-process
+	// engine rather than a proxy nobody installed.
+	HeadroomEngine             string                          `json:"headroomEngine,omitempty"`
 	HeadroomCodeAware          bool                            `json:"headroomCodeAware"`
 	HeadroomKompress           bool                            `json:"headroomKompress"`
 	HeadroomTimeoutMs          int                             `json:"headroomTimeoutMs"`
@@ -164,6 +173,14 @@ func DefaultSettings() *SettingsData {
 		SystemPromptPrefix:      "",
 		SystemPromptSuffix:      "",
 		HeadroomUrl:             "http://localhost:8787",
+		HeadroomAutostart:       false,
+		// The engine is written as the literal rather than imported from
+		// internal/headroom: the db package is imported by everything, and
+		// internal/headroom imports the proxy package, so importing it here
+		// would make the settings layer depend on the network stack.
+		// internal/headroom.NormalizeEngine is the single place that interprets
+		// the value, and it treats the empty string as this same engine.
+		HeadroomEngine:          "builtin",
 		HeadroomKompress:        true,
 		HeadroomTimeoutMs:       3000,
 		SemanticCacheEnabled:    false,
@@ -277,6 +294,15 @@ func (r *Repo) GetSettings() (*SettingsData, error) {
 	}
 	if v, ok := raw["headroomEnabled"].(bool); ok {
 		s.HeadroomEnabled = v
+	}
+	if v, ok := raw["headroomAutostart"].(bool); ok {
+		s.HeadroomAutostart = v
+	}
+	// An empty field is not written: the row keeps whatever the default put
+	// there, which is the built-in engine. Storing "" would make a later read
+	// lose the default and look like a row that never had one.
+	if v := handlerutil.GetString(raw, "headroomEngine"); v != "" {
+		s.HeadroomEngine = v
 	}
 	if v, ok := raw["headroomCodeAware"].(bool); ok {
 		s.HeadroomCodeAware = v
