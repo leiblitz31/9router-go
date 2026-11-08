@@ -218,6 +218,15 @@ func isDSMLAttrBreak(c byte) bool {
 // because the arguments string is compared when deciding whether a call repeats.
 func deepSeekDSMLArguments(body string) string {
 	params := deepSeekDSMLParameters(body)
+	if len(params) == 0 {
+		// Models regularly write the arguments as one JSON object in the invoke
+		// body instead of parameter elements, especially for structured or long
+		// values. Without this fallback such a call degraded silently to {} and
+		// the client rejected it for missing required properties.
+		if obj := deepSeekDSMLJSONBody(body); obj != "" {
+			return obj
+		}
+	}
 
 	names := make([]string, 0, len(params))
 	for name := range params {
@@ -235,6 +244,23 @@ func deepSeekDSMLArguments(body string) string {
 	}
 	b.WriteString("}")
 	return b.String()
+}
+
+// deepSeekDSMLJSONBody interprets an invoke body as a single JSON object and
+// returns it normalized, or "" when the body is not a JSON object. The invoke
+// span still carries its closing tag, and prose may surround the object, so the
+// outermost braces delimit the candidate.
+func deepSeekDSMLJSONBody(body string) string {
+	start := strings.Index(body, "{")
+	end := strings.LastIndex(body, "}")
+	if start < 0 || end <= start {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(body[start:end+1]), &obj); err != nil || obj == nil {
+		return ""
+	}
+	return body[start : end+1]
 }
 
 // deepSeekDSMLParameters returns every parameter element's body, keyed by name.
@@ -260,7 +286,24 @@ func deepSeekDSMLParameters(body string) map[string]string {
 			return params
 		}
 		if name := deepSeekDSMLAttribute(attributes, "name"); name != "" {
-			params[name] = rest[:closeAt[0]]
+			value := rest[:closeAt[0]]
+			// A model that starts a call, abandons it mid-value, and
+			// restarts the block inside the unclosed parameter leaves the
+			// restart's markup inside this value; the first close tag then
+			// belongs to the restarted element. The contaminated text is
+			// not a value — drop the element and resume scanning at the
+			// nested opening, where the real value lives. (Seen live on a
+			// mimo install call: the recovered command contained a whole
+			// second DSML block.)
+			if nested := deepSeekDSMLParameterOpen.FindStringIndex(value); nested != nil {
+				rest = rest[nested[0]:]
+				continue
+			}
+			if nested := deepSeekDSMLInvokeOpen.FindStringIndex(value); nested != nil {
+				rest = rest[nested[0]:]
+				continue
+			}
+			params[name] = value
 		}
 		rest = rest[closeAt[1]:]
 	}

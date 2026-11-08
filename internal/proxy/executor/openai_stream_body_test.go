@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy"
 )
 
 // A streaming request whose upstream answers 200 with a body that is not an

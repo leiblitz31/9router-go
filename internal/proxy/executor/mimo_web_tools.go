@@ -1,8 +1,8 @@
 package executor
 
 import (
-	"fmt"
 	json "encoding/json/v2"
+	"fmt"
 	"strings"
 )
 
@@ -59,6 +59,12 @@ func mimoWebRenderTools(tools []deepSeekToolSpec) string {
 	// runnable is what turns that into the call the user asked for.
 	b.WriteString("- The tools above are installed and runnable. You can use them; a " +
 		"request is not outside your abilities because it needs one.\n")
+	b.WriteString("- Fill in EVERY required parameter of a call. A call missing one is " +
+		"rejected before it runs and the whole turn fails with it.\n")
+	b.WriteString("- Tool results come back to you from the harness after you emit a " +
+		"call. Never claim a call failed, succeeded, or returned anything before " +
+		"its result has actually been given to you — if you have not emitted the " +
+		"call yet, emit it instead of describing it.\n")
 	b.WriteString("- Never answer that you lack a capability the list above provides, " +
 		"and never describe a call as attempted or failed — either emit the calls " +
 		"block so the call really runs, or answer in plain text.\n")
@@ -155,15 +161,160 @@ func mimoWebAssistantText(msg map[string]any) string {
 	return text
 }
 
+// mimoWebArgContaminated reports whether an argument value carries
+// tool-call markup — a call the model restarted mid-value can leave a
+// whole second DSML block inside a parameter, and such a value is not
+// executable input, however present it looks to a schema check.
+func mimoWebArgContaminated(v any) bool {
+	s, ok := v.(string)
+	if !ok {
+		return false
+	}
+	return strings.Contains(s, "｜｜DSML｜｜") || strings.Contains(s, "|DSML|") ||
+		strings.Contains(s, "<｜｜") || strings.Contains(s, "DSML｜｜")
+}
+
+// mimoWebRequiredProps reads the required property names out of a tool's
+// parameter schema, which the shared tool spec carries as raw JSON.
+func mimoWebRequiredProps(tool deepSeekToolSpec) []string {
+	var schema struct {
+		Required []string `json:"required"`
+	}
+	if len(tool.Function.Parameters) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(tool.Function.Parameters, &schema); err != nil {
+		return nil
+	}
+	return schema.Required
+}
+
+// mimoInvalidCall names one recovered call that violates its own tool's
+// schema, with the required properties it is missing.
+type mimoInvalidCall struct {
+	Name    string
+	Missing []string
+}
+
+// mimoWebValidateCalls checks every recovered call against the required
+// properties its tool declares. Synthesis recovers calls from prose, so
+// a call can arrive malformed — empty arguments being the observed case
+// (a live session's bash call reached the client as {} and was rejected
+// for missing command and description). Forwarding such a call anyway
+// fails the whole client turn; holding it back is what lets the caller
+// retry correctively instead.
+func mimoWebValidateCalls(calls []deepSeekToolRequest, tools []deepSeekToolSpec) []mimoInvalidCall {
+	required := make(map[string][]string, len(tools))
+	for _, tool := range tools {
+		required[tool.Function.Name] = mimoWebRequiredProps(tool)
+	}
+	var invalid []mimoInvalidCall
+	for _, call := range calls {
+		req, known := required[call.Name]
+		if !known {
+			continue
+		}
+		var args map[string]any
+		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil || args == nil {
+			invalid = append(invalid, mimoInvalidCall{Name: call.Name, Missing: append([]string{}, req...)})
+			continue
+		}
+		var missing []string
+		for _, name := range req {
+			if _, ok := args[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+		for name, value := range args {
+			if mimoWebArgContaminated(value) {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			invalid = append(invalid, mimoInvalidCall{Name: call.Name, Missing: missing})
+		}
+	}
+	return invalid
+}
+
+// mimoWebValidCalls returns the calls that pass validation, in order.
+func mimoWebValidCalls(calls []deepSeekToolRequest, tools []deepSeekToolSpec) []deepSeekToolRequest {
+	bad := mimoWebInvalidIndexes(calls, tools)
+	if len(bad) == 0 {
+		return calls
+	}
+	valid := make([]deepSeekToolRequest, 0, len(calls))
+	for i, call := range calls {
+		if !bad[i] {
+			valid = append(valid, call)
+		}
+	}
+	return valid
+}
+
+// mimoWebInvalidIndexes marks the calls validation rejects, by position,
+// so filtering drops exactly the malformed calls and keeps a valid call
+// to the same tool standing next to a broken one.
+func mimoWebInvalidIndexes(calls []deepSeekToolRequest, tools []deepSeekToolSpec) map[int]bool {
+	required := make(map[string][]string, len(tools))
+	for _, tool := range tools {
+		required[tool.Function.Name] = mimoWebRequiredProps(tool)
+	}
+	bad := make(map[int]bool)
+	for i, call := range calls {
+		req, known := required[call.Name]
+		if !known {
+			continue
+		}
+		var args map[string]any
+		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil || args == nil {
+			bad[i] = true
+			continue
+		}
+		for _, name := range req {
+			if _, ok := args[name]; !ok {
+				bad[i] = true
+				break
+			}
+		}
+		if bad[i] {
+			continue
+		}
+		for _, value := range args {
+			if mimoWebArgContaminated(value) {
+				bad[i] = true
+				break
+			}
+		}
+	}
+	return bad
+}
+
+// mimoWebCorrectionNote is the instruction appended to the query when a
+// turn's calls are re-asked after validation rejected them: it names the
+// defect per call so the retry repairs exactly what was wrong rather
+// than repeating it.
+func mimoWebCorrectionNote(invalid []mimoInvalidCall) string {
+	var b strings.Builder
+	b.WriteString("\n\n[Correction: your previous reply's tool call(s) were rejected " +
+		"before execution and never ran:")
+	for _, inv := range invalid {
+		fmt.Fprintf(&b, "\n- the call to %q had invalid parameter(s): %s (missing, or containing tool-call markup).",
+			inv.Name, strings.Join(inv.Missing, ", "))
+	}
+	b.WriteString("\nEmit the call(s) again in the DSML format, with every required " +
+		"parameter filled in. Do not describe the calls in prose.]")
+	return b.String()
+}
+
 // mimoWebFinalizeMessage turns a completed turn into the reply message
-// when the request declared tools: calls are recovered from the answer
-// text and returned as tool_calls with whatever prose surrounded them
-// kept as the content, and an answer carrying markup but no recognisable
-// call has the markup stripped rather than shown to the client as if it
-// were the reply. Reasoning rides along on either shape.
-func mimoWebFinalizeMessage(turn *mimoWebTurn, tools []deepSeekToolSpec) (map[string]any, string) {
+// when the request declared tools: the recovered (and validated) calls
+// are returned as tool_calls with whatever prose surrounded them kept as
+// the content, and an answer carrying markup but no recognisable call has
+// the markup stripped rather than shown to the client as if it were the
+// reply. Reasoning rides along on either shape.
+func mimoWebFinalizeMessage(turn *mimoWebTurn, calls []deepSeekToolRequest) (map[string]any, string) {
 	text := turn.content.String()
-	calls := deepSeekExtractToolCalls(text, tools)
 	var message map[string]any
 	if len(calls) > 0 {
 		raws := make([]string, 0, len(calls))

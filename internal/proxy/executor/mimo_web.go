@@ -76,6 +76,11 @@ func ForwardMimoWeb(w http.ResponseWriter, req *Request) error {
 		Attachments: []any{},
 	}
 
+	responseID := "chatcmpl-mimo-" + mimoWebRandomID()[:12]
+	if len(tools) > 0 {
+		return mimoWebToolTurn(ctx, w, req, client, turn, model, responseID, tools)
+	}
+
 	log.Info("mimo-web", "query", "model", model, "chars", len(query), "thinking", turn.ModelConfig.EnableThinking)
 
 	stream, err := client.chat(ctx, turn)
@@ -90,11 +95,10 @@ func ForwardMimoWeb(w http.ResponseWriter, req *Request) error {
 	// outlive neither the turn nor its failures, and never block it.
 	go client.saveConversation(context.WithoutCancel(ctx), turn.ConversationID, query, mimoWebIsUltra(model))
 
-	responseID := "chatcmpl-mimo-" + mimoWebRandomID()[:12]
 	if req.IsStream {
-		return mimoWebStreamToClient(ctx, w, req, stream, model, responseID, tools)
+		return mimoWebStreamToClient(ctx, w, req, stream, model, responseID)
 	}
-	return mimoWebCollectToClient(ctx, w, req, stream, model, responseID, tools)
+	return mimoWebCollectToClient(ctx, w, req, stream, model, responseID)
 }
 
 // mimoWebResolveModel takes the bare model id for this turn: the router's
@@ -306,10 +310,7 @@ func mimoWebChunk(responseID, model string, created int64, delta map[string]any,
 // reported (when it reported any). Headers are committed only when the
 // first answer delta exists, so a turn the upstream refuses up front
 // still surfaces as the failure it is instead of an empty 200 stream.
-func mimoWebStreamToClient(ctx context.Context, w http.ResponseWriter, req *Request, stream io.ReadCloser, model, responseID string, tools []deepSeekToolSpec) error {
-	if len(tools) > 0 {
-		return mimoWebStreamToolTurn(ctx, w, req, stream, model, responseID, tools)
-	}
+func mimoWebStreamToClient(ctx context.Context, w http.ResponseWriter, req *Request, stream io.ReadCloser, model, responseID string) error {
 	turn := &mimoWebTurn{}
 	created := time.Now().Unix()
 	flusher, _ := w.(http.Flusher)
@@ -379,32 +380,156 @@ func mimoWebStreamToClient(ctx context.Context, w http.ResponseWriter, req *Requ
 	return nil
 }
 
-// mimoWebStreamToolTurn answers a streaming request that declared
-// tools. Unlike the plain path it buffers the whole turn before writing
-// anything: a call written as JSON or DSML markup cannot be recognised
-// — or kept out of the client's content channel — until the answer is
-// complete, and an agent client waits for the call rather than reading
-// prose token by token, so nothing it values is lost. Reasoning and
-// content are then emitted as single deltas ahead of the finish chunk.
-func mimoWebStreamToolTurn(ctx context.Context, w http.ResponseWriter, req *Request, stream io.ReadCloser, model, responseID string, tools []deepSeekToolSpec) error {
-	turn := &mimoWebTurn{}
-	err := mimoWebScanEvents(ctx, stream, func(ev mimoWebEvent) bool {
-		turn.apply(ev, nil)
-		return turn.errText == ""
-	})
+// mimoWebToolTurn serves a request that declared tools. An attempt is
+// one full Studio round trip; the turn is buffered whole before anything
+// is written, because a call written as JSON or DSML markup cannot be
+// recognised — or kept out of the client's content channel — until the
+// answer is complete, and an agent client waits for the call rather
+// than reading prose token by token. The account history registration
+// happens once, for the first attempt, as it would for a single turn.
+func mimoWebToolTurn(ctx context.Context, w http.ResponseWriter, req *Request, client *mimoWebClient, template mimoWebChatBody, model, responseID string, tools []deepSeekToolSpec) error {
+	firstConversation := template.ConversationID
+	saved := false
+	round := func(query string) (*mimoWebTurn, error) {
+		body := template
+		body.MsgID = mimoWebRandomID()
+		body.Query = query
+		if saved {
+			body.ConversationID = mimoWebRandomID()
+		}
+		log.Info("mimo-web", "query", "model", model, "chars", len(query), "thinking", body.ModelConfig.EnableThinking)
+		stream, err := client.chat(ctx, body)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = stream.Close() }()
+		if !saved {
+			saved = true
+			go client.saveConversation(context.WithoutCancel(ctx), firstConversation, template.Query, mimoWebIsUltra(model))
+		}
+		turn := &mimoWebTurn{}
+		if err := mimoWebScanEvents(ctx, stream, func(ev mimoWebEvent) bool {
+			turn.apply(ev, nil)
+			return turn.errText == ""
+		}); err != nil {
+			return nil, proxy.UpstreamFailure(http.StatusBadGateway, "mimo-web: stream failed: "+err.Error())
+		}
+		if turn.errText != "" {
+			return nil, proxy.UpstreamFailure(http.StatusBadGateway, "mimo-web: "+turn.errText)
+		}
+		if turn.content.Len() == 0 && turn.reasoning.Len() == 0 {
+			return nil, proxy.UpstreamFailure(http.StatusBadGateway, "mimo-web: the Studio ended the stream without an answer")
+		}
+		return turn, nil
+	}
+	turn, calls, err := mimoWebAttemptWithRetry(round, template.Query, tools)
 	if err != nil {
-		return proxy.UpstreamFailure(http.StatusBadGateway, "mimo-web: stream failed: "+err.Error())
-	}
-	if turn.errText != "" {
-		return proxy.UpstreamFailure(http.StatusBadGateway, "mimo-web: "+turn.errText)
-	}
-	if turn.content.Len() == 0 && turn.reasoning.Len() == 0 {
-		return proxy.UpstreamFailure(http.StatusBadGateway, "mimo-web: the Studio ended the stream without an answer")
+		return err
 	}
 	if req.TTFT != nil && *req.TTFT == 0 && !req.StartTime.IsZero() {
 		*req.TTFT = time.Since(req.StartTime).Milliseconds()
 	}
-	message, finish := mimoWebFinalizeMessage(turn, tools)
+	message, finish := mimoWebFinalizeMessage(turn, calls)
+	if req.IsStream {
+		return mimoWebWriteStreamResult(w, model, responseID, turn, message, finish)
+	}
+	return mimoWebWriteCompletion(w, model, responseID, turn, message, finish)
+}
+
+// mimoWebAttemptWithRetry runs one tool turn and validates the calls it
+// recovers. A malformed call — the observed case is arguments that lost
+// their required properties — used to be forwarded as-is, and the client
+// rejected it, failing a turn that was one correction away from working.
+// So an attempt carrying an invalid call is re-asked exactly once with
+// the defect named (mimoWebCorrectionNote); if the retry fails outright
+// or still yields nothing valid, the first attempt stands with only its
+// valid calls kept. A retry that answers in prose instead of calling is
+// accepted as the model's answer.
+func mimoWebAttemptWithRetry(round func(query string) (*mimoWebTurn, error), query string, tools []deepSeekToolSpec) (*mimoWebTurn, []deepSeekToolRequest, error) {
+	turn, err := round(query)
+	if err != nil {
+		return nil, nil, err
+	}
+	calls := deepSeekExtractToolCalls(turn.content.String(), tools)
+	invalid := mimoWebValidateCalls(calls, tools)
+	if len(invalid) == 0 {
+		if len(calls) == 0 && mimoWebNarratesToolFailure(turn.content.String()) {
+			return mimoWebRetryNarration(round, query, turn, tools)
+		}
+		return turn, calls, nil
+	}
+	log.Info("mimo-web", "recovered calls failed validation; one corrective retry", "invalid", len(invalid))
+	retry, err := round(query + mimoWebCorrectionNote(invalid))
+	if err != nil {
+		return turn, mimoWebValidCalls(calls, tools), nil
+	}
+	retryCalls := deepSeekExtractToolCalls(retry.content.String(), tools)
+	if valid := mimoWebValidCalls(retryCalls, tools); len(valid) > 0 {
+		return retry, valid, nil
+	}
+	if len(retryCalls) == 0 {
+		return retry, nil, nil
+	}
+	return turn, mimoWebValidCalls(calls, tools), nil
+}
+
+// mimoWebRetryNarration re-asks a turn that narrated tool failure
+// without calling. A retry that produces valid calls — or an honest
+// prose answer — replaces the narration; anything else leaves the first
+// attempt standing, so the retry can never make the turn worse.
+func mimoWebRetryNarration(round func(query string) (*mimoWebTurn, error), query string, first *mimoWebTurn, tools []deepSeekToolSpec) (*mimoWebTurn, []deepSeekToolRequest, error) {
+	log.Info("mimo-web", "answer narrated tool failure without a call; one corrective retry")
+	retry, err := round(query + mimoWebNarrationNote())
+	if err != nil {
+		return first, nil, nil
+	}
+	retryCalls := deepSeekExtractToolCalls(retry.content.String(), tools)
+	if valid := mimoWebValidCalls(retryCalls, tools); len(valid) > 0 {
+		return retry, valid, nil
+	}
+	if len(retryCalls) == 0 && !mimoWebNarratesToolFailure(retry.content.String()) {
+		return retry, nil, nil
+	}
+	return first, nil, nil
+}
+
+// mimoWebNarratesToolFailure reports whether an answer claims tool calls
+// failed without having made any — the model's other synthesis failure,
+// seen live on install-shaped tasks: it writes that the bash tool "is
+// failing on every call" and invents the attempts (down to an `echo hi`
+// that never ran) instead of emitting a call. The phrases are the ones
+// the model actually produces, in English and in the Studio's Chinese.
+func mimoWebNarratesToolFailure(text string) bool {
+	lower := strings.ToLower(text)
+	for _, marker := range []string{
+		"工具调用失败",
+		"tool call failed",
+		"tool calls failed",
+		"tool is failing",
+		"tools are failing",
+		"tool calls are failing",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// mimoWebNarrationNote is the correction appended when a turn narrated
+// tool failure instead of calling: it states plainly that no call ran,
+// so nothing has failed yet, and asks for the calls block itself.
+func mimoWebNarrationNote() string {
+	return "\n\n[Correction: your previous reply described tool calls as failing " +
+		"without emitting any call. No call was run, so nothing has failed yet. " +
+		"Emit the DSML calls block for the tool call(s) this task needs, with " +
+		"every required parameter filled in.]"
+}
+
+// mimoWebWriteStreamResult emits a buffered tool turn as OpenAI chunks:
+// reasoning and content as single deltas, then the finish chunk and the
+// usage the upstream reported.
+func mimoWebWriteStreamResult(w http.ResponseWriter, model, responseID string, turn *mimoWebTurn, message map[string]any, finish string) error {
 	created := time.Now().Unix()
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -443,8 +568,9 @@ func mimoWebStreamToolTurn(ctx context.Context, w http.ResponseWriter, req *Requ
 	return nil
 }
 
-// mimoWebCollectToClient buffers the turn and answers one completion.
-func mimoWebCollectToClient(ctx context.Context, w http.ResponseWriter, req *Request, stream io.ReadCloser, model, responseID string, tools []deepSeekToolSpec) error {
+// mimoWebCollectToClient buffers a plain turn and answers one
+// completion. Tool turns take mimoWebToolTurn instead.
+func mimoWebCollectToClient(ctx context.Context, w http.ResponseWriter, req *Request, stream io.ReadCloser, model, responseID string) error {
 	turn := &mimoWebTurn{}
 	err := mimoWebScanEvents(ctx, stream, func(ev mimoWebEvent) bool {
 		turn.apply(ev, nil)
@@ -459,19 +585,19 @@ func mimoWebCollectToClient(ctx context.Context, w http.ResponseWriter, req *Req
 	if turn.content.Len() == 0 && turn.reasoning.Len() == 0 {
 		return proxy.UpstreamFailure(http.StatusBadGateway, "mimo-web: the Studio ended the stream without an answer")
 	}
-	var message map[string]any
-	finish := "stop"
-	if len(tools) > 0 {
-		message, finish = mimoWebFinalizeMessage(turn, tools)
-	} else {
-		message = map[string]any{
-			"role":    "assistant",
-			"content": turn.content.String(),
-		}
-		if turn.reasoning.Len() > 0 {
-			message["reasoning_content"] = turn.reasoning.String()
-		}
+	message := map[string]any{
+		"role":    "assistant",
+		"content": turn.content.String(),
 	}
+	if turn.reasoning.Len() > 0 {
+		message["reasoning_content"] = turn.reasoning.String()
+	}
+	return mimoWebWriteCompletion(w, model, responseID, turn, message, "stop")
+}
+
+// mimoWebWriteCompletion answers one buffered turn as a single
+// chat.completion object.
+func mimoWebWriteCompletion(w http.ResponseWriter, model, responseID string, turn *mimoWebTurn, message map[string]any, finish string) error {
 	completion := map[string]any{
 		"id":      responseID,
 		"object":  "chat.completion",

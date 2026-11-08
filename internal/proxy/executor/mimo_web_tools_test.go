@@ -76,7 +76,7 @@ func TestMimoWebFinalizeDSMLCall(t *testing.T) {
 		"<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">/tmp/x.txt</｜｜DSML｜｜ parameter>\n" +
 		"</｜｜DSML｜｜ invoke>\n" +
 		"</｜｜DSML｜｜ calls>"
-	message, finish := mimoWebFinalizeMessage(mimoTurn(answer, "thinking"), tools)
+	message, finish := mimoWebFinalizeMessage(mimoTurn(answer, "thinking"), deepSeekExtractToolCalls(answer, tools))
 	if finish != "tool_calls" {
 		t.Fatalf("finish = %q, want tool_calls", finish)
 	}
@@ -99,7 +99,8 @@ func TestMimoWebFinalizeDSMLCall(t *testing.T) {
 
 func TestMimoWebFinalizeJSONCall(t *testing.T) {
 	tools := mimoWebParseTools(mimoToolsBody())
-	message, finish := mimoWebFinalizeMessage(mimoTurn(`{"name": "read", "arguments": {"path": "/a/b"}}`, ""), tools)
+	content := `{"name": "read", "arguments": {"path": "/a/b"}}`
+	message, finish := mimoWebFinalizeMessage(mimoTurn(content, ""), deepSeekExtractToolCalls(content, tools))
 	if finish != "tool_calls" {
 		t.Fatalf("finish = %q, want tool_calls", finish)
 	}
@@ -114,7 +115,7 @@ func TestMimoWebFinalizePlainAnswerStripsMarkup(t *testing.T) {
 	tools := mimoWebParseTools(mimoToolsBody())
 	// A DSML block naming an undeclared tool is markup, not an answer.
 	answer := "Here is the summary.\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"undeclared\">\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
-	message, finish := mimoWebFinalizeMessage(mimoTurn(answer, ""), tools)
+	message, finish := mimoWebFinalizeMessage(mimoTurn(answer, ""), deepSeekExtractToolCalls(answer, tools))
 	if finish != "stop" {
 		t.Fatalf("finish = %q, want stop", finish)
 	}
@@ -190,5 +191,177 @@ func TestMimoWebFlattenWithToolsShowsCalls(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("flatten missing %q in:\n%s", want, got)
 		}
+	}
+}
+
+func mimoBashTools() []deepSeekToolSpec {
+	return mimoWebParseTools(map[string]any{
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "bash",
+					"description": "run a command",
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"command":     map[string]any{"type": "string"},
+							"description": map[string]any{"type": "string"},
+						},
+						"required": []any{"command", "description"},
+					},
+				},
+			},
+		},
+	})
+}
+
+const mimoEmptyBashCall = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
+const mimoGoodBashCall = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n" +
+	"<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls /tmp</｜｜DSML｜｜ parameter>\n" +
+	"<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">list tmp</｜｜DSML｜｜ parameter>\n" +
+	"</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
+
+// The live failure of 2026-11-08: a bash call recovered with empty
+// arguments. Validation has to name both missing properties so the
+// corrective retry can repair exactly them.
+func TestMimoWebValidateCallsFlagsEmptyArguments(t *testing.T) {
+	tools := mimoBashTools()
+	calls := deepSeekExtractToolCalls(mimoEmptyBashCall, tools)
+	if len(calls) != 1 {
+		t.Fatalf("extracted %d calls, want 1", len(calls))
+	}
+	invalid := mimoWebValidateCalls(calls, tools)
+	if len(invalid) != 1 || invalid[0].Name != "bash" || len(invalid[0].Missing) != 2 {
+		t.Fatalf("invalid = %+v, want bash missing both required", invalid)
+	}
+	note := mimoWebCorrectionNote(invalid)
+	for _, want := range []string{"bash", "command", "description", "never ran"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("correction note missing %q: %s", want, note)
+		}
+	}
+	good := deepSeekExtractToolCalls(mimoGoodBashCall, tools)
+	if invalid := mimoWebValidateCalls(good, tools); len(invalid) != 0 {
+		t.Errorf("valid call flagged: %+v", invalid)
+	}
+}
+
+func TestMimoWebAttemptRetriesInvalidCall(t *testing.T) {
+	tools := mimoBashTools()
+	queries := []string{}
+	round := func(query string) (*mimoWebTurn, error) {
+		queries = append(queries, query)
+		if len(queries) == 1 {
+			return mimoTurn(mimoEmptyBashCall, ""), nil
+		}
+		return mimoTurn(mimoGoodBashCall, ""), nil
+	}
+	turn, calls, err := mimoWebAttemptWithRetry(round, "install it", tools)
+	if err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if len(queries) != 2 || !strings.Contains(queries[1], "Correction") || !strings.Contains(queries[1], "command") {
+		t.Fatalf("queries = %v, want a corrective second query", queries)
+	}
+	if len(calls) != 1 || !strings.Contains(calls[0].Arguments, "ls /tmp") {
+		t.Fatalf("calls = %+v, want the repaired call", calls)
+	}
+	if turn.content.String() != mimoGoodBashCall {
+		t.Errorf("returned turn is not the retry's")
+	}
+}
+
+// When the corrective retry fails outright, the first attempt still
+// stands with its valid calls — the retry must never make a turn worse.
+func TestMimoWebAttemptFallsBackWhenRetryFails(t *testing.T) {
+	tools := append(mimoBashTools(), mimoWebParseTools(mimoToolsBody())...)
+	first := "<｜｜DSML｜｜ calls>\n" +
+		"<｜｜DSML｜｜ invoke name=\"read\">\n<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n" +
+		"<｜｜DSML｜｜ invoke name=\"bash\">\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
+	n := 0
+	round := func(query string) (*mimoWebTurn, error) {
+		n++
+		if n == 1 {
+			return mimoTurn(first, ""), nil
+		}
+		return nil, errTestRound
+	}
+	_, calls, err := mimoWebAttemptWithRetry(round, "q", tools)
+	if err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if len(calls) != 1 || calls[0].Name != "read" {
+		t.Fatalf("calls = %+v, want only the valid read call", calls)
+	}
+}
+
+var errTestRound = &roundError{"boom"}
+
+type roundError struct{ s string }
+
+func (e *roundError) Error() string { return e.s }
+
+const mimoNarration = "The bash tool is failing on every call — even a plain `echo hello` returns an error — so I can't run that right now."
+
+func TestMimoWebAttemptRetriesNarration(t *testing.T) {
+	tools := mimoBashTools()
+	queries := []string{}
+	round := func(query string) (*mimoWebTurn, error) {
+		queries = append(queries, query)
+		if len(queries) == 1 {
+			return mimoTurn(mimoNarration, ""), nil
+		}
+		return mimoTurn(mimoGoodBashCall, ""), nil
+	}
+	_, calls, err := mimoWebAttemptWithRetry(round, "install it", tools)
+	if err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if len(queries) != 2 || !strings.Contains(queries[1], "nothing has failed yet") {
+		t.Fatalf("queries = %v, want the narration correction", queries)
+	}
+	if len(calls) != 1 || !strings.Contains(calls[0].Arguments, "ls /tmp") {
+		t.Fatalf("calls = %+v, want the retried call", calls)
+	}
+}
+
+func TestMimoWebAttemptKeepsFirstWhenRetryAlsoNarrates(t *testing.T) {
+	tools := mimoBashTools()
+	round := func(query string) (*mimoWebTurn, error) {
+		return mimoTurn(mimoNarration, ""), nil
+	}
+	turn, calls, err := mimoWebAttemptWithRetry(round, "install it", tools)
+	if err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if len(calls) != 0 || turn.content.String() != mimoNarration {
+		t.Fatalf("want the first narration kept, got calls=%v", calls)
+	}
+}
+
+func TestMimoWebNarratesToolFailure(t *testing.T) {
+	if !mimoWebNarratesToolFailure("the tool call failed, sorry") {
+		t.Error("english marker missed")
+	}
+	if !mimoWebNarratesToolFailure("工具调用失败，请重新判断") {
+		t.Error("chinese marker missed")
+	}
+	if mimoWebNarratesToolFailure("The file contains three sections.") {
+		t.Error("plain answer flagged")
+	}
+}
+
+func TestMimoWebValidateCallsFlagsMarkupInValue(t *testing.T) {
+	tools := mimoBashTools()
+	calls := []deepSeekToolRequest{
+		{Name: "bash", Arguments: `{"command":"ls <｜｜DSML｜｜ invoke name=\"bash\">","description":"x"}`},
+	}
+	invalid := mimoWebValidateCalls(calls, tools)
+	if len(invalid) != 1 || invalid[0].Name != "bash" {
+		t.Fatalf("invalid = %+v, want the contaminated bash call flagged", invalid)
+	}
+	if got := mimoWebValidCalls(calls, tools); len(got) != 0 {
+		t.Fatalf("valid = %+v, want none", got)
 	}
 }

@@ -1,0 +1,7 @@
+### mimo-web synthesized-call hardening (validation, corrective retry, stall bound)
+
+- Recovered calls are validated against their tools' required properties (and against markup left inside a value) before reaching the client; a turn carrying an invalid call is re-asked once with the defect named, and an answer that narrates tool failure without calling is re-asked once the same way — the first attempt stands, valid calls only, whenever a retry does worse.
+- DSML extraction accepts a JSON object as an invoke body when no parameter elements are present, and drops a parameter element the model abandoned mid-value when the call restarts inside it, instead of recovering arguments containing a second calls block.
+- The Studio event scan now fails a stream that delivers no bytes for 120 seconds instead of waiting on a stalled socket indefinitely.
+- Why: a live DSH session on 2026-11-08 received a bash call with empty arguments (rejected by the client for missing command/description), then a turn whose answer only narrated failures, and the install-shaped task failed the same way in direct probes.
+- Verified: unit tests for validation, both retries, the JSON body, and the restarted-call shape; live against a test instance and then production — the install task that previously returned {} or prose returns a clean `pnpm add -g @deepseek-ai/dsh-experimental-inspector-profile` tool call, ls and plain chat unchanged.
