@@ -477,6 +477,21 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "mimo-web",
+    "name": "MiMo Web",
+    "category": "webCookie",
+    "alias": "mw",
+    "color": "#FF6900",
+    "icon": "auto_awesome",
+    "website": "https://aistudio.xiaomimimo.com",
+    "authType": "cookie",
+    "authHint": "Paste the whole Cookie header of a signed-in aistudio.xiaomimimo.com tab — it must carry serviceToken, userId and xiaomichatbot_ph (DevTools → Application → Cookies). The executor splits the three cookies itself; a JSON object naming them works too. The serviceToken lives about a day, so expect to paste a fresh cookie when calls start failing.",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
     "id": "zed",
     "name": "Zed",
     "category": "oauth",
