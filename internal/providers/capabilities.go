@@ -648,8 +648,8 @@ func init() {
 	// so Tools stays false. Context windows are the Studio's own published
 	// figures (its /open-apis/bot/config) for the v2.6 line; the v2.5 line
 	// publishes none there, so it carries none here rather than a guess.
-	mimoWebCaps := Capabilities{Vision: true, Reasoning: true, Search: true, ContextWindow: 1000000}
-	mimoWebLegacyCaps := Capabilities{Vision: true, Reasoning: true, Search: true}
+	mimoWebCaps := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ContextWindow: 1000000}
+	mimoWebLegacyCaps := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}
 	providerCapabilities["mimo-web"] = map[string]Capabilities{
 		"mimo-v2.6-flash":                 mimoWebCaps,
 		"mimo-v2.6-pro":                   mimoWebCaps,
