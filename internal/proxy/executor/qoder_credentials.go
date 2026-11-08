@@ -32,7 +32,7 @@ const qoderCredentialTimeout = 20 * time.Second
 
 // qoderProbeUserAgent is what the official CLI announces. Qoder's WAF answers a
 // default Go User-Agent with a bare 403.
-const qoderProbeUserAgent = "qodercli/1.0.0"
+const qoderProbeUserAgent = "qodercli/" + qoderClientVersion
 
 // qoderUserInfoResponse is the subset of /api/v1/userinfo that matters here.
 // Qoder has shipped more than one spelling of the id field.
@@ -53,7 +53,7 @@ func ExchangeQoderJobToken(ctx context.Context, do QoderDoer, exchangeURL, pat s
 		"Content-Type":    "application/json",
 		"Accept":          "application/json",
 		"User-Agent":      qoderProbeUserAgent,
-		"Cosy-Version":    "1.0.0",
+		"Cosy-Version":    qoderClientVersion,
 		"Cosy-ClientType": "5",
 	}, payload)
 	if err != nil {

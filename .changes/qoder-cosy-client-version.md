@@ -1,0 +1,5 @@
+### Qoder: present as qodercli 1.1.75 — the gateway gates the model catalog on the COSY client version
+
+- The Qoder executor stamped every client-version surface with "1.0.0" (COSY payload `cosyVersion`, `Cosy-Version` header, PAT-exchange header, probe User-Agent `qodercli/1.0.0`, chat body `business.version`). All five now share one constant, `qoderClientVersion = "1.1.75"`, mirroring how the real CLI pins its build version.
+- Why: the gateway serves a reduced model list to stale clients. Verified live against two device accounts on 2026-10-30 through the production signing path: at "1.0.0" `/algo/api/v2/model/list` returned 12 models; at "1.1.75" it returned 15 — `cmodel`, `smodel` and `fast` only appear at the newer version (their `enable` flags are account entitlement and did not change).
+- UMID and HMAC were audited against every public Qoder implementation (qoder2api, Qoder-2API-Go, cli2api, Qoder2Api) and exist in none of them: the bearer signature is RSA+AES+MD5 everywhere, and UMID is a desktop-app fingerprint helper used only by the campaign/check-in endpoints, not by COSY signing.

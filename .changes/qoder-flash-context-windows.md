@@ -1,0 +1,4 @@
+### Qoder: correct the flash models' context windows in the capability table
+
+- `qoderCapabilities` declared 200000 for both flash models. Qoder's live per-account catalog (`/algo/api/v2/model/list`, read through the dashboard models endpoint on 2026-10-31) reports `dfmodel` (DeepSeek-Flash) at contextLength 1000000 and `qfmodel` (Qwen3.8-Flash) at 180000; the table now mirrors those two values. MaxOutput stays 65536 — upstream declares maxOutputTokens 0 (unspecified) for both.
+- Why it matters: the capabilities block is what `/v1/models` publishes as `capabilities.contextWindow`, and a customModels row cannot correct a static-catalog-owned model (see 427-caps-static-catalog-precedence), so the stale table value was the only figure a client reading that block could ever see — while the top-level `context_length` already reported the right windows from the token-limit table, leaving the two fields in permanent disagreement.

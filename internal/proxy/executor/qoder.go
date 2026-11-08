@@ -25,6 +25,13 @@ import (
 	"9router/proxy/internal/proxy"
 )
 
+// qoderClientVersion is the qodercli build this router presents as. The
+// gateway gates the model catalog on it: at "1.0.0" the model list hides
+// cmodel/smodel/fast (12 entries instead of 15, verified live 2026-10-30),
+// so every version stamp (COSY payload + header, probe UA, chat body) shares
+// this one constant, the way the CLI itself does.
+const qoderClientVersion = "1.1.75"
+
 const qoderRSAPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 4k6Pz1EaDicBMpdpxKduSZu5OANqUq8er4GM95omAGIOPOh+Nx0spthYA2BqGz+l
@@ -163,7 +170,7 @@ func buildQoderCosyHeaders(body []byte, requestURL string, creds QoderCosyCreds)
 		"version":     "v1",
 		"requestId":   reqID,
 		"info":        infoB64,
-		"cosyVersion": "1.0.0",
+		"cosyVersion": qoderClientVersion,
 		"ideVersion":  "",
 	})
 	payloadB64 := base64.StdEncoding.EncodeToString(payloadJSON)
@@ -190,7 +197,7 @@ func buildQoderCosyHeaders(body []byte, requestURL string, creds QoderCosyCreds)
 		"Cosy-Key":               cosyKeyB64,
 		"Cosy-User":              userID,
 		"Cosy-Date":              timestamp,
-		"Cosy-Version":           "1.0.0",
+		"Cosy-Version":           qoderClientVersion,
 		"Cosy-Machineid":         machineID,
 		"Cosy-Machinetoken":      machineID,
 		"Cosy-Machinetype":       "5",
