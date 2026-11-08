@@ -88,21 +88,20 @@ func TestFirstUserText_StringAndBlocks(t *testing.T) {
 
 func TestCodebuddyHeaders_ChannelVerification(t *testing.T) {
 	cnCfg := &providers.ProviderConfig{BaseURL: "https://copilot.tencent.com/v2/chat/completions"}
-	intlCfg := &providers.ProviderConfig{BaseURL: "https://www.codebuddy.ai/v2/chat/completions"}
+	intlCfg := &providers.ProviderConfig{BaseURL: "https://www.workbuddy.ai/v2/chat/completions"}
 
 	cnReq := &Request{Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
 	intlReq := &Request{Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
 
 	cnHeaders := codebuddyHeaders(cnReq, cnCfg, cnReq.Body)
-	intlHeaders := codebuddyHeaders(intlReq, intlCfg, intlReq.Body)
 
-	if cnHeaders["User-Agent"] != "CLI/2.108.1 CodeBuddy/2.108.1" {
+	if cnHeaders["User-Agent"] != "CLI/2.133.1 CodeBuddy/2.133.1" {
 		t.Errorf("cn User-Agent = %q", cnHeaders["User-Agent"])
 	}
 	if cnHeaders["X-App"] != "cli" {
 		t.Errorf("cn X-App = %q", cnHeaders["X-App"])
 	}
-	if cnHeaders["X-IDE-Type"] != "CLI" || cnHeaders["X-IDE-Name"] != "CLI" || cnHeaders["X-IDE-Version"] != "2.108.1" {
+	if cnHeaders["X-IDE-Type"] != "CLI" || cnHeaders["X-IDE-Name"] != "CLI" || cnHeaders["X-IDE-Version"] != "2.133.1" {
 		t.Errorf("cn IDE headers mismatch: type=%q name=%q ver=%q", cnHeaders["X-IDE-Type"], cnHeaders["X-IDE-Name"], cnHeaders["X-IDE-Version"])
 	}
 	if cnHeaders["X-Domain"] != "copilot.tencent.com" {
@@ -110,6 +109,17 @@ func TestCodebuddyHeaders_ChannelVerification(t *testing.T) {
 	}
 	if cnHeaders["X-Stainless-Lang"] != "js" || cnHeaders["X-Stainless-Runtime"] != "node" {
 		t.Errorf("cn Stainless headers mismatch: lang=%q runtime=%q", cnHeaders["X-Stainless-Lang"], cnHeaders["X-Stainless-Runtime"])
+	}
+	// Read off a real 2.133.1 run: SDK 7.39.0, the launcher's bundled node, and
+	// the two agent headers the CLI always sends.
+	if cnHeaders["X-Stainless-Package-Version"] != "7.39.0" {
+		t.Errorf("cn X-Stainless-Package-Version = %q, want 7.39.0", cnHeaders["X-Stainless-Package-Version"])
+	}
+	if cnHeaders["X-Stainless-Runtime-Version"] != "v22.23.3" {
+		t.Errorf("cn X-Stainless-Runtime-Version = %q, want v22.23.3", cnHeaders["X-Stainless-Runtime-Version"])
+	}
+	if cnHeaders["X-Agent-Runtime"] != "other" || cnHeaders["X-Agent-Type"] != "main" {
+		t.Errorf("cn agent runtime/type = %q/%q, want other/main", cnHeaders["X-Agent-Runtime"], cnHeaders["X-Agent-Type"])
 	}
 	if !hex32RE.MatchString(cnHeaders["X-Request-ID"]) {
 		t.Errorf("cn X-Request-ID = %q, want 32 hex chars", cnHeaders["X-Request-ID"])
@@ -121,11 +131,31 @@ func TestCodebuddyHeaders_ChannelVerification(t *testing.T) {
 		t.Errorf("cn Agent headers mismatch: intent=%q purpose=%q", cnHeaders["X-Agent-Intent"], cnHeaders["X-Agent-Purpose"])
 	}
 
-	if intlHeaders["User-Agent"] != "CLI/2.108.1 CodeBuddy/2.108.1" {
-		t.Errorf("intl User-Agent = %q", intlHeaders["User-Agent"])
+	// The intl channel does NOT go through codebuddyHeaders: it carries the
+	// WorkBuddy 5.8.4 desktop identity plus the conversation/trace family.
+	if !isCodebuddyIntlBaseURL(intlCfg.BaseURL) {
+		t.Fatalf("intl base URL %q not recognised as the intl channel", intlCfg.BaseURL)
 	}
-	if intlHeaders["X-Domain"] != "www.codebuddy.ai" {
-		t.Errorf("intl X-Domain = %q, want www.codebuddy.ai", intlHeaders["X-Domain"])
+	intlHeaders := codebuddyIntlIdentityHeaders(intlReq, intlCfg)
+	if err := applyCodebuddyConversationHeaders(intlHeaders); err != nil {
+		t.Fatalf("conversation family: %v", err)
+	}
+	if intlHeaders["User-Agent"] != codebuddyIntlUserAgent {
+		t.Errorf("intl User-Agent = %q, want %q", intlHeaders["User-Agent"], codebuddyIntlUserAgent)
+	}
+	if intlHeaders["X-IDE-Type"] != "WorkBuddy" || intlHeaders["X-IDE-Name"] != "WorkBuddy" || intlHeaders["X-IDE-Version"] != "5.8.4" {
+		t.Errorf("intl IDE headers mismatch: type=%q name=%q ver=%q",
+			intlHeaders["X-IDE-Type"], intlHeaders["X-IDE-Name"], intlHeaders["X-IDE-Version"])
+	}
+	if intlHeaders["X-Domain"] != "www.workbuddy.ai" {
+		t.Errorf("intl X-Domain = %q, want www.workbuddy.ai", intlHeaders["X-Domain"])
+	}
+	if intlHeaders["X-Private-Data"] != "true" || intlHeaders["X-Agent-Type"] != "main" {
+		t.Errorf("intl product/agent headers mismatch: private=%q type=%q",
+			intlHeaders["X-Private-Data"], intlHeaders["X-Agent-Type"])
+	}
+	if _, ok := intlHeaders["X-Stainless-Lang"]; ok {
+		t.Error("intl identity must not carry Stainless headers (it is not an OpenAI-SDK CLI)")
 	}
 	if !hex32RE.MatchString(intlHeaders["X-Request-ID"]) {
 		t.Errorf("intl X-Request-ID = %q, want 32 hex chars", intlHeaders["X-Request-ID"])

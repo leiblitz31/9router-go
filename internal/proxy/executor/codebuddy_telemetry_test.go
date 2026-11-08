@@ -110,14 +110,20 @@ func TestCodebuddyTelemetryFailsOpenWithoutToken(t *testing.T) {
 }
 
 // TestCodebuddyHeadersCNVersion asserts the CN lane sends the current CLI build
-// and the intl lane keeps cur.
+// and the intl lane keeps its own WorkBuddy identity (no CN CLI UA).
 func TestCodebuddyHeadersCNVersion(t *testing.T) {
 	h := codebuddyHeaders(&Request{Provider: "codebuddy-cn"}, nil, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
 	if !strings.Contains(h["User-Agent"], codebuddyCLIVersion) {
 		t.Errorf("CN User-Agent = %q, want %s", h["User-Agent"], codebuddyCLIVersion)
 	}
-	hi := codebuddyHeaders(&Request{Provider: "codebuddy-intl"}, nil, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
-	if strings.Contains(hi["User-Agent"], codebuddyCLIVersion) {
-		t.Errorf("intl User-Agent = %q, must NOT carry CN CLI %s", hi["User-Agent"], codebuddyCLIVersion)
+	bag := map[string]string{}
+	if err := codebuddyIntlHeaders(bag, &Request{Provider: "codebuddy-intl", Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}, &providers.ProviderConfig{BaseURL: "https://www.workbuddy.ai/v2/chat/completions"}); err != nil {
+		t.Fatalf("intl headers: %v", err)
+	}
+	if strings.Contains(bag["User-Agent"], codebuddyCLIVersion) {
+		t.Errorf("intl User-Agent = %q, must NOT carry CN CLI %s", bag["User-Agent"], codebuddyCLIVersion)
+	}
+	if bag["User-Agent"] != codebuddyIntlUserAgent {
+		t.Errorf("intl User-Agent = %q, want WorkBuddy identity %q", bag["User-Agent"], codebuddyIntlUserAgent)
 	}
 }
