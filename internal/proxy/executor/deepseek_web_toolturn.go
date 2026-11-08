@@ -197,9 +197,7 @@ func deepSeekWriteStreamedToolCalls(w http.ResponseWriter, req *Request, model s
 	responseID := deepSeekResponseID()
 	created := time.Now().Unix()
 
-	if start := req.StartTime; !start.IsZero() && req.TTFT != nil && *req.TTFT == 0 {
-		*req.TTFT = time.Since(start).Milliseconds()
-	}
+	markTTFT(req, req.StartTime)
 
 	for i, call := range calls {
 		delta := map[string]any{
@@ -284,9 +282,7 @@ func deepSeekWriteStreamedMessage(w http.ResponseWriter, req *Request, model str
 	responseID := deepSeekResponseID()
 	created := time.Now().Unix()
 
-	if start := req.StartTime; !start.IsZero() && req.TTFT != nil && *req.TTFT == 0 {
-		*req.TTFT = time.Since(start).Milliseconds()
-	}
+	markTTFT(req, req.StartTime)
 
 	emit := func(delta map[string]any, finish any) error {
 		chunk := map[string]any{

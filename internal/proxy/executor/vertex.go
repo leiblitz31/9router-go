@@ -247,7 +247,7 @@ func forwardVertexAs(w http.ResponseWriter, req *Request, provider string) error
 
 	if req.IsStream {
 		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, 0, "vertex")
-		return geminiStream(w, stallReader, req.Ctx)
+		return geminiStream(w, stallReader, req.Ctx, req)
 	}
 	return geminiNonStream(w, resp.Body)
 }

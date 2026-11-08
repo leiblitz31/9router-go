@@ -41,39 +41,49 @@ func ForwardGemini(w http.ResponseWriter, req *Request) error {
 		}
 		unwrapped := translator.UnwrapAntigravityResponse(raw)
 		if req.IsStream {
-			return geminiStream(w, io.NopCloser(bytes.NewReader(unwrapped)), req.Ctx)
+			return geminiStream(w, io.NopCloser(bytes.NewReader(unwrapped)), req.Ctx, req)
 		}
 		return geminiNonStream(w, bytes.NewReader(unwrapped))
 	}
 	if req.IsStream {
 		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, 0, "gemini")
 		bodyCloser = stallReader
-		return geminiStream(w, stallReader, req.Ctx)
+		return geminiStream(w, stallReader, req.Ctx, req)
 	}
 	return geminiNonStream(w, resp.Body)
 }
 
-func geminiStream(w http.ResponseWriter, upstream io.Reader, ctx context.Context) error {
+// geminiStream replays a live Gemini-native SSE body as OpenAI chunks.
+// Served from here by ForwardGemini above, the vertex lane, and
+// ForwardOpencodeGo's gemini route (providers.go).
+func geminiStream(w http.ResponseWriter, upstream io.Reader, ctx context.Context, req *Request) error {
 	hw := proxy.NewHeartbeatWriter(ctx, w, 0)
 	defer hw.Close()
 	flusher := proxy.WriteSSEHeaders(hw)
-	firstLine := true
+	startTime := time.Time{}
+	if req != nil && !req.StartTime.IsZero() {
+		startTime = req.StartTime
+	}
 	state := &translator.GeminiStreamState{SessionID: handlerutil.GetSessionID(ctx)}
 	return proxy.ScanStream(upstream, func(chunk []byte) {
-		if firstLine {
-			firstLine = false
-			return
-		}
 		cs := strings.TrimSpace(string(chunk))
-		if cs == "" || cs == "data: [DONE]" {
+		if cs == "" || cs == "[DONE]" || cs == "data: [DONE]" {
 			return
 		}
-		if !strings.HasPrefix(cs, "data: ") {
-			return
+		body := chunk
+		if strings.HasPrefix(cs, "data:") {
+			body = []byte(strings.TrimSpace(strings.TrimPrefix(cs, "data:")))
 		}
-		oc, err := translator.TranslateGeminiChunkToOpenAI([]byte(strings.TrimPrefix(cs, "data: ")), state)
+		oc, err := translator.TranslateGeminiChunkToOpenAI(body, state)
 		if err != nil || oc == nil {
 			return
+		}
+		if startTime.IsZero() {
+			startTime = time.Now()
+		}
+		markTTFT(req, startTime)
+		if req != nil && req.ResponseBuf != nil {
+			_, _ = req.ResponseBuf.Write(oc)
 		}
 		hw.Write(oc)
 		hw.Write([]byte("\n\n"))
