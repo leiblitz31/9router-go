@@ -221,9 +221,12 @@ func cloakClaudeTools(req map[string]any) map[string]string {
 			clientDeclarations = append(clientDeclarations, tool)
 			continue
 		}
-		suffixed := name + claudeToolSuffix
-		toolNameMap[suffixed] = name
+		suffixed := suffixClaudeToolName(name)
+		baseName := strings.TrimSuffix(name, claudeToolSuffix)
+		toolNameMap[suffixed] = baseName
 		clientToolNames[name] = true
+		clientToolNames[suffixed] = true
+		clientToolNames[baseName] = true
 		renamed := make(map[string]any, len(tool))
 		for k, v := range tool {
 			renamed[k] = v
