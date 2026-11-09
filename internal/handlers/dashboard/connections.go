@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"9router/proxy/internal/connlimit"
 	"context"
 	json "encoding/json/v2"
 	"fmt"
@@ -825,6 +826,7 @@ func (h *DashboardHandler) HandleDeleteConnection(w http.ResponseWriter, r *http
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	connlimit.Close(id) // release breaker/backoff state so nothing leaks
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
 }
