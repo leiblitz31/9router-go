@@ -675,7 +675,10 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		// field is typed as "http://192.168.1.10:11434"), and a host alone names
 		// no route, so the POST used to land on the server root. A URL that
 		// already names a route is passed through untouched.
-		baseURL := chatCompletionsURL(connData.BaseURL)
+		//
+		// A custom node's baseUrl is a PREFIX rather than an endpoint the
+		// operator named, so it is completed by a different rule (#768).
+		baseURL := CompatibleNodeLaneURL(provider, connectionAPIType(connData), connData.BaseURL)
 		if cfg, ok := providers.KnownProviders[provider]; ok {
 			cloned := cfg
 			cloned.BaseURL = baseURL
@@ -698,7 +701,7 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		}
 		if node != nil && nodeData != nil && nodeData.BaseURL != "" {
 			baseCfg = &providers.ProviderConfig{
-				BaseURL:    chatCompletionsURL(nodeData.BaseURL),
+				BaseURL:    CompatibleNodeLaneURL(provider, nodeData.APIType, nodeData.BaseURL),
 				AuthHeader: constants.HeaderAuthorization,
 				AuthScheme: constants.AuthSchemeBearer,
 			}
@@ -757,22 +760,175 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 	return h.applyProviderOverrides(provider, baseCfg), nil
 }
 
-// chatCompletionsURL completes a configured endpoint into the chat-completions
+// compatibleNodeLaneURL completes a custom provider node's baseUrl into the
+// lane its node type and apiType name, and leaves a URL that already names a
+// lane untouched.
+//
+// Upstream treats a node's baseUrl as a PREFIX and appends the lane
+// unconditionally (open-sse/executors/base.js buildUrl: `${normalized}${path}`,
+// with the path chosen by resolveOpenAICompatibleApiType). A node pointed at
+// https://developer.amd.com.cn/radeon/api/v1 therefore reaches
+// /radeon/api/v1/chat/completions there, while this port dialled the base URL
+// itself and the upstream answered 404 (#768).
+//
+// chatCompletionsURL cannot serve this case: it leaves a multi-segment path
+// alone, which is correct for the Ollama Local host field — an endpoint the
+// operator typed — and wrong for a node, whose baseUrl is a prefix by contract.
+// The two rules stay separate for that reason. The bare-host and /v1 shapes
+// resolve exactly as they did through chatCompletionsURL, so a node that
+// already worked keeps the URL it had.
+func CompatibleNodeLaneURL(provider, apiType, baseURL string) string {
+	if !isCompatibleNodeProvider(provider) {
+		return ChatCompletionsURL(baseURL)
+	}
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		return baseURL
+	}
+	// A base URL that already names a lane is used as-is: appending a second
+	// one would produce the same 404 this function exists to remove, and a node
+	// created before this rule may store the full route.
+	for _, lane := range compatibleNodeLanes {
+		if strings.HasSuffix(base, lane) {
+			return base
+		}
+	}
+	lane := compatibleNodeLane(provider, apiType)
+	// A URL naming no path, or only a version prefix, still needs the /v1 that
+	// makes the prefix an API root — the same completion chatCompletionsURL
+	// applies to the Ollama Local host field.
+	if compatibleNodeNeedsVersionPrefix(base) {
+		return base + "/v1" + lane
+	}
+	return base + lane
+}
+
+// compatibleNodeNeedsVersionPrefix reports whether a base URL carries no path
+// beyond its authority, so the /v1 prefix is still missing.
+func compatibleNodeNeedsVersionPrefix(base string) bool {
+	_, rest, found := strings.Cut(base, "://")
+	if !found {
+		return true
+	}
+	_, path, _ := strings.Cut(rest, "/")
+	return strings.Trim(path, "/") == ""
+}
+
+// compatibleNodeLanes are the routes a custom node baseUrl may already name.
+// A base ending in one of them is an endpoint, not a prefix. The list is the
+// parent's chatCompletionsURL route table rather than only the three lanes this
+// function appends: a node that already stored /v1/chat, /v1/completions or an
+// Ollama-shaped /api/chat was dialled as configured before this rule existed,
+// and appending a lane behind one of those would turn a working node into a
+// doubled path.
+var compatibleNodeLanes = []string{
+	"/chat/completions", "/messages", "/responses", "/completions",
+	"/chat", "/embeddings", "/api/chat", "/api/generate",
+}
+
+// compatibleNodeLane is the route a node of this type and apiType serves,
+// read from providers.CompatibleNodeWires — the same table getProviderConfig
+// stamps the wire format from, so the lane a request dials and the format the
+// translators speak can never disagree again. An openai-compatible node picks
+// between Chat Completions and Responses from its apiType — the same mapping
+// upstream's buildUrl applies, including its fallback: when no apiType is
+// stored, upstream reads the node id (resolveOpenAICompatibleApiType returns
+// "responses" for a provider id containing "responses"). A connection row
+// written before the apiType sync landed carries no apiType, and a responses
+// node created then has only its id to say so.
+//
+// A custom-embedding node's declared lane is the chat route: the embeddings
+// handler derives its own URL from this one (buildEmbeddingsURL swaps
+// /chat/completions for /embeddings), so producing /embeddings here would
+// append it twice.
+func compatibleNodeLane(provider, apiType string) string {
+	wire, ok := nodeWireOf(provider)
+	if !ok {
+		// Not a node id: the caller (compatibleNodeLaneURL) guards this, and
+		// chatCompletionsURL's shape rule is the historical default.
+		return "/chat/completions"
+	}
+	if compatibleNodeFormat(provider) == "" {
+		switch {
+		case apiType == compatibleAPITypeResponses:
+			return "/responses"
+		case apiType == "" && strings.Contains(provider, compatibleAPITypeResponses):
+			return "/responses"
+		}
+	}
+	return wire.Lane
+}
+
+// compatibleAPITypeResponses is the stored apiType of an openai-compatible node
+// whose upstream speaks the Responses API (upstream resolveOpenAICompatibleApiType).
+const compatibleAPITypeResponses = "responses"
+
+// nodeWireOf returns the wire contract of the custom node type behind a
+// provider id ("anthropic-compatible-<id>" → the "anthropic-compatible"
+// entry) and whether the id is a compatible node at all. The map's keys are
+// mutually exclusive prefixes, so the match is deterministic.
+func nodeWireOf(provider string) (providers.NodeWire, bool) {
+	for nodeType, wire := range providers.CompatibleNodeWires {
+		if strings.HasPrefix(provider, nodeType+"-") {
+			return wire, true
+		}
+	}
+	return providers.NodeWire{}, false
+}
+
+// isCompatibleNodeProvider reports whether a provider id belongs to a custom
+// endpoint the operator registered, matching the node shapes the create
+// handler composes (provider_node_id.go) — derived from
+// providers.CompatibleNodeWires so detection cannot outgrow the wire table.
+func isCompatibleNodeProvider(provider string) bool {
+	_, ok := nodeWireOf(provider)
+	return ok
+}
+
+// compatibleNodeFormat reports the format a custom node's upstream speaks
+// ("" = OpenAI Chat Completions).
+func compatibleNodeFormat(provider string) string {
+	wire, ok := nodeWireOf(provider)
+	if !ok {
+		return ""
+	}
+	return wire.Format
+}
+
+// connectionAPIType reads the apiType the dashboard stores on a compatible
+// node's connection, which is kept in sync with the node on create and update.
+// An absent value means Chat Completions, the same default upstream applies.
+func connectionAPIType(connData *ConnectionData) string {
+	if connData == nil || connData.ProviderSpecificData == nil {
+		return ""
+	}
+	apiType, _ := connData.ProviderSpecificData["apiType"].(string)
+	return apiType
+}
+
+// ChatCompletionsURL completes a configured endpoint into the chat-completions
 // route, and leaves one that already names a route untouched.
+//
+// Exported because the dashboard's node/key probes run the same request the
+// chat path will run, and a probe that completes the base URL differently
+// reports a working node as broken (or the reverse).
 //
 // A configured endpoint arrives in one of two shapes: the full route, or a bare
 // host — the compatible-node baseUrl and the Ollama Local host field both take
-// this form, and a dotted IP is the common case
-// ("http://192.168.1.10:11434"). A bare host names no route upstream, so the
-// gateway's /v1 is what makes it a chat endpoint.
+// this form, and a dotted IP is the common case ("http://192.168.1.10:11434").
+// A bare host names no route upstream, so the gateway's /v1 is what makes it a
+// chat endpoint.
 //
 // Detection is by shape, not by guessing whether the last path segment looks
 // like a filename: an early version did that and exempted exactly the dotted-IP
-// host it existed to fix. A URL whose path is only a version prefix (/v1, and
-// the /v1beta Google uses) is that prefix plus the route; a path that carries
-// any segment beyond it is taken to be an endpoint the operator named, and is
-// left alone rather than having /v1 appended behind it.
-func chatCompletionsURL(baseURL string) string {
+// host it existed to fix. A URL whose path ends in a version prefix (/v1, and
+// the /v1beta Google uses) is that prefix plus the route. The version may sit
+// behind a vendor segment — an OpenAI-compatible provider publishes its base as
+// "https://anyrouter.dev/api/v1" — so the trailing segment decides, not the
+// whole path; a path that ends in any other segment is taken to be an endpoint
+// the operator chose, and is left alone rather than having /v1 appended behind
+// it.
+func ChatCompletionsURL(baseURL string) string {
 	url := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if url == "" {
 		return baseURL
@@ -785,24 +941,30 @@ func chatCompletionsURL(baseURL string) string {
 			return url
 		}
 	}
-	// Split off the scheme and authority, then decide from the path alone: no
-	// path at all, or only a version prefix, means nothing named an endpoint and
-	// the route is appended to the prefix that is there.
+	// Split off the scheme and authority, then decide from the path's last
+	// segment: no path at all, or a path ending in a version prefix, means
+	// nothing named an endpoint and the route is appended behind the prefix
+	// that is there.
 	_, rest, found := strings.Cut(url, "://")
 	if !found {
 		return url + "/v1/chat/completions"
 	}
 	_, path, _ := strings.Cut(rest, "/")
-	switch trimmed := strings.Trim(path, "/"); {
+	trimmed := strings.Trim(path, "/")
+	last := ""
+	if trimmed != "" {
+		last = trimmed[strings.LastIndex(trimmed, "/")+1:]
+	}
+	switch {
 	case trimmed == "":
 		return url + "/v1/chat/completions"
-	case isVersionPrefix(trimmed):
-		// Already versioned ("https://host/v1"): the lane is the prefix plus the
-		// route, not a second prefix.
+	case isVersionPrefix(last):
+		// Already versioned ("https://host/v1", "https://host/api/v1"): the
+		// lane is the prefix plus the route, not a second prefix.
 		return url + "/chat/completions"
 	default:
-		// A path carrying a segment beyond the prefix names an endpoint the
-		// operator chose; appending behind it would only produce a 404.
+		// A path ending in a named segment is an endpoint the operator chose;
+		// appending behind it would only produce a 404.
 		return url
 	}
 }
