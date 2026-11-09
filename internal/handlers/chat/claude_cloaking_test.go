@@ -189,3 +189,222 @@ func TestOAuthKey_AppliesToolCloakingAndDecoys(t *testing.T) {
 		t.Fatalf("decoy tools should be injected for OAuth: %s", s)
 	}
 }
+
+func TestCloakClaudeTools_DoesNotDoubleSuffix(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-3-opus-20240229",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "tool_use",
+						"id": "tu_1",
+						"name": "todo_write_ide",
+						"input": {}
+					}
+				]
+			}
+		],
+		"tools": [{"name": "todo_write_ide", "description": "todo write"}]
+	}`)
+	apiKey := "sk-ant-oat-token"
+	isOAuth := true
+
+	pipedBody := body
+	var claudeToolMap map[string]string
+	if isOAuth || strings.Contains(apiKey, "sk-ant-oat") {
+		pipedBody = applyClaudeCloaking(pipedBody, apiKey, "sess-1")
+		var reqMap map[string]any
+		if err := json.Unmarshal(pipedBody, &reqMap); err == nil {
+			claudeToolMap = cloakClaudeTools(reqMap)
+			if out, err := json.Marshal(reqMap); err == nil {
+				pipedBody = out
+			}
+		}
+	}
+
+	if claudeToolMap == nil || claudeToolMap["todo_write_ide"] != "todo_write" {
+		t.Fatalf("expected todo_write_ide mapped to todo_write, got %v", claudeToolMap)
+	}
+	s := string(pipedBody)
+	if strings.Contains(s, "todo_write_ide_ide") {
+		t.Fatalf("found double-suffixed tool name in request: %s", s)
+	}
+	if !strings.Contains(s, `"name":"todo_write_ide"`) {
+		t.Fatalf("expected tool_use name to remain todo_write_ide, got %s", s)
+	}
+}
+
+func TestCloakClaudeTools_ToolReferenceBlocks(t *testing.T) {
+	tests := []struct {
+		name      string
+		reqJSON   string
+		wantCheck func(t *testing.T, req map[string]any, toolMap map[string]string)
+	}{
+		{
+			name: "renames tool_reference in tool_result content for cloaked tool",
+			reqJSON: `{
+				"tools": [
+					{"name": "ToolSearch", "input_schema": {"type": "object", "properties": {}}},
+					{"name": "Monitor", "defer_loading": true, "input_schema": {"type": "object", "properties": {}}}
+				],
+				"messages": [
+					{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "ToolSearch", "input": {}}]},
+					{"role": "user", "content": [
+						{"type": "tool_result", "tool_use_id": "t1", "content": [
+							{"type": "tool_reference", "tool_name": "Monitor"}
+						]}
+					]}
+				]
+			}`,
+			wantCheck: func(t *testing.T, req map[string]any, toolMap map[string]string) {
+				if toolMap == nil || toolMap["Monitor_ide"] != "Monitor" {
+					t.Fatalf("expected Monitor_ide in toolMap, got %v", toolMap)
+				}
+				msgs := req["messages"].([]any)
+				userMsg := msgs[1].(map[string]any)
+				userContent := userMsg["content"].([]any)
+				toolResult := userContent[0].(map[string]any)
+				trContent := toolResult["content"].([]any)
+				ref := trContent[0].(map[string]any)
+				if got := ref["tool_name"]; got != "Monitor_ide" {
+					t.Errorf("tool_name = %v, want Monitor_ide", got)
+				}
+			},
+		},
+		{
+			name: "leaves unrenamed or decoy tool references untouched",
+			reqJSON: `{
+				"tools": [
+					{"name": "ToolSearch", "input_schema": {"type": "object", "properties": {}}}
+				],
+				"messages": [
+					{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "ToolSearch", "input": {}}]},
+					{"role": "user", "content": [
+						{"type": "tool_result", "tool_use_id": "t1", "content": [
+							{"type": "tool_reference", "tool_name": "Bash"}
+						]}
+					]}
+				]
+			}`,
+			wantCheck: func(t *testing.T, req map[string]any, toolMap map[string]string) {
+				msgs := req["messages"].([]any)
+				userMsg := msgs[1].(map[string]any)
+				userContent := userMsg["content"].([]any)
+				toolResult := userContent[0].(map[string]any)
+				trContent := toolResult["content"].([]any)
+				ref := trContent[0].(map[string]any)
+				if got := ref["tool_name"]; got != "Bash" {
+					t.Errorf("tool_name = %v, want Bash", got)
+				}
+			},
+		},
+		{
+			name: "handles mixed content in tool_result.content and string content cleanly",
+			reqJSON: `{
+				"tools": [
+					{"name": "ToolSearch", "input_schema": {"type": "object", "properties": {}}},
+					{"name": "Monitor", "defer_loading": true, "input_schema": {"type": "object", "properties": {}}}
+				],
+				"messages": [
+					{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "ToolSearch", "input": {}}]},
+					{"role": "user", "content": [
+						{"type": "tool_result", "tool_use_id": "t1", "content": [
+							{"type": "text", "text": "Found 1 tool:"},
+							{"type": "tool_reference", "tool_name": "Monitor"}
+						]},
+						{"type": "tool_result", "tool_use_id": "t2", "content": "plain string result"}
+					]}
+				]
+			}`,
+			wantCheck: func(t *testing.T, req map[string]any, toolMap map[string]string) {
+				msgs := req["messages"].([]any)
+				userMsg := msgs[1].(map[string]any)
+				userContent := userMsg["content"].([]any)
+
+				tr1 := userContent[0].(map[string]any)
+				tr1Content := tr1["content"].([]any)
+				textBlock := tr1Content[0].(map[string]any)
+				if textBlock["text"] != "Found 1 tool:" {
+					t.Errorf("textBlock text = %v, want 'Found 1 tool:'", textBlock["text"])
+				}
+				refBlock := tr1Content[1].(map[string]any)
+				if refBlock["tool_name"] != "Monitor_ide" {
+					t.Errorf("refBlock tool_name = %v, want Monitor_ide", refBlock["tool_name"])
+				}
+
+				tr2 := userContent[1].(map[string]any)
+				if tr2["content"] != "plain string result" {
+					t.Errorf("tr2 content = %v, want 'plain string result'", tr2["content"])
+				}
+			},
+		},
+		{
+			name: "renames top-level tool_reference in message content and handles name field",
+			reqJSON: `{
+				"tools": [
+					{"name": "Monitor", "input_schema": {"type": "object", "properties": {}}}
+				],
+				"messages": [
+					{"role": "user", "content": [
+						{"type": "tool_reference", "name": "Monitor"}
+					]}
+				]
+			}`,
+			wantCheck: func(t *testing.T, req map[string]any, toolMap map[string]string) {
+				msgs := req["messages"].([]any)
+				userMsg := msgs[0].(map[string]any)
+				userContent := userMsg["content"].([]any)
+				ref := userContent[0].(map[string]any)
+				if got := ref["name"]; got != "Monitor_ide" {
+					t.Errorf("name = %v, want Monitor_ide", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req map[string]any
+			if err := json.Unmarshal([]byte(tt.reqJSON), &req); err != nil {
+				t.Fatalf("failed to unmarshal test JSON: %v", err)
+			}
+			toolMap := cloakClaudeTools(req)
+			tt.wantCheck(t, req, toolMap)
+		})
+	}
+}
+
+func TestAdoptRequiredClaudeCodeVersion(t *testing.T) {
+	oldVer := ClaudeCLIVersion()
+	defer func() {
+		claudeVersionMu.Lock()
+		adoptedClaudeVersion = ""
+		claudeVersionMu.Unlock()
+	}()
+
+	// Non-matching error body does nothing
+	if AdoptRequiredClaudeCodeVersion([]byte("rate_limit_error")) {
+		t.Errorf("unexpected adopt on rate_limit_error")
+	}
+
+	// 400 rejection with claude_code_version_too_old adopts the newer version
+	rejection := []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"claude_code_version_too_old: version 2.1.300 or newer is required to access this model"}}`)
+	if !AdoptRequiredClaudeCodeVersion(rejection) {
+		t.Fatalf("expected version adopt")
+	}
+
+	if got := ClaudeCLIVersion(); got != "2.1.300" {
+		t.Errorf("ClaudeCLIVersion = %q, want 2.1.300 (bumped from %s)", got, oldVer)
+	}
+
+	// Older version in rejection does not downgrade
+	rejectionOlder := []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"claude_code_version_too_old: version 2.0.0 or newer is required"}}`)
+	if AdoptRequiredClaudeCodeVersion(rejectionOlder) {
+		t.Errorf("unexpected downgrade from older rejection")
+	}
+	if got := ClaudeCLIVersion(); got != "2.1.300" {
+		t.Errorf("version downgraded: %q", got)
+	}
+}
