@@ -35,6 +35,11 @@ type Intent struct {
 	Level   string // minimal|low|medium|high|xhigh|max|ultra when Mode == ModeLevel
 	Budget  int    // tokens when Mode == ModeBudget
 	Display string // "summarized"|"omitted"; "" when unset
+	// IncludeThoughts is the client's ask for the gemini-level wire format:
+	// nil  → use the format default (true when thinking is active)
+	// true → stream thought summaries
+	// false→ opt out (omit or send includeThoughts: false)
+	IncludeThoughts *bool
 }
 
 // Clone returns a copy, safe for writers that clamp without mutating input.
