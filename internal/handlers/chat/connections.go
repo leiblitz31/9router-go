@@ -712,6 +712,17 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		return nil, fmt.Errorf("provider %q has no baseUrl in connection data and is not in KnownProviders", provider)
 	}
 
+	// A compatible node's wire format comes from the same table its lane comes
+	// from (providers.CompatibleNodeWires), so the two cannot drift apart —
+	// that drift was the "no choices in OpenAI response" bug: the lane sent
+	// the request to /messages while the format machinery still treated the
+	// upstream as Chat Completions.
+	if format := compatibleNodeFormat(provider); format != "" && baseCfg.Format == "" {
+		cloned := *baseCfg
+		cloned.Format = format
+		baseCfg = &cloned
+	}
+
 	// Fill the {accountId} placeholder a registry URL may carry (Cloudflare
 	// Workers AI names the account in the path) from the selected connection:
 	// the id lives in providerSpecificData, the same field the dashboard's
