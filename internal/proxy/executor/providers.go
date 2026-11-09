@@ -1772,11 +1772,7 @@ func opencodeGoInferenceBase(base string) string {
 	base = strings.TrimSuffix(base, "/responses")
 	switch {
 	case strings.HasSuffix(base, "/zen/go/v1"):
-		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/openai/v1"
-	case strings.HasSuffix(base, "/inference/go/openai/v1"):
-		return strings.TrimSuffix(base, "/inference/go/openai/v1") + "/inference/openai/v1"
-	case strings.HasSuffix(base, "/inference/openai/v1"):
-		return base
+		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/v1"
 	case strings.HasSuffix(base, "/inference/v1"):
 		return base
 	default:
