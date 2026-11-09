@@ -475,7 +475,7 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 			applyRawAggregate(&resp, agg, nodeNameMap, connMap, keyNames)
 		}
 
-		if views.model && len(resp.ByModel) > 0 && repo != nil {
+		if len(resp.ByModel) > 0 && repo != nil {
 			cutoff := ""
 			if !window.since.IsZero() {
 				cutoff = window.since.UTC().Format("2006-01-02T15:04:05.000Z")
