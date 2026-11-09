@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"database/sql"
 	json "encoding/json/v2"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"9router/proxy/internal/db"
