@@ -1,10 +1,10 @@
 package chat
 
 import (
+	json "9router/proxy/internal/fastjson"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	json "9router/proxy/internal/fastjson"
 	"fmt"
 	"strings"
 
