@@ -52,11 +52,11 @@ func stripPatterns(schema any, removed *int) any {
 	}
 }
 
-// NormalizeToolSchemasForProvider strips invalid pattern constraints for OpenRouter.
-// Only provider == "openrouter" is affected; other providers return tools unchanged.
+// NormalizeToolSchemasForProvider strips invalid pattern constraints and the
+// Agent tool's isolation property for every non-Anthropic provider.
 // Port of open-sse/utils/toolSchemaCompatibility.js normalizeToolSchemasForProvider (PR #3665).
 func NormalizeToolSchemasForProvider(provider string, tools []any) ([]any, int) {
-	if provider != "openrouter" || len(tools) == 0 {
+	if provider == "anthropic" || len(tools) == 0 {
 		return tools, 0
 	}
 	removed := 0
