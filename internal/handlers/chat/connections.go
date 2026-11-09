@@ -390,6 +390,21 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 			// Per-model lock and quota cache first: an account parked for
 			// this model carries no cooldown to shorten, so it must not enter
 			// the forced pool either (h.connectionModelBlocked).
+			// A parked dead grant is terminal only while its park is active:
+			// once oauthLockedUntil runs out the account returns as a
+			// normal candidate (the park is a cooldown, not a disable).
+			// While parked even a probe (which otherwise bypasses cooldowns
+			// to test live reachability) must not re-pick it — the upstream
+			// answer is already known (401 invalid token).
+			if db.ConnectionRequiresReauth(c.Data) {
+				if until, ok := db.ConnectionOAuthLockUntil(c.Data); ok && until.After(now) {
+					inCooldown = append(inCooldown, c)
+					if cooldownUntil.IsZero() || until.Before(cooldownUntil) {
+						cooldownUntil = until
+					}
+					continue
+				}
+			}
 			if !isProbe {
 				if h.connectionModelBlocked(c, provider, model) {
 					continue
@@ -407,44 +422,6 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 					}
 					continue
 				}
-				// Per-model lock and quota cache first: an account parked for
-				// this model carries no cooldown to shorten, so it must not enter
-				// the forced pool either (h.connectionModelBlocked).
-				// A parked dead grant is terminal only while its park is active:
-				// once oauthLockedUntil runs out the account returns as a
-				// normal candidate (the park is a cooldown, not a disable).
-				// While parked even a probe (which otherwise bypasses cooldowns
-				// to test live reachability) must not re-pick it — the upstream
-				// answer is already known (401 invalid token).
-				if db.ConnectionRequiresReauth(c.Data) {
-					if until, ok := db.ConnectionOAuthLockUntil(c.Data); ok && until.After(now) {
-						inCooldown = append(inCooldown, c)
-						if cooldownUntil.IsZero() || until.Before(cooldownUntil) {
-							cooldownUntil = until
-						}
-						continue
-					}
-				}
-				if !isProbe {
-					if h.connectionModelBlocked(c, provider, model) {
-						continue
-					}
-					// Account-scoped cooldown. An account whose quota is spent, or
-					// whose OAuth grant the provider already rejected, is skipped
-					// before it is selected — round-robin otherwise kept handing out
-					// dead accounts until a live 429/401 locked them, and a rejected
-					// grant cost a token-endpoint call on every request until the IP
-					// was rate limited. Upstream parity: filterAvailableAccounts.
-					if until, ok := db.ConnectionBlockedUntil(c.Data); ok && until.After(now) {
-						inCooldown = append(inCooldown, c)
-						if cooldownUntil.IsZero() || until.Before(cooldownUntil) {
-							cooldownUntil = until
-						}
-						continue
-					}
-				}
-				conn = c
-				break
 			}
 			conn = c
 			break
