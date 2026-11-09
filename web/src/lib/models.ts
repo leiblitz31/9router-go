@@ -1193,6 +1193,14 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "upstreamModelId": "codex-auto-review"
     },
     {
+      "id": "gpt-image-2.6-flare",
+      "name": "GPT Image 2.6 Flare"
+    },
+    {
+      "id": "gpt-image-2.6-sunburst",
+      "name": "GPT Image 2.6 Sunburst"
+    },
+    {
       "id": "gpt-image-2.5",
       "name": "GPT Image 2.5"
     },
@@ -3906,6 +3914,28 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gpt-image-2.5",
       "name": "GPT Image 2.5",
+      "params": [
+        "n",
+        "size",
+        "quality",
+        "response_format"
+      ],
+      "kind": "image"
+    },
+    {
+      "id": "gpt-image-2.6-flare",
+      "name": "GPT Image 2.6 Flare",
+      "params": [
+        "n",
+        "size",
+        "quality",
+        "response_format"
+      ],
+      "kind": "image"
+    },
+    {
+      "id": "gpt-image-2.6-sunburst",
+      "name": "GPT Image 2.6 Sunburst",
       "params": [
         "n",
         "size",

@@ -1772,7 +1772,11 @@ func opencodeGoInferenceBase(base string) string {
 	base = strings.TrimSuffix(base, "/responses")
 	switch {
 	case strings.HasSuffix(base, "/zen/go/v1"):
-		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/v1"
+		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/go/openai/v1"):
+		return strings.TrimSuffix(base, "/inference/go/openai/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/openai/v1"):
+		return base
 	case strings.HasSuffix(base, "/inference/v1"):
 		return base
 	default:
@@ -2028,8 +2032,8 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 	}
 
 	if opencodeGoMessagesModels[reqObj.Model] || opencodeGoMessagesModels[cleanModel] {
-		// Route to /zen/go/v1/messages (Anthropic/Claude format)
-		messagesURL := "https://opencode.ai/zen/go/v1/messages"
+		// Route to /inference/go/anthropic/v1/messages (Anthropic/Claude format)
+		messagesURL := "https://opencode.ai/inference/go/anthropic/v1/messages"
 		if req.Config != nil && req.Config.BaseURL != "" && !strings.Contains(req.Config.BaseURL, "opencode.ai") {
 			base := strings.TrimRight(req.Config.BaseURL, "/")
 			if strings.HasSuffix(base, "/chat/completions") {
