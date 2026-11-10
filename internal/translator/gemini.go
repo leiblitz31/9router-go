@@ -209,8 +209,13 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 		TopK                *int           `json:"top_k,omitempty"`
 		Stream              bool           `json:"stream,omitempty"`
 		Tools               jsontext.Value `json:"tools,omitempty"`
-		ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
-		Thinking            *struct {
+		ToolChoice          jsontext.Value `json:"tool_choice,omitempty"`
+		// ResponseFormat carries the client's OpenAI response_format (json_object
+		// / json_schema). The request is rebuilt field by field below, so a field
+		// this struct does not name is a field the Gemini upstream never sees.
+		ResponseFormat  jsontext.Value `json:"response_format,omitempty"`
+		ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+		Thinking        *struct {
 			Type         string `json:"type"`
 			BudgetTokens int    `json:"budget_tokens"`
 		} `json:"thinking,omitempty"`
@@ -526,6 +531,17 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 	}
 	if maxTokens != nil {
 		genConfig["maxOutputTokens"] = *maxTokens
+	}
+	// Carry the client's OpenAI response_format onto Gemini's native structured
+	// output (generationConfig.responseMimeType / responseJsonSchema). Without
+	// this, a client asking for JSON got free text silently: the request is
+	// rebuilt field by field, and response_format was dropped on the way.
+	// Parity with KeiRouter transform.geminiResponseFormat.
+	if mime, schema, ok := geminiResponseFormat(oreq.ResponseFormat); ok {
+		genConfig["responseMimeType"] = mime
+		if schema != nil {
+			genConfig["responseJsonSchema"] = schema
+		}
 	}
 	if len(genConfig) > 0 {
 		configJSON, err := json.Marshal(genConfig, json.Deterministic(true))
