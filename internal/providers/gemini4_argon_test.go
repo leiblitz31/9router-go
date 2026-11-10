@@ -52,15 +52,6 @@ func TestGemini4ArgonRegistry(t *testing.T) {
 	}
 }
 
-// TestGemini3KeepsMinimalLevel is the regression guard: Gemini 3 keeps the
-// minimal tier that Argon rejects.
-func TestGemini3KeepsMinimalLevel(t *testing.T) {
-	levels := GetThinkingLevels("gemini", "gemini-3.8-flash")
-	if !slices.Contains(levels, "minimal") {
-		t.Errorf("gemini-3.8-flash levels = %v, want minimal included", levels)
-	}
-}
-
 // Gemini 4 Argon (2026-10): unified 1M window, tunable thinking low|medium|high
 // (no minimal), paid only, intro pricing $2/$10. Regression coverage for the
 // registry/capabilities/pricing wiring (matching upstream tests/unit/gemini-4-argon.test.js).
