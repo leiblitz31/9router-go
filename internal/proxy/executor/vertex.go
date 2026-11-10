@@ -223,7 +223,9 @@ func forwardVertexAs(w http.ResponseWriter, req *Request, provider string) error
 	for k, v := range BuildVertexHeaders(creds, req.IsStream) {
 		httpReq.Header.Set(k, v)
 	}
-
+	if req.IsStream && httpReq.Header.Get("Accept-Encoding") == "" {
+		httpReq.Header.Set("Accept-Encoding", "identity")
+	}
 	client := req.Client
 	if client == nil {
 		client = http.DefaultClient
@@ -232,10 +234,10 @@ func forwardVertexAs(w http.ResponseWriter, req *Request, provider string) error
 	if err != nil {
 		return fmt.Errorf("vertex upstream request: %w", err)
 	}
+	proxy.UnwrapIdentityGzip(httpReq, resp)
 	defer resp.Body.Close()
 
 	forwardUpstreamResponseHeaders(w, resp.Header)
-
 	if resp.StatusCode != http.StatusOK {
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 		resp.Body.Close()

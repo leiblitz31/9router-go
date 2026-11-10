@@ -105,6 +105,9 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 		"Authorization": "Bearer " + apiKey,
 		"User-Agent":    providers.AntigravityCLIUserAgent,
 	}
+	if isStream {
+		headers["Accept-Encoding"] = "identity"
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewReader(sendBody))
 	if err != nil {
@@ -118,6 +121,7 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 	if err != nil {
 		return nil, fmt.Errorf("upstream request: %w", err)
 	}
+	UnwrapIdentityGzip(req, resp)
 	if resp.StatusCode != http.StatusOK {
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 		resp.Body.Close()
@@ -156,6 +160,7 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 						req2.Header.Set(k, v)
 					}
 					if resp2, err := client.Do(req2); err == nil {
+						UnwrapIdentityGzip(req2, resp2)
 						if resp2.StatusCode == http.StatusOK {
 							return resp2, nil
 						}
@@ -173,6 +178,7 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 										req3.Header.Set(k, v)
 									}
 									if resp3, err := client.Do(req3); err == nil {
+										UnwrapIdentityGzip(req3, resp3)
 										if resp3.StatusCode == http.StatusOK {
 											return resp3, nil
 										}
