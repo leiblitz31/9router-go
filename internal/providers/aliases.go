@@ -60,6 +60,7 @@ var ProviderAliasMap = map[string]string{
 	"uc":             "uc-web",
 	"veo-free":       "veoaifree-web",
 	"hf":             "huggingface",
+	"hc":             "hcnsec",
 	"hyp":            "hyperbolic",
 	"if":             "iflow",
 	"jina":           "jina-ai",

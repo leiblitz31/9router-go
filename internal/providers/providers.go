@@ -164,6 +164,7 @@ var modelsListURL = map[string]string{
 	// SumoPod exposes the standard OpenAI /v1/models catalogue (auth required,
 	// same contract as tokenharbor/dahl).
 	"sumopod": "https://ai.sumopod.com/v1/models",
+	"hcnsec":  "https://api.hcnsec.cn/v1/models",
 	// Command Code publishes its whole Provider API catalogue on the standard
 	// OpenAI /v1/models shape, keyless: every id it sells, the free tiers
 	// included (reflection/beam:free, stealth/glyph-cluster:free,
@@ -424,6 +425,12 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://aistudio.xiaomimimo.com/open-apis/react/chat",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+	},
+	"hcnsec": {
+		BaseURL:    "https://api.hcnsec.cn/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+		TTSURL:     "https://api.hcnsec.cn/v1/audio/speech",
 	},
 	// SumoPod — Indonesian AI gateway (ai.sumopod.com), OpenAI-compatible
 	// chat completions with 60+ models across Claude, Gemini, GPT, DeepSeek,
