@@ -519,6 +519,22 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "free-pi",
+    "name": "Free Pi",
+    "category": "oauth",
+    "alias": "fp",
+    "color": "#7c3aed",
+    "icon": "terminal",
+    "website": "https://freepi.ai",
+    "authType": "oauth",
+    "noAuth": false,
+    "usage": true,
+    "modelsFetcher": {"url": "https://api.freepi.ai/client-version", "type": "free-pi"},
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
     "id": "gemini-cli",
     "name": "Gemini CLI",
     "category": "free",
