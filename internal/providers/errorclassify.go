@@ -92,7 +92,6 @@ var ErrorRules = []ErrorRule{
 	// cloudcode-pa domain, which is what parks the account for 24h.
 	{Text: "no credentials", CooldownMs: cooldownLong},
 	{Text: "request not allowed", CooldownMs: cooldownShort},
-	{Text: "improperly formed request", CooldownMs: cooldownLong},
 	{Text: "rate limit", Backoff: true},
 	{Text: "too many requests", Backoff: true},
 	{Text: "quota exceeded", Backoff: true},
