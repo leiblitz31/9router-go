@@ -3,6 +3,7 @@ package chat
 import (
 	json "encoding/json/v2"
 	"testing"
+	"time"
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlers/shared"
@@ -591,5 +592,137 @@ func TestResolveModel_CodexSlugStillResolvesWithoutCombo(t *testing.T) {
 	}
 	if len(info.ComboModels) != 0 {
 		t.Errorf("ComboModels = %v, want none", info.ComboModels)
+	}
+}
+
+func TestResolveModel_WebComboBareProviderNames(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	h := NewChatHandler(db.NewRepo(database))
+
+	// WebSearch combo with legacy bare provider names
+	searchModels, _ := json.Marshal([]string{"exa", "serper", "tavily"})
+	kindSearch := "webSearch"
+	_, err := database.Exec(`INSERT INTO combos (id, name, kind, models, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+		"c-search", "my-search-combo", kindSearch, string(searchModels), "2026-11-04T00:00:00Z", "2026-11-04T00:00:00Z")
+	if err != nil {
+		t.Fatalf("insert search combo: %v", err)
+	}
+
+	info, err := h.resolveModel("my-search-combo")
+	if err != nil {
+		t.Fatalf("resolveModel(my-search-combo) error = %v", err)
+	}
+	wantSearch := []string{"exa/search", "serper/search", "tavily/search"}
+	if len(info.ComboModels) != len(wantSearch) {
+		t.Fatalf("got %d ComboModels, want %d: %v", len(info.ComboModels), len(wantSearch), info.ComboModels)
+	}
+	for i := range wantSearch {
+		if info.ComboModels[i] != wantSearch[i] {
+			t.Errorf("at index %d: expected %q, got %q", i, wantSearch[i], info.ComboModels[i])
+		}
+	}
+
+	// WebFetch combo with legacy bare provider names
+	fetchModels, _ := json.Marshal([]string{"exa", "firecrawl"})
+	kindFetch := "webFetch"
+	_, err = database.Exec(`INSERT INTO combos (id, name, kind, models, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+		"c-fetch", "my-fetch-combo", kindFetch, string(fetchModels), "2026-11-04T00:00:00Z", "2026-11-04T00:00:00Z")
+	if err != nil {
+		t.Fatalf("insert fetch combo: %v", err)
+	}
+
+	fetchInfo, err := h.resolveModel("my-fetch-combo")
+	if err != nil {
+		t.Fatalf("resolveModel(my-fetch-combo) error = %v", err)
+	}
+	wantFetch := []string{"exa/fetch", "firecrawl/fetch"}
+	if len(fetchInfo.ComboModels) != len(wantFetch) {
+		t.Fatalf("got %d ComboModels, want %d: %v", len(fetchInfo.ComboModels), len(wantFetch), fetchInfo.ComboModels)
+	}
+	for i := range wantFetch {
+		if fetchInfo.ComboModels[i] != wantFetch[i] {
+			t.Errorf("at index %d: expected %q, got %q", i, wantFetch[i], fetchInfo.ComboModels[i])
+		}
+	}
+}
+
+func TestIsCopilotResponsesModel(t *testing.T) {
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-6.1-terra", true},
+		{"gpt-6-terra", true},
+		{"gpt-5.5", true},
+		{"gpt-5.6-sol", true},
+		{"github/gpt-6.1-terra", true},
+		{"gpt-6.1-terra(high)", true},
+		{"gpt-5", false},
+		{"gpt-6", false},
+		{"gpt-5.4", false},
+		{"gpt-4o", false},
+		{"claude-sonnet-4-5", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		got := isCopilotResponsesModel("github", tc.model)
+		if got != tc.want {
+			t.Errorf("isCopilotResponsesModel(github, %q) = %v, want %v", tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestResolveModelEntry_ConnectionNameAndIDPrefix(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	connData, _ := json.Marshal(map[string]any{"apiKey": "vibe-key-123"})
+	_, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-mistral-vibe', 'mistral', 'apikey', 'Mistral Vibe', 1, 1, ?, ?, ?)`, string(connData), now, now)
+	if err != nil {
+		t.Fatalf("seed vibe connection: %v", err)
+	}
+
+	apiConnData, _ := json.Marshal(map[string]any{"apiKey": "api-key-456"})
+	_, err = database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-mistral-api', 'mistral', 'apikey', 'Mistral API', 2, 1, ?, ?, ?)`, string(apiConnData), now, now)
+	if err != nil {
+		t.Fatalf("seed api connection: %v", err)
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+
+	tests := []struct {
+		entry          string
+		wantProvider   string
+		wantModel      string
+		wantConnection string
+	}{
+		{"Mistral Vibe/codestral-latest", "mistral", "codestral-latest", "conn-mistral-vibe"},
+		{"mistral-vibe/codestral-latest", "mistral", "codestral-latest", "conn-mistral-vibe"},
+		{"conn-mistral-vibe/codestral-latest", "mistral", "codestral-latest", "conn-mistral-vibe"},
+		{"Mistral API/codestral-latest", "mistral", "codestral-latest", "conn-mistral-api"},
+		{"mistral-api/codestral-latest", "mistral", "codestral-latest", "conn-mistral-api"},
+		{"mistral/codestral-latest", "mistral", "codestral-latest", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.entry, func(t *testing.T) {
+			got := h.resolveModelEntry(tc.entry)
+			if got == nil {
+				t.Fatalf("resolveModelEntry(%q) = nil, want provider %s", tc.entry, tc.wantProvider)
+			}
+			if got.Provider != tc.wantProvider {
+				t.Errorf("Provider = %q, want %q", got.Provider, tc.wantProvider)
+			}
+			if got.Model != tc.wantModel {
+				t.Errorf("Model = %q, want %q", got.Model, tc.wantModel)
+			}
+			if got.ConnectionID != tc.wantConnection {
+				t.Errorf("ConnectionID = %q, want %q", got.ConnectionID, tc.wantConnection)
+			}
+		})
 	}
 }

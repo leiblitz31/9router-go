@@ -138,6 +138,30 @@ func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string
 		return info
 	}
 
+	// Connection-level routing: a prefix that names a connection (by id, or by
+	// its display name normalized to a slug) routes to that connection. The
+	// fork has no connMap parameter (upstream #1047 hangs this off an else
+	// branch of its connMap lookup), so the repository scan runs directly.
+	if h.Repo != nil {
+		if conns, err := h.Repo.GetProviderConnections("", false); err == nil {
+			normPrefix := strings.ToLower(strings.ReplaceAll(prefix, " ", "-"))
+			for _, conn := range conns {
+				if conn == nil {
+					continue
+				}
+				if conn.ID == prefix {
+					return &ModelInfo{Provider: conn.Provider, Model: model, ConnectionID: conn.ID}
+				}
+				if conn.Name != nil && *conn.Name != "" {
+					normName := strings.ToLower(strings.ReplaceAll(*conn.Name, " ", "-"))
+					if normName == normPrefix || strings.EqualFold(*conn.Name, prefix) {
+						return &ModelInfo{Provider: conn.Provider, Model: model, ConnectionID: conn.ID}
+					}
+				}
+			}
+		}
+	}
+
 	provider := resolveProviderAlias(prefix)
 	if provider != prefix {
 		if info := h.resolvePrefixProvider(provider, model); info != nil {

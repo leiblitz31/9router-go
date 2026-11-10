@@ -205,6 +205,7 @@ var ProviderModels = map[string][]string{
 	"minimax-code":        {"MiniMax-M3.1-Flash-Preview", "MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"},
 	"minimax-code-global": {"MiniMax-M3.1-Flash-Preview", "MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"},
 	"mistral":             {"mistral-large-latest", "codestral-latest", "mistral-medium-latest", "mistral-embed"},
+	"mistral":             {"mistral-large-latest", "mistral-large-4", "deepseek-v4-1-flash-1017", "zai-glm-5-3-flash", "zai-glm-5-3", "zai-glm-5-2", "glm-5-2", "devstral-latest", "devstral-2512", "labs-devstral-small-2512", "codestral-latest", "codestral-2508", "mistral-small-latest", "mistral-small-4", "mistral-medium-latest", "mistral-medium-2604", "ministral-8b-latest", "ministral-3b-latest", "ministral-14b-2512", "magistral-medium-latest", "labs-leanstral-1-5-1", "pixtral-large-latest", "pixtral-12b-2409", "mistral-saba-latest", "codestral-mamba-latest", "mistral-moderation-latest", "mistral-embed"},
 	"muse":                {"muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1", "muse-spark-1.3-contributor", "muse-spark-1.2-contributor"},
 	"mmf":                 {"mimo-auto"},
 	"morph":               {"morph-v3-large", "morph-v3-fast", "morph-qwen35-397b", "morph-minimax27-230b", "morph-qwen36-27b", "morph-dsv4flash"},

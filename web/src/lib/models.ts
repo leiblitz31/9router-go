@@ -3593,12 +3593,105 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Mistral Large 3"
     },
     {
+      "id": "mistral-large-4",
+      "name": "Mistral Large 4"
+    },
+    {
+      "id": "deepseek-v4-1-flash-1017",
+      "name": "DeepSeek V4.1 Flash 1017"
+    },
+    {
+      "id": "zai-glm-5-3-flash",
+      "name": "Z.ai GLM 5.3 Flash"
+    },
+    {
+      "id": "zai-glm-5-3",
+      "name": "Z.ai GLM 5.3"
+    },
+    {
+      "id": "zai-glm-5-2",
+      "name": "Z.ai GLM 5.2"
+    },
+    {
+      "id": "glm-5-2",
+      "name": "GLM 5.2"
+    },
+    {
+      "id": "devstral-latest",
+      "name": "Devstral 2"
+    },
+    {
+      "id": "devstral-2512",
+      "name": "Devstral 2 (2512)"
+    },
+    {
+      "id": "labs-devstral-small-2512",
+      "name": "Devstral Small 2"
+    },
+    {
       "id": "codestral-latest",
       "name": "Codestral"
     },
     {
+      "id": "codestral-2508",
+      "name": "Codestral 25.08"
+    },
+    {
+      "id": "mistral-small-latest",
+      "name": "Mistral Small 3"
+    },
+    {
+      "id": "mistral-small-4",
+      "name": "Mistral Small 4"
+    },
+    {
       "id": "mistral-medium-latest",
       "name": "Mistral Medium 3"
+    },
+    {
+      "id": "mistral-medium-2604",
+      "name": "Mistral Medium 3.5"
+    },
+    {
+      "id": "ministral-8b-latest",
+      "name": "Ministral 8B"
+    },
+    {
+      "id": "ministral-3b-latest",
+      "name": "Ministral 3B"
+    },
+    {
+      "id": "ministral-14b-2512",
+      "name": "Ministral 14B"
+    },
+    {
+      "id": "magistral-medium-latest",
+      "name": "Magistral Medium"
+    },
+    {
+      "id": "labs-leanstral-1-5-1",
+      "name": "Leanstral 1.5"
+    },
+    {
+      "id": "pixtral-large-latest",
+      "name": "Pixtral Large"
+    },
+    {
+      "id": "pixtral-12b-2409",
+      "name": "Pixtral 12B"
+    },
+    {
+      "id": "mistral-saba-latest",
+      "name": "Mistral Saba"
+    },
+    {
+      "id": "codestral-mamba-latest",
+      "name": "Codestral Mamba"
+    },
+    {
+      "id": "mistral-moderation-latest",
+      "name": "Mistral Moderation",
+      "kind": "moderation"
     },
     {
       "id": "mistral-embed",
