@@ -199,6 +199,36 @@ func commandcodeAssistantBlocks(msg map[string]any) []any {
 func commandcodeConvertMessages(rawMsgs []any) (messages []any, system string) {
 	converted := make([]any, 0, len(rawMsgs))
 	systemTexts := make([]string, 0, 2)
+	// OpenAI tool messages usually omit the tool name (they carry only
+	// tool_call_id), but the AI-SDK tool-result block requires toolName.
+	// Learn id → name from the assistant tool_calls, the way the fork's
+	// inline converter did before this helper was extracted.
+	toolNames := map[string]string{}
+	for _, raw := range rawMsgs {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "assistant" {
+			continue
+		}
+		if tcs, ok := msg["tool_calls"].([]any); ok {
+			for _, rawTC := range tcs {
+				tc, ok := rawTC.(map[string]any)
+				if !ok {
+					continue
+				}
+				id, _ := tc["id"].(string)
+				name, _ := tc["name"].(string)
+				if fn, ok := tc["function"].(map[string]any); ok && name == "" {
+					name, _ = fn["name"].(string)
+				}
+				if id != "" && name != "" {
+					toolNames[id] = name
+				}
+			}
+		}
+	}
 	for _, raw := range rawMsgs {
 		msg, ok := raw.(map[string]any)
 		if !ok {
@@ -211,7 +241,18 @@ func commandcodeConvertMessages(rawMsgs []any) (messages []any, system string) {
 				systemTexts = append(systemTexts, text)
 			}
 		case "tool":
-			converted = append(converted, commandcodeToolResultMessage(msg))
+			convertedMsg := commandcodeToolResultMessage(msg)
+			if blocks, ok := convertedMsg["content"].([]any); ok && len(blocks) > 0 {
+				if block, ok := blocks[0].(map[string]any); ok {
+					if name, _ := block["toolName"].(string); name == "" {
+						callID, _ := block["toolCallId"].(string)
+						if learned := toolNames[callID]; learned != "" {
+							block["toolName"] = learned
+						}
+					}
+				}
+			}
+			converted = append(converted, convertedMsg)
 		case "assistant":
 			converted = append(converted, map[string]any{
 				"role":    "assistant",

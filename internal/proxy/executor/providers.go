@@ -511,6 +511,18 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 	if tools, ok := m["tools"].([]any); ok && len(tools) > 0 {
 		params["tools"] = commandcodeTools(convertOpenAIToolsToClaude(tools))
 	}
+	// The fork carries tool_choice through (converted to the Anthropic shape
+	// by the switch below) rather than dropping it: a client pinning a tool
+	// would otherwise lose the pin silently, and CommandCode takes the
+	// Anthropic shapes. The raw OpenAI value never survives — the switch
+	// rewrites or deletes it. It is only carried when the request actually
+	// has tools: without tools the key is meaningless, and upstream's
+	// whitelist pins its absence there.
+	if rawTools, ok := m["tools"].([]any); ok && len(rawTools) > 0 {
+		if tc, ok := m["tool_choice"]; ok && tc != nil {
+			params["tool_choice"] = tc
+		}
+	}
 	if effort, ok := m["reasoning_effort"]; ok && effort != nil {
 		params["reasoning_effort"] = effort
 	}
