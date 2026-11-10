@@ -17,7 +17,8 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
-	"9router/proxy/internal/handlers/shared"
+9router/proxy/internal/handlers/shared
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
@@ -488,7 +489,7 @@ func (h *ChatHandler) fetchCompatibleNodeModels(ctx context.Context, conn *model
 	if err != nil {
 		return nil
 	}
-	for key, value := range headers {
+	for key, value := range handlerutil.WithDefaultUserAgent(headers) {
 		req.Header.Set(key, value)
 	}
 	resp, err := h.Client.Do(req)
