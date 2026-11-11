@@ -94,6 +94,11 @@ func ProvideServer(p ServerParams) *http.Server {
 		IdleTimeout:       serverIdleTimeout,
 		MaxHeaderBytes:    serverMaxHeaderBytes,
 	}
+	// stopAudit is set in OnStart (the audit trail starts only once the
+	// database is up) and called in OnStop, after the HTTP server has
+	// stopped, so the requests that were just served still drain into the
+	// log.
+	var stopAudit func()
 
 	p.Lifecycle.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
@@ -117,6 +122,11 @@ func ProvideServer(p ServerParams) *http.Server {
 			executor.StartGeminiWebRotation(shutdown.Context(), p.Repo)
 			startAutoPingScheduler(shutdown.Context(), p.Repo, p.ChatHandler)
 			startModelHealthScheduler(shutdown.Context(), p.Repo, p.ChatHandler)
+			// The tamper-evident audit trail: one writer goroutine, a bounded
+			// queue, and the retention sweeper when a window is configured.
+			// It is started here rather than in a provider because it must run
+			// before the server accepts traffic but after the database is up.
+			stopAudit = startAuditTrail(p.Repo)
 
 			log.Printf("9router-go Proxy (%s) starting on port %d", updater.CurrentVersion, p.Config.Port)
 
@@ -150,6 +160,12 @@ func ProvideServer(p ServerParams) *http.Server {
 				log.Printf("Server shutdown did not complete in time: %v", err)
 			} else {
 				log.Println("Server stopped gracefully")
+			}
+			// The audit trail drains after the server has stopped, so the
+			// requests that were just served are the last thing written into
+			// the hash chain. Nil when OnStart never ran (a test server).
+			if stopAudit != nil {
+				stopAudit()
 			}
 			return nil
 		},
