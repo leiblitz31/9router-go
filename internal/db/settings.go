@@ -12,6 +12,16 @@ type ComboStrategy struct {
 	Strategy    string `json:"strategy,omitempty"`
 	StickyLimit int    `json:"stickyLimit,omitempty"`
 	JudgeModel  string `json:"judgeModel,omitempty"`
+	// Weights holds optional per-model weights for round-robin rotation.
+	Weights map[string]int `json:"weights,omitempty"`
+	// FirstTokenTimeoutMs bounds every combo candidate except the last until
+	// its first usable response; zero disables it. The last candidate keeps
+	// the global deadline, so the setting never makes a combo fail sooner.
+	FirstTokenTimeoutMs int `json:"firstTokenTimeoutMs,omitempty"`
+	// FirstTokenGraceMs is how long a model that timed out is left out of the
+	// combo chain before it is tried again. Nil means DefaultFirstTokenGraceMs;
+	// an explicit zero re-includes the model on the very next request.
+	FirstTokenGraceMs *int `json:"firstTokenGraceMs,omitempty"`
 	// SmartPolicy is "smart" (adaptive switch, default), "strict" (lock the
 	// first evaluated model for the session), "per-turn" (no stickiness), or
 	// "custom" (SmartCustomThreshold governs switching).
