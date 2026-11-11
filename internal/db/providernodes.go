@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	json "encoding/json/v2"
+	"encoding/json/jsontext"
 	"fmt"
 	"time"
 
@@ -20,9 +21,36 @@ func scanProviderNode(scan func(dest ...any) error, node *models.ProviderNode) e
 
 // ProviderNodeData holds parsed fields from the providerNodes.data JSON blob.
 type ProviderNodeData struct {
-	Prefix  string `json:"prefix"`
-	APIType string `json:"apiType"`
-	BaseURL string `json:"baseUrl"`
+	Prefix             string         `json:"prefix"`
+	APIType            string         `json:"apiType"`
+	BaseURL            string         `json:"baseUrl"`
+	CustomJSON         jsontext.Value `json:"customJson,omitempty"`
+	MediaEnabled       *bool          `json:"mediaEnabled,omitempty"`
+	IsMediaActiveField *bool          `json:"isMediaActive,omitempty"`
+	DisabledKinds      []string       `json:"disabledKinds,omitempty"`
+}
+
+// IsMediaActive reports whether the provider node data permits media routing for the service kind.
+// Defaults to true when unspecified for backward compatibility.
+func (d *ProviderNodeData) IsMediaActive(serviceKind ...string) bool {
+	if d == nil {
+		return false
+	}
+	if d.MediaEnabled != nil && !*d.MediaEnabled {
+		return false
+	}
+	if d.IsMediaActiveField != nil && !*d.IsMediaActiveField {
+		return false
+	}
+	if len(serviceKind) > 0 && serviceKind[0] != "" {
+		kind := serviceKind[0]
+		for _, k := range d.DisabledKinds {
+			if k == "media" || k == kind {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // parseProviderNodeData extracts the JSON-encoded data field from a providerNode row.

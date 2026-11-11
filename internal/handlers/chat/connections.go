@@ -241,6 +241,7 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 	var conn *models.ProviderConnection
 	var err error
 	isProbe := handlerutil.IsProbeContext(ctx)
+	serviceKind := handlerutil.GetServiceKind(ctx)
 
 	if connectionID != "" {
 		conn, err = h.Repo.GetProviderConnectionByID(connectionID)
@@ -263,7 +264,7 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 		// row never matches and the request falls through to the configured
 		// strategy. Honouring the pin unconditionally made the dashboard's
 		// enable/disable toggle a no-op for every pinned request.
-		ineligible, reason := h.pinnedConnectionIneligible(conn, excludeIDs, model)
+		ineligible, reason := h.pinnedConnectionIneligible(conn, excludeIDs, model, serviceKind)
 		if ineligible && isProbe && conn.IsActive == 1 && !slices.Contains(excludeIDs, conn.ID) {
 			// A reauth_required account whose park has run out returns as a
 			// normal probe candidate; while parked it stays ineligible.
@@ -347,6 +348,17 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 		connections = filterConnectionsByEnabledModels(provider, connections, model)
 		if len(connections) == 0 {
 			return nil, nil, fmt.Errorf("no connection for provider %s has model %s enabled", provider, model)
+		}
+
+		// Service-kind and media eligibility filter: connections with
+		// media disabled are excluded from media requests (image, video,
+		// tts, stt, embedding, search, fetch). Text chat requests (empty
+		// serviceKind) keep all active connections.
+		if serviceKind != "" {
+			connections = filterConnectionsForServiceKind(connections, serviceKind)
+			if len(connections) == 0 {
+				return nil, nil, fmt.Errorf("no active connections for provider: %s", provider)
+			}
 		}
 
 		// Node state before rotation: a node whose contract has ended, or whose
@@ -536,7 +548,7 @@ func (h *ChatHandler) applyProviderProxyPool(connData *ConnectionData, provider 
 // before it looks for a preferred connection (src/sse/services/auth.js:100-148):
 // disabled rows, explicitly excluded rows, active model locks, and connections
 // the provider's strict model assignment does not bind to this model.
-func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection, excludeIDs []string, model string) (bool, string) {
+func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection, excludeIDs []string, model string, serviceKind ...string) (bool, string) {
 	if conn == nil {
 		return true, "nil connection"
 	}
@@ -545,6 +557,12 @@ func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection
 	}
 	if slices.Contains(excludeIDs, conn.ID) {
 		return true, "excluded"
+	}
+	if len(serviceKind) > 0 && serviceKind[0] != "" {
+		kind := serviceKind[0]
+		if !conn.IsMediaActive(kind) {
+			return true, "media disabled for " + kind
+		}
 	}
 	if until, ok := db.ConnectionBlockedUntil(conn.Data); ok && until.After(time.Now()) {
 		return true, "account cooldown until " + until.UTC().Format(time.RFC3339)
@@ -618,6 +636,20 @@ func filterConnectionsByEnabledModels(provider string, conns []*models.ProviderC
 		}
 	}
 	return kept
+}
+
+// filterConnectionsForServiceKind keeps only connections whose media capability allows serviceKind.
+func filterConnectionsForServiceKind(conns []*models.ProviderConnection, serviceKind string) []*models.ProviderConnection {
+	if serviceKind == "" {
+		return conns
+	}
+	out := make([]*models.ProviderConnection, 0, len(conns))
+	for _, c := range conns {
+		if c != nil && c.IsMediaActive(serviceKind) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // quotaCacheBlocked reports whether a provider's in-memory quota cache says
