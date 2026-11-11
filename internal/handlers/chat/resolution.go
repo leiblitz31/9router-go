@@ -93,7 +93,7 @@ func resolveProviderAlias(alias string) string {
 // If the entry has no "/" (i.e. it's a combo name), it resolves the combo
 // and returns its first concrete model with the combined model list.
 func (h *ChatHandler) resolveModelEntry(entry string) *ModelInfo {
-	return h.resolveModelEntryGuarded(entry, nil)
+	return h.resolveModelEntryGuarded(entry, nil, nil)
 }
 
 // resolveModelEntryGuarded is resolveModelEntry with the set of combo names
@@ -101,7 +101,7 @@ func (h *ChatHandler) resolveModelEntry(entry string) *ModelInfo {
 // through another combo) otherwise re-enters the branch below forever and
 // takes the whole process down with a stack overflow — every single-name hop
 // re-queries the database, so nothing else bounds it.
-func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string]bool) *ModelInfo {
+func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string]bool, connMap map[string]*ModelInfo) *ModelInfo {
 	if !strings.Contains(entry, "/") {
 		if h.Repo == nil || visiting[entry] {
 			return nil
@@ -117,7 +117,7 @@ func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string
 					visiting = make(map[string]bool, 4)
 				}
 				visiting[entry] = true
-				first := h.resolveModelEntryGuarded(subModels[0], visiting)
+				first := h.resolveModelEntryGuarded(subModels[0], visiting, connMap)
 				delete(visiting, entry)
 				if first != nil {
 					first.ComboModels = subModels
@@ -142,27 +142,13 @@ func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string
 		return info
 	}
 
-	// Connection-level routing: a prefix that names a connection (by id, or by
-	// its display name normalized to a slug) routes to that connection. The
-	// fork has no connMap parameter (upstream #1047 hangs this off an else
-	// branch of its connMap lookup), so the repository scan runs directly.
-	if h.Repo != nil {
-		if conns, err := h.Repo.GetProviderConnections("", false); err == nil {
-			normPrefix := strings.ToLower(strings.ReplaceAll(prefix, " ", "-"))
-			for _, conn := range conns {
-				if conn == nil {
-					continue
-				}
-				if conn.ID == prefix {
-					return &ModelInfo{Provider: conn.Provider, Model: model, ConnectionID: conn.ID}
-				}
-				if conn.Name != nil && *conn.Name != "" {
-					normName := strings.ToLower(strings.ReplaceAll(*conn.Name, " ", "-"))
-					if normName == normPrefix || strings.EqualFold(*conn.Name, prefix) {
-						return &ModelInfo{Provider: conn.Provider, Model: model, ConnectionID: conn.ID}
-					}
-				}
-			}
+	if connMap != nil {
+		if connInfo, ok := connMap[prefix]; ok && connInfo != nil {
+			return &ModelInfo{Provider: connInfo.Provider, Model: model, ConnectionID: connInfo.ConnectionID}
+		}
+		normPrefix := strings.ToLower(strings.ReplaceAll(prefix, " ", "-"))
+		if connInfo, ok := connMap[normPrefix]; ok && connInfo != nil {
+			return &ModelInfo{Provider: connInfo.Provider, Model: model, ConnectionID: connInfo.ConnectionID}
 		}
 	}
 
@@ -178,6 +164,17 @@ func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string
 					return &ModelInfo{Provider: node.ID, Model: model}
 				}
 			}
+		}
+		return &ModelInfo{Provider: provider, Model: model}
+	}
+
+	if _, ok := providers.KnownProviders[prefix]; ok {
+		return &ModelInfo{Provider: prefix, Model: model}
+	}
+
+	if connMap == nil && h.Repo != nil {
+		if prov, connID, ok := h.Repo.ResolveConnectionRoutingByPrefix(prefix); ok {
+			return &ModelInfo{Provider: prov, Model: model, ConnectionID: connID}
 		}
 	}
 
