@@ -160,6 +160,10 @@ func SetupRoutes(r interface {
 	r.Get("/api/usage/{connectionId}", dashH.HandleGetConnectionUsage)
 	r.Get("/api/usage/{connectionId}/reset-credits", dashH.HandleListCodexResetCredits)
 	r.Post("/api/usage/{connectionId}/reset-credits/consume", dashH.HandleConsumeCodexResetCredit)
+	// Claude reset credits (cedar_ember grants)
+	r.Get("/api/usage/{connectionId}/claude-reset-credits", dashH.HandleListClaudeResetCredits)
+	r.Post("/api/usage/{connectionId}/claude-reset-credits/consume", dashH.HandleConsumeClaudeResetCredit)
+
 
 	// Free-pi ad surface. The creative is served to the dashboard, and the
 	// impression is reported only from the client's render event — an
@@ -225,6 +229,10 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 
 	r.Get("/api/usage/{connectionId}/reset-credits", dashH.HandleListCodexResetCredits)
 	r.Post("/api/usage/{connectionId}/reset-credits/consume", dashH.HandleConsumeCodexResetCredit)
+	// Claude reset credits (cedar_ember grants)
+	r.Get("/api/usage/{connectionId}/claude-reset-credits", dashH.HandleListClaudeResetCredits)
+	r.Post("/api/usage/{connectionId}/claude-reset-credits/consume", dashH.HandleConsumeClaudeResetCredit)
+
 
 	// Free-pi ad surface. The creative is served to the dashboard, and the
 	// impression is reported only from the client's render event — an

@@ -2326,6 +2326,28 @@ export const api = {
         body: JSON.stringify({ selectionToken, idempotencyKey }),
       }
     ),
+  // Claude reset credits (cedar_ember grants). Only for provider == "claude".
+  listClaudeResetCredits: (connectionId: string) =>
+    request<CodexResetCreditListResponse>(
+      `/api/usage/${encodeURIComponent(connectionId)}/claude-reset-credits`
+    ),
+  consumeClaudeResetCredit: (connectionId: string, selectionToken: string, idempotencyKey?: string) =>
+    request<CodexResetCreditConsumeResponse>(
+      `/api/usage/${encodeURIComponent(connectionId)}/claude-reset-credits/consume`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectionToken, idempotencyKey }),
+      }
+    ),
+    ),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    ),
+
   // Tunnel & Tailscale
   getTunnelStatus: () =>
     request<TunnelStatusResponse>('/api/tunnel/status').catch(() => ({

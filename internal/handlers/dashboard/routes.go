@@ -227,6 +227,12 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Get("/usage/{connectionId}/reset-credits", h.HandleListCodexResetCredits)
 		r.Post("/usage/{connectionId}/reset-credits/consume", h.HandleConsumeCodexResetCredit)
 
+
+		// Claude reset credits (cedar_ember grants).
+		r.Get("/usage/{connectionId}/claude-reset-credits", h.HandleListClaudeResetCredits)
+		r.Post("/usage/{connectionId}/claude-reset-credits/consume", h.HandleConsumeClaudeResetCredit)
+
+
 		// Cache Analytics & Management
 		r.Get("/cache", h.HandleGetCache)
 		r.Delete("/cache", h.HandleDeleteCache)
