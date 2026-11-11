@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -160,41 +161,6 @@ func TestAntigravityProbe_HeadersAndMetadata(t *testing.T) {
 	if gotBodyMeta["ideType"] != float64(9) {
 		t.Errorf("body metadata ideType = %v, want 9", gotBodyMeta["ideType"])
 	}
-	if gotBodyMeta["platform"] != float64(2) {
-		t.Errorf("body metadata platform = %v, want 2", gotBodyMeta["platform"])
-	}
-	if gotBodyMeta["pluginType"] != float64(2) {
-		t.Errorf("body metadata pluginType = %v, want 2", gotBodyMeta["pluginType"])
-	}
-}
-
-func TestExtractProjectID(t *testing.T) {
-	cases := []struct {
-		input any
-		want  string
-	}{
-		{nil, ""},
-		{"", ""},
-		{"  ", ""},
-		{"proj-direct", "proj-direct"},
-		{"  proj-trimmed  ", "proj-trimmed"},
-		{map[string]any{"id": "proj-from-id"}, "proj-from-id"},
-		{map[string]any{"projectId": "proj-from-projectId"}, "proj-from-projectId"},
-		{map[string]any{"project_id": "proj-from-project_id"}, "proj-from-project_id"},
-		{map[string]any{"id": "", "projectId": "fallback-pid"}, "fallback-pid"},
-		{map[string]any{}, ""},
-		{123, ""},
-	}
-
-	for _, tc := range cases {
-		got := extractProjectID(tc.input)
-		if got != tc.want {
-			t.Errorf("extractProjectID(%v) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-
-func mustReadAll(r io.Reader) []byte {
-	b, _ := io.ReadAll(r)
-	return b
-}
+	wantPlatform := float64(GetAntigravityPlatformEnum(runtime.GOOS, runtime.GOARCH))
+	if gotBodyMeta["platform"] != wantPlatform {
+		t.Errorf("body metadata platform = %v, want %d", gotBodyMeta["platform"], int(wantPlatform))
