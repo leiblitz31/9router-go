@@ -39,6 +39,12 @@ var validOpenAIContentTypes = map[string]bool{
 // on DashScope), so the filter must not strip them.
 type FilterOptions struct {
 	PreserveCacheControl bool
+	// FlattenContent flattens message content arrays into a single concatenated
+	// text string. Upstream open-sse/translator/concerns/paramSupport.js
+	// STRIP_RULES enables this for cloudflare-ai: Cloudflare AI Workers reject
+	// array content with 400 AiError: Bad input: oneOf at '/' not met ...
+	// Type mismatch of '/messages/0/content', 'array' not in 'string' (code 5006).
+	FlattenContent bool
 }
 
 // FilterToOpenAIFormat normalises a body to clean OpenAI shape — port of
