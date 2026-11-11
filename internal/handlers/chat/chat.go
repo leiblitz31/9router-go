@@ -7,6 +7,7 @@ import (
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/semanticcache"
 	"9router/proxy/internal/thinking"
 	"9router/proxy/internal/translator"
@@ -100,6 +101,7 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	ctx := handlerutil.WithSessionID(r.Context(), handlerutil.ExtractSessionID(r))
+	ctx = executor.WithCodexLiteHeader(ctx, r.Header.Get(executor.CodexResponsesLiteHeader))
 	// Provider-scope limit state travels with the request: what one attempt
 	// learns (this provider is full) must steer the next one, and must not
 	// outlive the request (docs/provider-limits-plan.md D7).
