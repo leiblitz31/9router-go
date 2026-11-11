@@ -1237,12 +1237,19 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 					streamPeeker = internalproxy.NewStreamContentPeeker(cw)
 					targetWriter = streamPeeker
 				}
+				var providerCfg *providers.ProviderConfig
+				if cfg, err := h.GetProviderConfig(modelInfo.Provider, nil); err == nil {
+					providerCfg = cfg
+				}
+				upstreamClaude := modelInfo.Provider == "claude" || modelInfo.Provider == "anthropic" || servesClaudeMessages(modelInfo.Provider, providerCfg)
+				translateResp := !upstreamClaude && !translator.IsResponsesClient(ctx)
+
 				fwdErr := h.tryForwardWithConnection(forwardRequestParams{
 					Ctx: fwdCtx, W: targetWriter, Provider: modelInfo.Provider, Model: modelInfo.Model,
 					RequestedModel: comboName, ComboName: comboName,
 					ConnectionID: connID, ConnName: connObjName(picked), ConnEmail: connObjEmail(picked),
 					ConnData: connData, Body: upstreamJSON,
-					IsStream: isStream, TranslateResponse: !translator.IsResponsesClient(ctx),
+					IsStream: isStream, TranslateResponse: translateResp,
 					Endpoint: forwardEndpoint(ctx, "/v1/messages"),
 				})
 				if streamPeeker != nil && fwdErr == nil {
