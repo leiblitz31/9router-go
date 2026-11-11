@@ -539,6 +539,12 @@ func (h *ChatHandler) handleJSONResponse(ctx context.Context, w http.ResponseWri
 		return guardrailBlockedError()
 	}
 	body = filtered
+	// vLLM ends a turn that called tools (named tool_choice) with a plain
+	// finish_reason "stop"; agent loops read that as the final answer and
+	// stop. Normalize it to tool_calls here, before any client dialect is
+	// rendered, so the OpenAI, Responses-bridge and Claude-translation
+	// (stop_reason tool_use) paths all send the corrected reason.
+	body = translator.NormalizeToolCallFinish(body)
 
 	// A /v1/responses client on a Chat Completions upstream needs the answer in
 	// the Responses shape; translate marks a Claude client, which it is not.
