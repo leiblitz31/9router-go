@@ -94,6 +94,12 @@ func sanitizeToolArgs(toolName, argsJSON string) string {
 		sanitizeFetchArgs(args, origArgsJSON)
 	case nameLower == "bash" || nameLower == "run_command" || nameLower == "terminal":
 		sanitizeBashArgs(args)
+	case nameLower == "monitor":
+		sanitizeMonitorArgs(args)
+	case nameLower == "skill":
+		sanitizeSkillArgs(args)
+	case nameLower == "agent" || nameLower == "agent_ide" || nameLower == "subagent" || nameLower == "task":
+		sanitizeAgentArgs(args)
 	}
 
 	// Final ensure web_search has a string query if it has any query key that is not a string (e.g. null)
@@ -234,6 +240,152 @@ func sanitizeSearchArgs(args map[string]any) {
 	if qStr, ok := args["query"].(string); ok && qStr != "" {
 		args["query"] = strings.TrimSpace(qStr)
 	}
+}
+
+func sanitizeFilePath(args map[string]any) {
+	if _, ok := args["file_path"]; !ok {
+		for _, alt := range []string{"path", "filePath", "filename", "file"} {
+			if v, ok := args[alt].(string); ok && strings.TrimSpace(v) != "" {
+				args["file_path"] = strings.TrimSpace(v)
+				delete(args, alt)
+				break
+			}
+		}
+	}
+}
+
+func sanitizeWriteArgs(args map[string]any) {
+	sanitizeFilePath(args)
+	if _, ok := args["content"]; !ok {
+		for _, alt := range []string{"contents", "text", "body", "data", "code"} {
+			if v, ok := args[alt].(string); ok {
+				args["content"] = v
+				delete(args, alt)
+				break
+			}
+		}
+	}
+	for _, extra := range []string{"description", "title", "comment", "explanation", "thought"} {
+		delete(args, extra)
+	}
+}
+
+func sanitizeEditArgs(args map[string]any) {
+	sanitizeFilePath(args)
+	if _, ok := args["old_string"]; !ok {
+		for _, alt := range []string{"old_str", "oldStr", "old_text", "oldText", "old", "old_content", "oldString"} {
+			if v, ok := args[alt].(string); ok {
+				args["old_string"] = v
+				delete(args, alt)
+				break
+			}
+		}
+	}
+	if _, ok := args["new_string"]; !ok {
+		for _, alt := range []string{"new_str", "newStr", "new_text", "newText", "new", "new_content", "newString"} {
+			if v, ok := args[alt].(string); ok {
+				args["new_string"] = v
+				delete(args, alt)
+				break
+			}
+		}
+	}
+	if _, ok := args["replace_all"]; !ok {
+		if v, ok := args["replaceAll"].(bool); ok {
+			args["replace_all"] = v
+			delete(args, "replaceAll")
+		}
+	}
+	for _, extra := range []string{"description", "title", "comment", "explanation", "thought"} {
+		delete(args, extra)
+	}
+}
+
+func sanitizePatternArgs(args map[string]any) {
+	if _, ok := args["pattern"]; !ok {
+		for _, alt := range []string{"query", "regex", "search", "search_pattern"} {
+			if v, ok := args[alt].(string); ok && strings.TrimSpace(v) != "" {
+				args["pattern"] = strings.TrimSpace(v)
+				delete(args, alt)
+				break
+			}
+		}
+	}
+	if _, ok := args["path"]; !ok {
+		for _, alt := range []string{"dir", "directory", "folder"} {
+			if v, ok := args[alt].(string); ok && strings.TrimSpace(v) != "" {
+				args["path"] = strings.TrimSpace(v)
+				delete(args, alt)
+				break
+			}
+		}
+	}
+	delete(args, "thought")
+	delete(args, "explanation")
+	delete(args, "n") // models often hallucinate grep -n flag as argument "n"
+}
+
+func sanitizeMonitorArgs(args map[string]any) {
+	// Claude Code's Monitor tool requires "exactly one of command or ws".
+	// Models (especially Codex/GPT) frequently hallucinate a dummy ws object alongside command.
+	if cmd, hasCmd := args["command"].(string); hasCmd && strings.TrimSpace(cmd) != "" {
+		delete(args, "ws")
+	} else if ws, hasWs := args["ws"]; hasWs && ws != nil {
+		delete(args, "command")
+	}
+	delete(args, "thought")
+	delete(args, "explanation")
+}
+
+func sanitizeSkillArgs(args map[string]any) {
+	if _, ok := args["skill"]; !ok {
+		for _, alt := range []string{"name", "skill_name", "skillName"} {
+			if v, ok := args[alt].(string); ok && strings.TrimSpace(v) != "" {
+				args["skill"] = strings.TrimSpace(v)
+				delete(args, alt)
+				break
+			}
+		}
+	}
+	delete(args, "thought")
+	delete(args, "explanation")
+}
+
+func sanitizeAgentArgs(args map[string]any) {
+	if _, ok := args["prompt"]; !ok {
+		for _, alt := range []string{"task", "instruction", "content", "message"} {
+			if v, ok := args[alt].(string); ok && strings.TrimSpace(v) != "" {
+				args["prompt"] = strings.TrimSpace(v)
+				delete(args, alt)
+				break
+			}
+		}
+	}
+	desc, ok := args["description"].(string)
+	if !ok || strings.TrimSpace(desc) == "" {
+		found := false
+		for _, alt := range []string{"title", "summary", "task_description", "name", "desc"} {
+			if v, ok := args[alt].(string); ok && strings.TrimSpace(v) != "" {
+				args["description"] = strings.TrimSpace(v)
+				delete(args, alt)
+				found = true
+				break
+			}
+		}
+		if !found {
+			if promptStr, ok := args["prompt"].(string); ok && strings.TrimSpace(promptStr) != "" {
+				words := strings.Fields(strings.TrimSpace(promptStr))
+				if len(words) > 5 {
+					words = words[:5]
+				}
+				args["description"] = strings.Join(words, " ")
+			} else {
+				args["description"] = "Run subagent task"
+			}
+		}
+	}
+	delete(args, "thought")
+	delete(args, "explanation")
 }
 
 func sanitizeBashArgs(args map[string]any) {
