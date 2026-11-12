@@ -164,16 +164,21 @@
 
   // Quota visibility (hidden rows), persisted via /api/settings quotaVisibility
   let quotaVisibility = $state<QuotaVisibility>({})
-  let autoPingMaps = $state<{ claude: Record<string, boolean>; codex: Record<string, boolean> }>({
+  type AutoPingProvider = 'claude' | 'codex' | 'commandcode-goat'
+  type AutoPingScheduleEntry = AutoPingSchedule | { enabled: false } | unknown
+  let autoPingMaps = $state<Record<AutoPingProvider, Record<string, boolean>>>({
     claude: {},
     codex: {},
+    'commandcode-goat': {},
   })
-  let autoPingSchedules = $state<{
-    claude: Record<string, NormalizedPingSchedule | AutoPingSchedule | { enabled: false } | unknown>
-    codex: Record<string, NormalizedPingSchedule | AutoPingSchedule | { enabled: false } | unknown>
-  }>({
+  // The schedule half of the same settings key. It is kept apart from
+  // autoPingMaps because the two are independent: the switch says "ping this
+  // account when its window resets", the schedule says "ping it at 09:30 /
+  // 14:30 / 19:30". Writing one must not delete the other.
+  let autoPingSchedules = $state<Record<AutoPingProvider, Record<string, AutoPingScheduleEntry>>>({
     claude: {},
     codex: {},
+    'commandcode-goat': {},
   })
   let scheduleConn = $state<ProviderConnection | null>(null)
 
@@ -280,6 +285,7 @@
   const AUTO_PING_SETTINGS_KEYS: Record<string, string> = {
     claude: 'claudeAutoPing',
     codex: 'codexAutoPing',
+    'commandcode-goat': 'commandcode-goatAutoPing',
   }
 
   const AUTO_PING_SCHEDULE_KEYS: Record<string, string> = {
@@ -290,6 +296,15 @@
   const AUTO_PING_TOOLTIPS: Record<string, string> = {
     claude: 'When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.',
     codex: 'Auto-starts the next 5h Codex window after reset by sending a tiny request. Consumes a small amount of quota.',
+    'commandcode-goat':
+      'Auto-starts the next 5h Command Code window after reset by sending a tiny request. Consumes a small amount of quota.',
+  }
+
+  // Auto-ping was oauth-only because claude and codex are. Command Code
+  // authenticates with a bearer key, so its row is eligible without oauth.
+  function supportsAutoPing(conn: ProviderConnection): boolean {
+    if (conn.provider === 'commandcode-goat') return true
+    return (conn.provider === 'claude' || conn.provider === 'codex') && conn.authType === 'oauth'
   }
 
   function autoPingTooltip(conn: ProviderConnectionLike): string {
@@ -454,11 +469,15 @@
   // the anchored schedule, so the 3-way modal is the single writer.
   async function saveAutoPing(connId: string, provider: string, save: AutoPingSave) {
     const key = AUTO_PING_SETTINGS_KEYS[provider]
-    const schedKey = AUTO_PING_SCHEDULE_KEYS[provider]
-    if (!key || !schedKey) return
-    const nextMap = {
-      ...(autoPingMaps[provider as 'claude' | 'codex'] || {}),
-      [connId]: save.reactive,
+    if (!key) return
+
+    const currentConnections = autoPingMaps[provider as AutoPingProvider] || {}
+    const nextConnections = { ...currentConnections, [connId]: enabled }
+    const nextSchedules = autoPingSchedules[provider as AutoPingProvider] || {}
+
+    autoPingMaps = {
+      ...autoPingMaps,
+      [provider]: nextConnections,
     }
     autoPingMaps = { ...autoPingMaps, [provider]: nextMap }
     const nextSched = { ...(autoPingSchedules[provider as 'claude' | 'codex'] || {}) }
@@ -487,7 +506,7 @@
     autoPingEditing = null
     if (!conn) return
 
-    const provider = conn.provider as 'claude' | 'codex'
+    const provider = conn.provider as AutoPingProvider
     const key = AUTO_PING_SETTINGS_KEYS[provider]
     if (!key) return
 
@@ -916,14 +935,17 @@
         // two independent halves — the connections switch and the schedule map.
         const claudeConfig = raw?.claudeAutoPing as AutoPingSettings | undefined
         const codexConfig = raw?.codexAutoPing as AutoPingSettings | undefined
+        const commandCodeConfig = raw?.['commandcode-goatAutoPing'] as AutoPingSettings | undefined
 
         autoPingMaps = {
           claude: claudeConfig?.connections || {},
           codex: codexConfig?.connections || {},
+          'commandcode-goat': commandCodeConfig?.connections || {},
         }
         autoPingSchedules = {
           claude: claudeConfig?.schedules || {},
           codex: codexConfig?.schedules || {},
+          'commandcode-goat': commandCodeConfig?.schedules || {},
         }
         autoPingSchedules = {
           claude: (raw?.claudeAutoPingSchedules as Record<string, NormalizedPingSchedule>) || {},
@@ -1342,11 +1364,15 @@
                   </button>
                 {/if}
 
-                {#if (conn.provider === 'claude' || conn.provider === 'codex') && conn.authType === 'oauth'}
-                  {@const isAutoPingActive = autoPingMaps[conn.provider]?.[conn.id] === true}
+                {#if supportsAutoPing(conn)}
+                  {@const autoPingProvider = conn.provider as AutoPingProvider}
+                  {@const isAutoPingActive = autoPingMaps[autoPingProvider]?.[conn.id] === true}
                   {@const hasSchedule =
-                    (autoPingSchedules[conn.provider]?.[conn.id] as { enabled?: boolean } | undefined)
-                      ?.enabled === true}
+                    (
+                      autoPingSchedules[autoPingProvider]?.[conn.id] as
+                        | { enabled?: boolean }
+                        | undefined
+                    )?.enabled === true}
                   <button
                     type="button"
                     onclick={() => (scheduleConn = conn)}
@@ -1594,9 +1620,9 @@
   <AutoPingScheduleModal
     open
     connectionName={autoPingEditing.name}
-    reactive={autoPingMaps[autoPingEditing.provider as 'claude' | 'codex']?.[autoPingEditing.id] ===
+    reactive={autoPingMaps[autoPingEditing.provider as AutoPingProvider]?.[autoPingEditing.id] ===
       true}
-    schedule={(autoPingSchedules[autoPingEditing.provider as 'claude' | 'codex']?.[
+    schedule={(autoPingSchedules[autoPingEditing.provider as AutoPingProvider]?.[
       autoPingEditing.id
     ] as AutoPingSchedule | null) ?? null}
     timezone={localTimezone}
