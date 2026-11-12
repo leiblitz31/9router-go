@@ -21,6 +21,26 @@ func newTestMediaHandler(repo *db.Repo) *MediaHandler {
 	return NewMediaHandler(repo, nil, chatH)
 }
 
+// setupMediaTestDB mirrors upstream's helper for the media pool tests: the
+// embeddings fixture plus the combos table the pool resolution reads.
+func setupMediaTestDB(t testing.TB) (*db.Repo, func()) {
+	database, cleanup := setupEmbeddingsTestDB(t.(*testing.T))
+	_, err := database.Exec(`CREATE TABLE IF NOT EXISTS combos (
+		id TEXT PRIMARY KEY,
+		name TEXT UNIQUE NOT NULL,
+		kind TEXT,
+		models TEXT NOT NULL,
+		strategy TEXT DEFAULT 'fallback',
+		createdAt TEXT NOT NULL,
+		updatedAt TEXT NOT NULL,
+		matchRules TEXT DEFAULT ''
+	)`)
+	if err != nil {
+		t.Fatalf("failed to create combos table: %v", err)
+	}
+	return db.NewRepo(database), cleanup
+}
+
 func setupEmbeddingsTestDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 

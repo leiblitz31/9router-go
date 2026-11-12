@@ -2,8 +2,11 @@ package db
 
 import (
 	json "encoding/json/v2"
+	"errors"
 	"testing"
 	"time"
+
+	"9router/proxy/internal/providers"
 )
 
 // The escalating lockout ladder parks a banned account longer with each
@@ -283,7 +286,7 @@ func TestRecordConnectionOAuthFailure_PersistsGrowsAndClears(t *testing.T) {
 	defer cleanup()
 	insertTestConn(t, repo)
 
-	until, failures, err := repo.RecordConnectionOAuthFailure("conn-1", 401, "token refresh rejected with status 401")
+	until, failures, err := repo.RecordConnectionOAuthFailure("conn-1", 401, errors.New("token refresh rejected with status 401"))
 	if err != nil {
 		t.Fatalf("RecordConnectionOAuthFailure: %v", err)
 	}
@@ -306,7 +309,7 @@ func TestRecordConnectionOAuthFailure_PersistsGrowsAndClears(t *testing.T) {
 
 	// The same strike seen twice inside one window is one failure: a request
 	// can discover a dead grant more than once.
-	if _, failures, err = repo.RecordConnectionOAuthFailure("conn-1", 401, "still invalid_grant"); err != nil {
+	if _, failures, err = repo.RecordConnectionOAuthFailure("conn-1", 401, errors.New("still invalid_grant")); err != nil {
 		t.Fatalf("RecordConnectionOAuthFailure (repeat): %v", err)
 	}
 	if failures != 1 {
@@ -319,7 +322,7 @@ func TestRecordConnectionOAuthFailure_PersistsGrowsAndClears(t *testing.T) {
 		time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "conn-1"); err != nil {
 		t.Fatalf("expire the park: %v", err)
 	}
-	second, failures, err := repo.RecordConnectionOAuthFailure("conn-1", 401, "still invalid_grant")
+	second, failures, err := repo.RecordConnectionOAuthFailure("conn-1", 401, errors.New("still invalid_grant"))
 	if err != nil {
 		t.Fatalf("RecordConnectionOAuthFailure (second): %v", err)
 	}
@@ -351,7 +354,7 @@ func TestRecordConnectionOAuthFailure_RecordsWhy(t *testing.T) {
 	defer cleanup()
 	insertTestConn(t, repo)
 
-	if _, _, err := repo.RecordConnectionOAuthFailure("conn-1", 401, "invalid_grant"); err != nil {
+	if _, _, err := repo.RecordConnectionOAuthFailure("conn-1", 401, errors.New("invalid_grant")); err != nil {
 		t.Fatalf("RecordConnectionOAuthFailure: %v", err)
 	}
 	var data map[string]any
