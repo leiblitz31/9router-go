@@ -162,7 +162,6 @@ func (d *utlsDialer) dialPlainContext(ctx context.Context, network, addr string)
 // full CONNECT timeout when it lost.
 func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string) (net.Conn, error) {
 	proxyURL := d.resolveProxy(host)
-	dialer := NewSafeDialer()
 
 	targets := []string{addr}
 	if d.doh != nil {
@@ -174,6 +173,7 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 	}
 
 	if proxyURL == "" {
+		dialer := NewSafeDialer()
 		var lastErr error
 		for _, target := range targets {
 			conn, err := dialer.DialContext(ctx, network, target)
@@ -193,6 +193,11 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 		return nil, fmt.Errorf("proxy.utlsDialer: invalid proxy URL: %w", err)
 	}
 	proxyAddr := canonicalProxyAddr(pu)
+	// The pool URL is operator-supplied, so its endpoint is not the SSRF
+	// surface — the tunneled request target is judged separately. Without
+	// this, a pool that lives on loopback or a tailnet address (the shape
+	// every self-hosted egress relay has) can never be dialed.
+	dialer := newSafeDialerForProxy(newProxyAllowlist(proxyAllowlistHosts(pu)...))
 	var lastErr error
 	for _, target := range targets {
 		// One dead record must not consume the caller's whole budget: with a
