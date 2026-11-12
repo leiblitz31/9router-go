@@ -90,6 +90,11 @@ func (h *DashboardHandler) HandleGetApiKeys(w http.ResponseWriter, r *http.Reque
 			"rateLimitConcurrency": intOrZero(k.RateLimitConcurrency),
 			"tokenQuota":           intOrZero(k.TokenQuota),
 			"queueTimeoutMs":       intOrZero(k.QueueTimeoutMs),
+			// The plan arming the key's per-period budget (F-3). It travels
+			// with the row because a plan can arm the budget while every
+			// column on the key reads zero: without it the dashboard cannot
+			// tell a plan-budgeted key from an unbudgeted one (#1041).
+			"planId":               stringOrEmpty(k.PlanID),
 			"expiresAt":            stringOrEmpty(k.ExpiresAt),
 			"lastUsedAt":           stringOrEmpty(k.LastUsedAt),
 			"usedCount":            intOrZero(k.UsedCount),
