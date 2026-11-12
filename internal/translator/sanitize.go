@@ -38,6 +38,12 @@ func sanitizeToolArgs(toolName, argsJSON string) string {
 	switch {
 	case name == "Read" || nameLower == "view_file" || nameLower == "read_file":
 		sanitizeReadArgs(args)
+	case name == "Write" || nameLower == "write_to_file" || nameLower == "write_file":
+		sanitizeWriteArgs(args)
+	case name == "Edit" || nameLower == "replace_file_content" || nameLower == "edit_file":
+		sanitizeEditArgs(args)
+	case nameLower == "grep" || nameLower == "glob":
+		sanitizePatternArgs(args)
 	case strings.Contains(nameLower, "search") || nameLower == "websearch":
 		sanitizeSearchArgs(args)
 		// Fallback for web_search when query is still missing/null after normal sanitization
@@ -410,6 +416,10 @@ func sanitizeBashArgs(args map[string]any) {
 const maxReadLimit = 2000
 
 func sanitizeReadArgs(args map[string]any) {
+	sanitizeFilePath(args)
+	for _, extra := range []string{"thought", "explanation", "comment"} {
+		delete(args, extra)
+	}
 	if limitVal, ok := args["limit"]; ok {
 		switch v := limitVal.(type) {
 		case string:

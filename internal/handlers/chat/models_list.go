@@ -528,10 +528,11 @@ func (h *ChatHandler) buildModelsListForMode(
 
 	customs := h.customModelsByProvider()
 	aliases := h.modelAliasTargets()
+	nodePrefixes := h.providerNodePrefixMap()
 
 	for _, provID := range order {
 		conn := firstPerProvider[provID]
-		data = h.appendConnectionModels(ctx, data, seen, conn, provID, customs, aliases, isDisabled)
+		data = h.appendConnectionModels(ctx, data, seen, conn, provID, customs, aliases, nodePrefixes, isDisabled)
 	}
 	// 4. Connected mode additionally publishes the noAuth registry providers
 	// that have no connection row, mirroring the dashboard picker, which keeps
@@ -557,6 +558,7 @@ func (h *ChatHandler) appendConnectionModels(
 	providerID string,
 	customs map[string][]*db.CustomModel,
 	aliases map[string]string,
+	nodePrefixes map[string]string,
 	isDisabled func(provider, modelID string) bool,
 ) []ModelInfoObject {
 	connData := parseConnectionModelData(conn)
@@ -571,6 +573,15 @@ func (h *ChatHandler) appendConnectionModels(
 		outputAlias = connData.ProviderSpecificData.Prefix
 	case connData.Prefix != "":
 		outputAlias = connData.Prefix
+	case isCompatibleProviderID(providerID):
+		// Older dashboard builds created the connection without copying the
+		// node's prefix into providerSpecificData. The node row still owns the
+		// public alias, so publish that instead of the internal node id. The
+		// disabled-model gate below checks staticAlias as well, which keeps
+		// lists written under the old node-id spelling effective.
+		if prefix := nodePrefixes[providerID]; prefix != "" {
+			outputAlias = prefix
+		}
 	}
 
 	ids := connData.EnabledModels()

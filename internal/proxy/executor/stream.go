@@ -25,6 +25,7 @@ type CodexStreamState struct {
 	ToolCallCount     int
 	Completed         bool   // response.completed seen — finish chunk already emitted
 	UpstreamErr       []byte // raw upstream {"type":"error",...} event, if any
+	Usage             *translator.OpenAIUsage
 	CurrentToolCallID string
 	ToolCallIdx       map[string]int
 	ToolCallNames     map[string]string
@@ -477,6 +478,9 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 				chunk["usage"] = chunkUsage
 			}
 		}
+		if u := translator.ParseResponsesUsage([]byte(data)); u != nil {
+			state.Usage = u
+		}
 		b, err := json.Marshal(chunk)
 		if err != nil {
 			return nil
@@ -838,9 +842,13 @@ func writeSSEFinish(w http.ResponseWriter, flusher http.Flusher, req *Request, s
 		flusher.Flush()
 	}
 
-	translator.SetUsage(req.Ctx, &translator.OpenAIUsage{
-		CompletionTokens: state.OutputLength / 4,
-	})
+	if state.Usage != nil {
+		translator.SetUsage(req.Ctx, state.Usage)
+	} else {
+		translator.SetUsage(req.Ctx, &translator.OpenAIUsage{
+			CompletionTokens: state.OutputLength / 4,
+		})
+	}
 	return nil
 }
 

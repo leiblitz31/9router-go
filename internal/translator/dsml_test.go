@@ -254,13 +254,17 @@ func TestTranslateOpenAIToClaudeStreamDSML(t *testing.T) {
 		t.Errorf("expected input_json_delta with arguments, got: %s", out2s)
 	}
 
-	// Terminal pair is deferred when no usage arrived; EnsureStreamClosed emits it.
+	// Fork stream design: the terminal pair rides the finish chunk itself
+	// rather than being deferred to EnsureStreamClosed (which therefore
+	// returns nothing for a cleanly finished stream). Assert on the combined
+	// terminal output so exactly one pair with the right stop_reason counts.
 	tail := EnsureStreamClosed(session)
-	if !strings.Contains(string(tail), `"stop_reason":"tool_use"`) {
-		t.Errorf("expected stop_reason tool_use in terminal, got: %s", tail)
+	terminal := string(out2) + string(tail)
+	if !strings.Contains(terminal, `"stop_reason":"tool_use"`) {
+		t.Errorf("expected stop_reason tool_use in terminal, got: %s", terminal)
 	}
-	if !strings.Contains(string(tail), `"type":"message_stop"`) {
-		t.Errorf("expected message_stop in terminal, got: %s", tail)
+	if !strings.Contains(terminal, `"type":"message_stop"`) {
+		t.Errorf("expected message_stop in terminal, got: %s", terminal)
 	}
 }
 
@@ -320,8 +324,9 @@ func TestTranslateOpenAIToClaudeStreamDSMLLeadingProseNoDup(t *testing.T) {
 	}
 
 	tail := EnsureStreamClosed(session)
-	if !strings.Contains(string(tail), `"stop_reason":"tool_use"`) {
-		t.Errorf("expected stop_reason tool_use in terminal, got: %s", tail)
+	terminal := string(out3) + string(tail)
+	if !strings.Contains(terminal, `"stop_reason":"tool_use"`) {
+		t.Errorf("expected stop_reason tool_use in terminal, got: %s", terminal)
 	}
 }
 
@@ -371,8 +376,9 @@ func TestTranslateOpenAIToClaudeStreamDSMLSplitTag(t *testing.T) {
 	}
 
 	tail := EnsureStreamClosed(session)
-	if !strings.Contains(string(tail), `"stop_reason":"tool_use"`) {
-		t.Errorf("expected stop_reason tool_use in terminal, got: %s", tail)
+	terminal := string(out3) + string(tail)
+	if !strings.Contains(terminal, `"stop_reason":"tool_use"`) {
+		t.Errorf("expected stop_reason tool_use in terminal, got: %s", terminal)
 	}
 }
 
@@ -421,11 +427,12 @@ func TestTranslateOpenAIToClaudeStreamDSMLSplitTagFlushedAtClose(t *testing.T) {
 			}
 
 			tail := EnsureStreamClosed(session)
-			if !strings.Contains(string(tail), `"stop_reason":"end_turn"`) {
-				t.Errorf("expected end_turn terminal, got: %s", tail)
+			terminal := string(out2) + string(tail)
+			if !strings.Contains(terminal, `"stop_reason":"end_turn"`) {
+				t.Errorf("expected end_turn terminal, got: %s", terminal)
 			}
-			if !strings.Contains(string(tail), `"type":"message_stop"`) {
-				t.Errorf("expected message_stop in terminal, got: %s", tail)
+			if !strings.Contains(terminal, `"type":"message_stop"`) {
+				t.Errorf("expected message_stop in terminal, got: %s", terminal)
 			}
 		})
 	}

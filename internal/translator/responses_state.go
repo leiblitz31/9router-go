@@ -99,7 +99,8 @@ type ResponsesState struct {
 
 	CustomToolNames map[string]bool
 
-	Usage *ResponsesUsage
+	Usage    *ResponsesUsage
+	RawUsage *OpenAIUsage
 
 	CompletedOutputItems map[int]map[string]any
 }
