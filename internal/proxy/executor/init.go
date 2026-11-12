@@ -93,6 +93,9 @@ func RegisterAll() {
 	Register("vertex-partner", func() Executor { return ForwardVertexPartner })
 	Register("azure", func() Executor { return ForwardAzure })
 	Register("commandcode", func() Executor { return ForwardCommandcode })
+	// The documented Provider API surface: three lanes on one bearer, the lane
+	// chosen per model from the live catalogue's supported_endpoints.
+	Register("commandcode-goat", func() Executor { return ForwardCommandcodeGoat })
 	Register("qoder", func() Executor { return ForwardQoder })
 	Register("qoder-cn", func() Executor { return ForwardQoder })
 	Register("alims-intl", func() Executor { return ForwardOpenAI })

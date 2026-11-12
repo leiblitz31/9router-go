@@ -1267,6 +1267,22 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "commandcode-goat",
+    "name": "Command Code (Provider API)",
+    "category": "apikey",
+    "alias": "cmc-goat",
+    "color": "#000000",
+    "icon": "smart_toy",
+    "website": "https://commandcode.ai/docs/provider",
+    "notice": {"text":"Use your Command Code API key (starts with user_...) from Studio. OpenAI- and Anthropic-compatible endpoints on one key; Claude models answer /messages only, everything else /chat/completions.","apiKeyUrl":"https://commandcode.ai/studio"},
+    "modelsFetcher": {"url":"https://api.commandcode.ai/provider/v1/models","type":"commandcode-all"},
+    "noAuth": false,
+    "serviceKinds": [
+      "llm",
+      "systemone"
+    ]
+  },
+  {
     "id": "deepgram",
     "name": "Deepgram",
     "category": "apikey",
