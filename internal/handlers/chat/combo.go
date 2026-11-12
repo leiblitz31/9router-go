@@ -846,13 +846,6 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 			}
 
 
-			// Skip Antigravity while the pool-wide protective pause is active:
-			// a TOS_VIOLATION ban sweep must not rotate through every remaining
-			// account. Fall back to other combo members instead.
-			if active, _ := providers.IsProtectivePauseActive(); modelInfo.Provider == "antigravity" && active {
-				log.Warn("combo", "skip antigravity during protective pause", "provider", modelInfo.Provider, "model", modelInfo.Model)
-				continue
-			}
 			var entrySuccess bool
 			// Try up to 10 connections for this model entry
 			for connAttempt := 0; connAttempt < 10; connAttempt++ {
@@ -1162,13 +1155,6 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 				continue
 			}
 
-			// Skip Antigravity while the pool-wide protective pause is active:
-			// a TOS_VIOLATION ban sweep must not rotate through every remaining
-			// account. Fall back to other combo members instead.
-			if active, _ := providers.IsProtectivePauseActive(); modelInfo.Provider == "antigravity" && active {
-				log.Warn("combo", "skip antigravity during protective pause", "provider", modelInfo.Provider, "model", modelInfo.Model)
-				continue
-			}
 
 			var entrySuccess bool
 			// Try up to 10 connections for this model entry
