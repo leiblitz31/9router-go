@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"9router/proxy/internal/constants"
@@ -58,6 +59,42 @@ const openCodeUsageLimitToken = "FreeUsageLimitError"
 func isOpencodeUsageLimit(ue *proxy.UpstreamError) bool {
 	return ue != nil && ue.StatusCode == http.StatusTooManyRequests &&
 		bytes.Contains(ue.Body, []byte(openCodeUsageLimitToken))
+}
+
+// openCodeTruncatedBody reports a body the upstream closed before its declared
+// end. Nothing of it reached the client, so a non-stream turn can be replayed
+// once instead of surfacing a spurious 502 ("unexpected EOF").
+func openCodeTruncatedBody(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unexpected EOF") || strings.Contains(msg, "connection reset by peer")
+}
+
+// readBodyOnceRetry reads resp's body and, when the read ended truncated,
+// replays the request once through resend. Bounded to one replay: a lane that
+// truncates every answer must still fail fast, and a canceled caller must not
+// spend an upstream request at all.
+func readBodyOnceRetry(ctx context.Context, resp *http.Response, resend func() (*http.Response, error), limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if err == nil || !openCodeTruncatedBody(err) || (ctx != nil && ctx.Err() != nil) {
+		return data, err
+	}
+	resp.Body.Close()
+	log.Warn("opencode", "truncated upstream body, replaying once", "error", err)
+	retryResp, rErr := resend()
+	if rErr != nil {
+		return nil, err
+	}
+	defer retryResp.Body.Close()
+	if retryResp.StatusCode != http.StatusOK {
+		return nil, err
+	}
+	return io.ReadAll(io.LimitReader(retryResp.Body, limit))
 }
 
 // refusedResponseToError moves a gate answer (403/429) from the response

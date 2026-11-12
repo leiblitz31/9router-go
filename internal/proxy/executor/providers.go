@@ -849,7 +849,9 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	if req.IsStream {
 		return execSSEStream(w, resp.Body, req)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	data, err := readBodyOnceRetry(ctx, resp, func() (*http.Response, error) {
+		return send(sessionUsed, firstBody)
+	}, 10*1024*1024)
 	if err != nil {
 		return fmt.Errorf("read opencode response: %w", err)
 	}

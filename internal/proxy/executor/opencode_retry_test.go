@@ -235,3 +235,61 @@ func TestIsOpenCodeRefusal(t *testing.T) {
 		})
 	}
 }
+
+// A body the upstream closes mid-write must be replayed once: the bytes never
+// reached the client, and surfacing them as a 502 turns a blip into a failure.
+func TestReadBodyOnceRetryReplaysTruncatedBody(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Content-Length", "4096")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"partial":`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL)
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	resend := func() (*http.Response, error) { return srv.Client().Get(srv.URL) }
+	data, err := readBodyOnceRetry(context.Background(), resp, resend, 1<<20)
+	if err != nil {
+		t.Fatalf("expected replay to recover, got %v", err)
+	}
+	if got := string(data); got != `{"ok":true}` {
+		t.Fatalf("body = %q", got)
+	}
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("calls = %d, want 2 (one replay)", n)
+	}
+}
+
+// A complete body must not cost a second upstream request.
+func TestReadBodyOnceRetryDoesNotReplayCompleteBody(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resend := func() (*http.Response, error) {
+		t.Fatal("resend must not be called for a complete body")
+		return nil, nil
+	}
+	if _, err := readBodyOnceRetry(context.Background(), resp, resend, 1<<20); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("calls = %d, want 1", n)
+	}
+}

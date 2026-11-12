@@ -341,6 +341,25 @@ func ForbidsDirectReplay(client *http.Client) bool {
 	return forbidsDirectReplay(client)
 }
 
+// transportDialsViaProxy reports whether rt hands plain-http requests to a
+// proxy itself (a Proxy func is set). The uTLS tunnel transports answer false:
+// their proxy is dialed only inside the TLS handshake, so a plain-http target
+// would never reach it.
+func transportDialsViaProxy(rt http.RoundTripper) bool {
+	for {
+		switch t := rt.(type) {
+		case *http.Transport:
+			return t.Proxy != nil
+		case forbidDirectReplayTransport:
+			rt = t.base
+		case *FallbackTransport:
+			rt = t.Base
+		default:
+			return false
+		}
+	}
+}
+
 // DoRequest sends an HTTP POST to url with body and auth, returns the raw response.
 // Caller must close resp.Body.
 //
@@ -362,6 +381,15 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 	req, err := newJSONRequest(ctx, method, url, headers, body)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
+	}
+	// The proxied uTLS transports tunnel TLS only (Proxy is nil, the tunnel is
+	// opened in DialTLSContext), so net/http dials a plain-http target itself
+	// and the request leaves from the host's real IP. For a strict connection
+	// that is the one outcome the flag exists to prevent: refuse before the
+	// dial. A transport that does carry a Proxy func handles plain http
+	// itself, so it is left to dial and report the proxy's own refusal.
+	if req.URL.Scheme == "http" && (strictOnly(req.Context()) || forbidsDirectReplay(client)) && !transportDialsViaProxy(client.Transport) {
+		return nil, fmt.Errorf("plain-http target %s cannot travel through the assigned proxy (%w)", req.URL.Host, ErrStrictProxyRequired)
 	}
 
 	resp, err := send(client, req)
