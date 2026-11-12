@@ -258,6 +258,25 @@ func (h *ChatHandler) disabledModelIndex() map[string]map[string]bool {
 			}
 		}
 	}
+	// The fork's dashboard writes a compatible node's disabled list under the
+	// node id (its storage alias), while #1100 publishes the node's models
+	// under the node prefix. Mirror each node's set under the other spelling
+	// so the gate keeps matching whichever alias the publish path checks.
+	for nodeID, prefix := range h.providerNodePrefixMap() {
+		if prefix == "" || prefix == nodeID {
+			continue
+		}
+		if set, ok := disabled[nodeID]; ok {
+			if _, exists := disabled[prefix]; !exists {
+				disabled[prefix] = set
+			}
+		}
+		if set, ok := disabled[prefix]; ok {
+			if _, exists := disabled[nodeID]; !exists {
+				disabled[nodeID] = set
+			}
+		}
+	}
 	return disabled
 }
 

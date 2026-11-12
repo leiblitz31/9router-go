@@ -15,11 +15,14 @@ import (
 //
 // The dashboard writes the disabled list under the node's storage alias, which
 // for a compatible node is the node id itself — GetProviderAlias returns the id
-// unchanged because a node id is not in RegistryAliases. So staticAlias,
-// outputAlias and providerID all collapse to the same string, and the existing
-// two-key check in appendConnectionModels covers it. This test exists so that
-// claim is verified rather than assumed: if a future change makes alias
-// resolution diverge for nodes, the gate silently stops hiding their models.
+// unchanged because a node id is not in RegistryAliases. Upstream #1100 changed
+// the publication spelling for prefix-less node connections from the node id
+// to the node's public prefix (the node id is not a routable alias), so the
+// gate now has to match across both spellings: disabledModelIndex mirrors a
+// node's set under its prefix, and the publish path checks staticAlias as
+// well. This test exists so that claim is verified rather than assumed: if a
+// future change makes alias resolution diverge for nodes, the gate silently
+// stops hiding their models.
 func TestHandleModels_CompatibleNodeDisabledModels(t *testing.T) {
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
@@ -80,15 +83,15 @@ func TestHandleModels_CompatibleNodeDisabledModels(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	// A node with no prefix on its connection publishes under the node id
-	// itself — GetProviderAlias returns the id unchanged for a node, because a
-	// node id is not in RegistryAliases. That is the spelling the disabled
-	// list has to match, and the one the dashboard's storageAlias writes.
-	if !strings.Contains(body, `"id":"`+nodeID+`/keep-me"`) {
-		t.Errorf("%s/keep-me must stay listed, got: %s", nodeID, body)
+	// Since #1100, a node whose connection carries no prefix publishes under
+	// the node's public prefix — the spelling clients can actually route —
+	// while the disabled list above stays keyed by the node id, which is what
+	// the dashboard's storageAlias writes. The gate must bridge the two.
+	if !strings.Contains(body, `"id":"`+prefix+`/keep-me"`) {
+		t.Errorf("%s/keep-me must stay listed, got: %s", prefix, body)
 	}
-	if strings.Contains(body, `"id":"`+nodeID+`/hide-me"`) {
-		t.Errorf("%s/hide-me must be excluded after being disabled, got: %s", nodeID, body)
+	if strings.Contains(body, "hide-me") {
+		t.Errorf("hide-me must be excluded after being disabled, got: %s", body)
 	}
 }
 
