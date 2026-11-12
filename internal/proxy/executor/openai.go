@@ -181,6 +181,7 @@ func sseStream(o sseStreamOpts) error {
 			var writeErr error
 			doneSent := false
 			sawTerminal := false // saw message_delta (with stop_reason) or message_stop
+			var streamUsage *translator.OpenAIUsage
 			err := proxy.ScanStream(upstream, func(chunk []byte) {
 				if writeErr != nil || doneSent {
 					return
@@ -206,6 +207,10 @@ func sseStream(o sseStreamOpts) error {
 						}
 						doneSent = true
 						return
+					}
+					if acc := translator.AccumulateClaudeStreamUsage(streamUsage, ev.Payload); acc != nil && acc != streamUsage {
+						streamUsage = acc
+						translator.SetUsage(ctx, streamUsage)
 					}
 					markTTFT(&Request{TTFT: ttft, StartTime: startTime}, startTime)
 					if buf != nil {
@@ -248,12 +253,13 @@ func sseStream(o sseStreamOpts) error {
 		if liftAliases {
 			patchers = append(patchers, liftReasoningAliasesPayload)
 		}
+		var streamUsage *translator.OpenAIUsage
 		return proxy.SSECopy(hw, upstream, flusher, func(chunk []byte) {
 			markTTFT(&Request{TTFT: ttft, StartTime: startTime}, startTime)
 			if buf != nil {
 				_, _ = buf.Write(chunk)
 			}
-			captureUsageFromSSEChunk(ctx, chunk)
+			streamUsage = captureUsageFromSSEChunk(ctx, streamUsage, chunk)
 		}, patchers...)
 	}
 
@@ -296,23 +302,39 @@ func sseStream(o sseStreamOpts) error {
 	return err
 }
 
-func captureUsageFromSSEChunk(ctx context.Context, chunk []byte) {
+// captureUsageFromSSEChunk accumulates usage from SSE frames across chunks.
+// acc carries the running Claude stream usage (message_start + message_delta)
+// across calls; the caller threads it back in. A Claude event is handled first
+// because a message_delta carries only output_tokens, and the generic parsers
+// would otherwise replace the prompt/cache figures set at message_start.
+func captureUsageFromSSEChunk(ctx context.Context, acc *translator.OpenAIUsage, chunk []byte) *translator.OpenAIUsage {
 	const maxUsageFrame = 1 << 20
 	trimmed := bytes.TrimSpace(chunk)
 	if len(trimmed) > maxUsageFrame {
 		trimmed = trimmed[:maxUsageFrame]
 	}
 	if !bytes.Contains(trimmed, []byte("data:")) {
-		return
+		return acc
 	}
 	_ = proxy.ScanStream(bytes.NewReader(trimmed), func(payload []byte) {
 		if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
 			return
 		}
-		if usage := translator.ParseResponseUsage(payload); usage != nil {
+		if next := translator.AccumulateClaudeStreamUsage(acc, payload); next != acc {
+			acc = next
+			translator.SetUsage(ctx, acc)
+			return
+		}
+		usage := translator.ParseResponseUsage(payload)
+		if usage == nil {
+			usage = translator.ParseResponsesUsage(payload)
+		}
+		if usage != nil {
+			acc = usage
 			translator.SetUsage(ctx, usage)
 		}
 	})
+	return acc
 }
 
 // jsonResponse writes the upstream JSON response with optional translation.
