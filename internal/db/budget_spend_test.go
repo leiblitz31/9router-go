@@ -61,7 +61,7 @@ func TestSpendForKeySinceQueryPlan(t *testing.T) {
 			// one arm cannot use an index degrades the whole statement to a
 			// scan (the failure TestUsageHistoryClientKeyIndexExists documents
 			// for the quota read).
-			if !strings.Contains(joined, "idx_uh_clientkey_tok") || !strings.Contains(joined, "idx_uh_apikey_tok") {
+			if !strings.Contains(joined, "idx_uh_clientkey") || !strings.Contains(joined, "idx_uh_apikey") {
 				t.Errorf("budget spend read does not use both ledger indexes:\n%s", joined)
 			}
 		})

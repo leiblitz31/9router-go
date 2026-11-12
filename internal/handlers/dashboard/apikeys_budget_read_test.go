@@ -142,12 +142,25 @@ func TestGetApiKeyBudgetMeasuredSpend(t *testing.T) {
 	router := setupTestRouter(repo)
 	id, full := createTestKey(t, router, "Measured Key")
 
-	armKeyBudget(t, router, id, map[string]any{
-		"limitMicros":  2_000_000,
-		"budgetPeriod": "total",
-		"alertPct":     80,
-		"hardCutoff":   true,
-	})
+	// Fork adaptation: upstream arms this key through per-key budget columns
+	// (PUT limitMicros/budgetPeriod/...), which the fork never took — its
+	// budgets live on plans (F-3) and policy.Resolve is plan-then-key. The
+	// same $2 total ceiling is therefore armed through a plan here; the read
+	// expectations below are unchanged.
+	plan := db.Plan{
+		ID:          "plan-measured-spend",
+		TenantID:    "default",
+		Name:        "Measured Spend Plan",
+		LimitMicros: 2_000_000,
+		Period:      "total",
+		AlertPct:    80,
+		HardCutoff:  true,
+	}
+	if err := repo.CreatePlan(plan); err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+	planID := plan.ID
+	armKeyBudget(t, router, id, map[string]any{"planId": planID})
 	insertSpend(t, repo, handlerutil.MaskAPIKey(full), 0.50, 100, 50)
 
 	code, got := getBudget(t, router, id)
