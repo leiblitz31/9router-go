@@ -107,7 +107,21 @@ func ConnectionBlockedUntil(rawData string) (time.Time, bool) {
 	if until, ok := readTimestampField(raw, "oauthLockedUntil"); ok && (!found || until.Before(earliest)) {
 		return until, true
 	}
+	if until, ok := readTimestampField(raw, "accountLockedUntil"); ok && (!found || until.Before(earliest)) {
+		return until, true
+	}
 	return earliest, found
+}
+
+// ConnectionAccountLockUntil reads the account-ban lockout timestamp a
+// connection carries in its data blob, failing open on a missing or malformed
+// value.
+func ConnectionAccountLockUntil(rawData string) (time.Time, bool) {
+	raw, ok := parseConnData(rawData)
+	if !ok {
+		return time.Time{}, false
+	}
+	return readTimestampField(raw, "accountLockedUntil")
 }
 
 // connectionOAuthState reads the park and the consecutive-rejection count in
@@ -117,7 +131,7 @@ func (r *Repo) connectionOAuthState(connID string) (time.Time, int) {
 		return time.Time{}, 0
 	}
 	var rawData string
-	if err := r.db.QueryRow("SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&rawData); err != nil {
+	if err := r.db.QueryRowContext(context.Background(), "SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&rawData); err != nil {
 		return time.Time{}, 0
 	}
 	raw, ok := parseConnData(rawData)
@@ -126,6 +140,30 @@ func (r *Repo) connectionOAuthState(connID string) (time.Time, int) {
 	}
 	until, _ := readTimestampField(raw, "oauthLockedUntil")
 	failures, ok := raw["oauthFailureCount"].(float64)
+	if !ok || failures < 0 {
+		return until, 0
+	}
+	return until, int(failures)
+}
+
+// connectionAccountBanState reads the account-ban park and the consecutive
+// ban-failure count in one pass, reporting the zero time and 0 for a blob it
+// cannot read. Separate from oauthFailureCount: an OAuth rejection and an
+// account ban are different verdicts, each with its own ladder.
+func (r *Repo) connectionAccountBanState(connID string) (time.Time, int) {
+	if connID == "" {
+		return time.Time{}, 0
+	}
+	var rawData string
+	if err := r.db.QueryRowContext(context.Background(), "SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&rawData); err != nil {
+		return time.Time{}, 0
+	}
+	raw, ok := parseConnData(rawData)
+	if !ok {
+		return time.Time{}, 0
+	}
+	until, _ := readTimestampField(raw, "accountLockedUntil")
+	failures, ok := raw["accountBanFailureCount"].(float64)
 	if !ok || failures < 0 {
 		return until, 0
 	}
@@ -150,9 +188,13 @@ func (r *Repo) GetConnectionOAuthFailures(connID string) int {
 // (the forward path refreshes, then the project probe force-refreshes) — so
 // the counter only moves once the previous window has run out. Counting the
 // repeats would turn a single bad request into a 20 minute cooldown.
-func (r *Repo) RecordConnectionOAuthFailure(connID string, status int, errText string) (time.Time, int, error) {
+func (r *Repo) RecordConnectionOAuthFailure(connID string, status int, err error) (time.Time, int, error) {
 	if connID == "" {
 		return time.Time{}, 0, nil
+	}
+	errText := ""
+	if err != nil {
+		errText = err.Error()
 	}
 	now := time.Now().UTC()
 	lockedUntil, failures := r.connectionOAuthState(connID)
@@ -161,15 +203,33 @@ func (r *Repo) RecordConnectionOAuthFailure(connID string, status int, errText s
 	}
 	until := now.Add(OAuthLockDelay(failures))
 	stamp := now.Format(time.RFC3339)
-	lastError, err := json.Marshal(map[string]any{
+	deadGrant := providers.IsRefreshGrantDead(err)
+	lastError, mErr := json.Marshal(map[string]any{
 		"status":    status,
 		"message":   errText,
 		"timestamp": stamp,
 	})
-	if err != nil {
-		return time.Time{}, 0, fmt.Errorf("marshal last error for %s: %w", connID, err)
+	if mErr != nil {
+		return time.Time{}, 0, fmt.Errorf("marshal last error for %s: %w", connID, mErr)
 	}
-	_, err = r.db.Exec(
+	if deadGrant {
+		_, execErr := r.db.Exec(
+			`UPDATE providerConnections
+			 SET data = json_set(data,
+			   '$.oauthLockedUntil', ?,
+			   '$.oauthFailureCount', ?,
+			   '$.testStatus', ?,
+			   '$.lastError', json(?)),
+			     updatedAt = ?
+			 WHERE id = ?`,
+			until.UTC().Format(time.RFC3339), failures, providers.StatusReauthRequired, string(lastError), stamp, connID,
+		)
+		if execErr != nil {
+			return time.Time{}, 0, fmt.Errorf("lock connection oauth %s: %w", connID, execErr)
+		}
+		return until, failures, nil
+	}
+	_, execErr := r.db.Exec(
 		`UPDATE providerConnections
 		 SET data = json_set(data,
 		   '$.oauthLockedUntil', ?,
@@ -179,8 +239,8 @@ func (r *Repo) RecordConnectionOAuthFailure(connID string, status int, errText s
 		 WHERE id = ?`,
 		until.UTC().Format(time.RFC3339), failures, string(lastError), stamp, connID,
 	)
-	if err != nil {
-		return time.Time{}, 0, fmt.Errorf("lock connection oauth %s: %w", connID, err)
+	if execErr != nil {
+		return time.Time{}, 0, fmt.Errorf("lock connection oauth %s: %w", connID, execErr)
 	}
 	return until, failures, nil
 }
@@ -189,7 +249,8 @@ func (r *Repo) RecordConnectionOAuthFailure(connID string, status int, errText s
 // so a credential that was repaired does not stay out of rotation for the rest
 // of the window, and the next rejection starts from the base cooldown again.
 // The quota cooldown is deliberately left alone: a working token says nothing
-// about a spent quota.
+// about a spent quota. A re-authenticated account also sheds its
+// reauth_required testStatus so it reports healthy again.
 func (r *Repo) ClearConnectionOAuthLock(connID string) error {
 	if connID == "" {
 		return nil
@@ -199,13 +260,80 @@ func (r *Repo) ClearConnectionOAuthLock(connID string) error {
 		`UPDATE providerConnections
 		 SET data = json_set(data,
 		   '$.oauthLockedUntil', NULL,
-		   '$.oauthFailureCount', 0),
+		   '$.oauthFailureCount', 0,
+		   '$.testStatus', NULL),
 		     updatedAt = ?
 		 WHERE id = ?`,
 		now, connID,
 	)
 	if err != nil {
 		return fmt.Errorf("clear connection oauth lock %s: %w", connID, err)
+	}
+	return nil
+}
+
+// GetConnectionAccountBanFailures reads the consecutive account-ban failure
+// count, reporting 0 when it is missing or malformed so a corrupt counter costs
+// the account its longer backoff, never its routing.
+func (r *Repo) GetConnectionAccountBanFailures(connID string) int {
+	_, failures := r.connectionAccountBanState(connID)
+	return failures
+}
+
+// RecordConnectionAccountBanFailure parks a connection whose account suffered a
+// permanent/severe account-level failure (e.g. an Antigravity TOS ban) and
+// reports the window it parked for. The cooldown climbs the escalating lockout
+// ladder with each consecutive ban nobody repaired, and a successful request or
+// successful test connection clears the streak.
+//
+// Every recorded ban is a distinct failure event, so the counter always moves:
+// unlike OAuth rejections (where one dead grant can be re-discovered several
+// times in one request), an account ban is a fresh verdict each time it is
+// observed.
+func (r *Repo) RecordConnectionAccountBanFailure(connID string) (time.Time, int, error) {
+	if connID == "" {
+		return time.Time{}, 0, nil
+	}
+	now := time.Now().UTC()
+	_, failures := r.connectionAccountBanState(connID)
+	failures++
+	until := now.Add(providers.GetEscalatingLockoutCooldown(failures))
+	stamp := now.Format(time.RFC3339)
+	_, err := r.db.ExecContext(context.Background(),
+		`UPDATE providerConnections
+		SET data = json_set(data,
+			'$.accountLockedUntil', ?,
+			'$.accountBanFailureCount', ?),
+			updatedAt = ?
+		WHERE id = ?`,
+		until.UTC().Format(time.RFC3339), failures, stamp, connID,
+	)
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("lock connection account ban %s: %w", connID, err)
+	}
+	return until, failures, nil
+}
+
+// ClearConnectionAccountBanLock releases the account-ban park and resets the
+// failure streak, so a repaired account starts from the base cooldown again.
+// Called once the account has been proven usable (a successful request or a
+// successful manual test connection).
+func (r *Repo) ClearConnectionAccountBanLock(connID string) error {
+	if connID == "" {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := r.db.ExecContext(context.Background(),
+		`UPDATE providerConnections
+		SET data = json_set(data,
+			'$.accountLockedUntil', NULL,
+			'$.accountBanFailureCount', 0),
+			updatedAt = ?
+		WHERE id = ?`,
+		now, connID,
+	)
+	if err != nil {
+		return fmt.Errorf("clear connection account ban lock %s: %w", connID, err)
 	}
 	return nil
 }
