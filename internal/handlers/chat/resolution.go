@@ -109,6 +109,7 @@ func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string
 		if combo, err := h.Repo.GetComboByName(entry); err == nil && combo != nil && combo.Models != "" {
 			var subModels []string
 			if err := json.Unmarshal([]byte(combo.Models), &subModels); err == nil && len(subModels) > 0 {
+				normalizeWebComboSeats(combo.Kind, subModels)
 				if visiting == nil {
 					visiting = make(map[string]bool, 4)
 				}
@@ -186,6 +187,29 @@ func (h *ChatHandler) resolveModelEntryGuarded(entry string, visiting map[string
 // against cyclic combo references by skipping recursive cycles. Inner-combo
 // strategies are not applied here; the top-level combo's strategy governs
 // the flattened list.
+// normalizeWebComboSeats auto-appends /search or /fetch for bare provider names
+// in webSearch and webFetch combos, preserving compatibility with legacy combo definitions.
+// (Ported from upstream #939; #1047's test pins it.)
+func normalizeWebComboSeats(kind *string, seats []string) {
+	if kind == nil {
+		return
+	}
+	suffix := ""
+	switch *kind {
+	case "webSearch":
+		suffix = "/search"
+	case "webFetch":
+		suffix = "/fetch"
+	default:
+		return
+	}
+	for i, seat := range seats {
+		if !strings.Contains(seat, "/") {
+			seats[i] = seat + suffix
+		}
+	}
+}
+
 func (h *ChatHandler) flattenComboModels(models []string) ([]string, error) {
 	out := make([]string, 0, len(models))
 	seen := make(map[string]bool)
@@ -200,6 +224,7 @@ func (h *ChatHandler) flattenComboModels(models []string) ([]string, error) {
 				if combo, err := h.Repo.GetComboByName(m); err == nil && combo != nil && combo.Models != "" {
 					var sub []string
 					if err := json.Unmarshal([]byte(combo.Models), &sub); err == nil {
+						normalizeWebComboSeats(combo.Kind, sub)
 						seen[m] = true
 						if err := walk(sub); err != nil {
 							return err
@@ -347,6 +372,7 @@ func (h *ChatHandler) resolveModel(modelStr string) (*ModelInfo, error) {
 		if err == nil && combo != nil && combo.Models != "" {
 			var modelStrings []string
 			if err := json.Unmarshal([]byte(combo.Models), &modelStrings); err == nil && len(modelStrings) > 0 {
+				normalizeWebComboSeats(combo.Kind, modelStrings)
 				// Flatten nested combos into concrete leaves so rotation covers
 				// every reachable model (a nested combo entry used to collapse to
 				// its first leaf, so combo-wombo -> free-tier never rotated).
