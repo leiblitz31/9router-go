@@ -34,6 +34,7 @@ import (
 
 const (
 	liveCatalogTTL       = 5 * time.Minute
+	liveCatalogNegTTL    = 60 * time.Second
 	liveCatalogFastHTTP  = 10 * time.Second
 	kiroCatalogHTTP      = 30 * time.Second
 	kiroRuntimeSDKVer    = "1.0.0"
@@ -236,6 +237,29 @@ func liveCatalogStoreModels(key string, discovered []LiveModel) {
 	liveCatalogStore.mu.Lock()
 	defer liveCatalogStore.mu.Unlock()
 	liveCatalogStore.entries[key] = liveCatalogEntry{expiresAt: time.Now().Add(liveCatalogTTL), models: discovered}
+}
+
+func liveCatalogStoreNegative(key string) {
+	liveCatalogStore.mu.Lock()
+	defer liveCatalogStore.mu.Unlock()
+	liveCatalogStore.entries[key] = liveCatalogEntry{expiresAt: time.Now().Add(liveCatalogNegTTL)}
+}
+
+// InvalidateLiveCatalog purges cached live catalog entries for a provider.
+// If providerID is empty, it purges all cached entries.
+func InvalidateLiveCatalog(providerID string) {
+	liveCatalogStore.mu.Lock()
+	defer liveCatalogStore.mu.Unlock()
+	if providerID == "" {
+		liveCatalogStore.entries = make(map[string]liveCatalogEntry)
+		return
+	}
+	prefix := providerID + "|"
+	for k := range liveCatalogStore.entries {
+		if k == providerID || strings.HasPrefix(k, prefix) {
+			delete(liveCatalogStore.entries, k)
+		}
+	}
 }
 
 // ---- Kiro (AWS CodeWhisperer ListAvailableModels) ----
