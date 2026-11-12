@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
-9router/proxy/internal/handlers/shared
+	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/models"
