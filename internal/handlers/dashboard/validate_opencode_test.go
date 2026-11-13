@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -9,12 +10,15 @@ import (
 // lane used to probe https://opencode.ai/zen/v1/models with the v1
 // "opencode/1.18.31" fingerprint upstream rejects with 403 FreeTierError,
 // and the reporter saw the IP locked out right after using Test. The fix
-// upstream returns valid with no network call. This fork's NoAuth branch
-// already returns valid without probing; this test pins that behavior for
-// the opencode free lane specifically, so a future probe-matrix change
-// cannot silently reintroduce the probe.
-func TestHandleValidateProvider_OpencodeFreeLaneMakesNoProbe(t *testing.T) {
-	calls := staticProbeStub(t, http.StatusInternalServerError)
+// upstream probes with one stealth chat completion instead (x-opencode-client:
+// cli, opencode/latest UA). This test pins that the probe stays the stealth
+// one — exactly one call, to the chat completions URL, never a GET to
+// /zen/v1/models — so a future probe-matrix change cannot silently
+// reintroduce the lockout-prone probe.
+func TestHandleValidateProvider_OpencodeFreeLaneStealthProbe(t *testing.T) {
+	calls := withProbeStub(t, func(call int, p capturedProbe) (int, []byte, error) {
+		return http.StatusOK, []byte(`data: {"choices":[{"delta":{"content":"Hello!"}}]}\n\n`), nil
+	})
 
 	rec, out := postValidate(t, `{"provider":"opencode","apiKey":""}`)
 	if rec.Code != http.StatusOK {
@@ -23,7 +27,20 @@ func TestHandleValidateProvider_OpencodeFreeLaneMakesNoProbe(t *testing.T) {
 	if out["valid"] != true {
 		t.Errorf("expected valid=true for the free opencode lane, got %v", out["valid"])
 	}
-	if len(*calls) != 0 {
-		t.Errorf("expected no probe for the free opencode lane, got %d", len(*calls))
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly 1 probe for the free opencode lane, got %d", len(*calls))
+	}
+	p := (*calls)[0]
+	if p.url != "https://opencode.ai/inference/openai/v1/chat/completions" {
+		t.Errorf("unexpected probe url %s", p.url)
+	}
+	if strings.Contains(p.url, "/zen/v1/models") {
+		t.Errorf("probe must not hit /zen/v1/models: %s", p.url)
+	}
+	if p.headers.Get("x-opencode-client") != "cli" {
+		t.Errorf("probe missing stealth x-opencode-client header: %v", p.headers)
+	}
+	if !strings.HasPrefix(p.headers.Get("User-Agent"), "opencode/") {
+		t.Errorf("probe missing stealth opencode User-Agent: %v", p.headers)
 	}
 }

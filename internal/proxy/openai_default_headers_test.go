@@ -85,22 +85,12 @@ func TestForwardOpenAI_defaultHeadersMatchNode(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			// The fork has no ProviderConfig.HeaderOverrides: operator Custom
-			// Headers are merged into StaticHeaders by the connection layer
-			// (providers.MergeHeaderOverrides) before forwarding, which is the
-			// same "operator wins" contract this test pins.
-			static := make(map[string]string, len(tt.static)+len(tt.overrides))
-			for k, v := range tt.static {
-				static[k] = v
-			}
-			for k, v := range tt.overrides {
-				static[k] = v
-			}
 			cfg := &providers.ProviderConfig{
-				BaseURL:       srv.URL,
-				AuthHeader:    "Authorization",
-				AuthScheme:    "bearer",
-				StaticHeaders: static,
+				BaseURL:         srv.URL,
+				AuthHeader:      "Authorization",
+				AuthScheme:      "bearer",
+				StaticHeaders:   tt.static,
+				HeaderOverrides: tt.overrides,
 			}
 			resp, err := ForwardOpenAI(t.Context(), srv.Client(), cfg, "sk-test", []byte(`{}`), tt.isStream)
 			if err != nil {

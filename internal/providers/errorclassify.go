@@ -17,6 +17,10 @@ type ErrorRule struct {
 	// Provider scopes a text rule to one canonical provider id; empty applies
 	// to every provider.
 	Provider string
+	// Quota marks an error that means the account's credit/billing budget is
+	// spent. These do NOT clear on a short timer, so they get a long cooldown
+	// and are surfaced as a distinct status instead of a transient blip.
+	Quota bool
 }
 
 // BackoffConfig controls exponential backoff scaling.
@@ -58,23 +62,66 @@ const (
 	// is not, so the account waits out a short window instead of absorbing
 	// every turn the same address is refused on.
 	cooldownAddressRefused = 30 * 60 * 1000
+
+	// QuotaExhaustedCooldownMs is how long an account is parked after the
+	// upstream reports its credit/quota budget is spent. Ported from the
+	// upstream classify429 helper (QUOTA_EXHAUSTED_COOLDOWN_MS): a rate limit
+	// clears in a minute, but "insufficient balance" will not fix itself in 30
+	// seconds — retrying that often just burns a guaranteed-failed upstream
+	// call and keeps the dashboard showing a false recovery.
+	QuotaExhaustedCooldownMs = 60 * 60 * 1000 // 1 hour
 )
 
 // ErrorRules is the ordered list of error classification rules, matching Next.js ERROR_RULES.
 // Checked top-to-bottom: text rules first (by order), then status rules.
 var ErrorRules = []ErrorRule{
+	// The ban rule must precede the generic 11140 rules: an account-level
+	// risk-control block (11140 "request illegal" with a restricted display
+	// message) does not clear on a short cooldown, and re-picking the banned
+	// credential every two minutes is what inflates the block. The wording is
+	// the only safe signal — 11140 also carries ordinary throttling, which
+	// stays on backoff.
+	{Provider: "codebuddy-intl", Text: "account restricted upstream", CooldownMs: cooldownAccountBan},
+	// The same canonical wording on any other provider is not a ban verdict
+	// for that provider — it reads as a plain 403 (generic two minutes)
+	// instead of the 30-minute address refusal the bare 11140 code earns.
+	{Text: "account restricted upstream", CooldownMs: cooldownLong},
+	{Text: "11158", CooldownMs: cooldownLong},
+	{Text: "model_not_in_plan", CooldownMs: cooldownLong},
+	{Text: "当前账号类型暂不支持该模型", CooldownMs: cooldownLong},
+	{Text: "14018", CooldownMs: cooldownLong},
+	{Text: "额度已用尽", CooldownMs: cooldownLong},
+	{Text: "11140", CooldownMs: cooldownAddressRefused},
+	{Text: "account has been restricted due to unusual activity", CooldownMs: cooldownAddressRefused},
+	{Text: "账号存在异常行为", CooldownMs: cooldownAddressRefused},
+	// --- Quota / credit exhaustion (checked before generic rules) ---
+	// A spent budget is not a transient throttle: give it the long cooldown
+	// instead of the 30s transient default. Without this, "insufficient
+	// balance" heals itself every 30 seconds and the dashboard keeps
+	// claiming a guaranteed-failing account is connected.
+	{Text: "insufficient balance", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "insufficient credit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "credits exhausted", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "credit exhausted", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "no remaining credits", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "quota exceeded", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "insufficient quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "monthly limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "frequency limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "payment required", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	// TokenHarbor's free tier answers 429 with "You've used this period's free
+	// allowance. Your next rolling 7-day period starts on ...". The status
+	// alone reads as a throttle, so it only ever earned a 2s→5min backoff and
+	// the spent account was re-dialled all window. The allowance is spent for
+	// days, which is what this cooldown family is for.
+	{Text: "free allowance", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+
 	// --- Text-based rules (checked first, order = priority) ---
 	// Intl gateway blocks affect the account/IP, so let the connection back
 	// off (upstream 3b137aa6): without a provider-scoped rule the messages
 	// fall through to the request-scoped 4xx path and the connection gets
 	// zero cooldown while its backoff level never moves.
 	//
-	// The ban rule must precede them: an account-level risk-control block
-	// (11140 "request illegal" with a restricted display message) does not
-	// clear on a short cooldown, and re-picking the banned credential every
-	// two minutes is what inflates the block. The wording is the only safe
-	// signal — 11140 also carries ordinary throttling, which stays on backoff.
-	{Provider: "codebuddy-intl", Text: "account restricted upstream", CooldownMs: cooldownAccountBan},
 	{Provider: "codebuddy-intl", Text: "request illegal", Backoff: true},
 	{Provider: "codebuddy-intl", Text: "conversation id missing", Backoff: true},
 	// DeepSeek web account-level refusals both arrive as 403, and they are
@@ -104,14 +151,10 @@ var ErrorRules = []ErrorRule{
 	{Text: "request not allowed", CooldownMs: cooldownShort},
 	{Text: "rate limit", Backoff: true},
 	{Text: "too many requests", Backoff: true},
-	{Text: "quota exceeded", Backoff: true},
-	// Out-of-credits arrives as a 400 from several providers ("insufficient
-	// credits" / Anthropic's "credit balance is too low"). The combo advance
-	// happens through the request-scoped 4xx path, but without these rules
-	// the spent account reads as healthy and is retried on every pass
-	// (upstream b82f5c4a).
-	{Text: "insufficient credit", Backoff: true},
-	{Text: "credit balance is too low", Backoff: true},
+	// "credit balance is too low" stays here: it is Anthropic's wording for a
+	// spent balance but does not contain "insufficient credit", so the head
+	// quota rules above do not match it.
+	{Text: "credit balance is too low", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
 	{Text: "capacity", Backoff: true},
 	{Text: "overloaded", Backoff: true},
 	{Text: "resource_exhausted", Backoff: true},
@@ -320,16 +363,33 @@ var ModelFitErrorPatterns = []string{
 	"too many tokens",
 	"context window",
 	"exceeds the maximum number of tokens",
+	// A text-only model rejects the media an older turn still carries. The
+	// trailing turn was text, so the request never registered as a vision
+	// request and the history went out verbatim; every connection to this
+	// model answers the same way, so like the length patterns above the only
+	// useful move is the next member. The quoted spellings both matter: the
+	// body is matched raw, so a JSON-encoded message carries the quotes as
+	// \" while a plain-text error body carries them bare.
+	`unsupported value \"image`,
+	`unsupported value "image`,
+	"not support image",
+	"image input not supported",
+	"images are not supported",
 }
 
 // ModelFitStatusCodes are the statuses an upstream uses to reject an oversized
 // request. A 400 carries it almost everywhere; 413 and 422 are the other two
-// spellings seen in the wild. Gating on the status keeps a provider's prose from
-// triggering the classification on an unrelated failure.
+// spellings seen in the wild, and Zed sends it as a 403. 403 is otherwise the
+// account-refusal status, so admitting it here means every 403 is re-checked
+// against the body patterns before it can be called a fit failure — a plain
+// permission refusal still lands on the generic 403 rule. Gating on the status
+// keeps a provider's prose from triggering the classification on an unrelated
+// failure.
 var ModelFitStatusCodes = map[int]bool{
 	http.StatusBadRequest:            true, // 400
 	http.StatusRequestEntityTooLarge: true, // 413
 	http.StatusUnprocessableEntity:   true, // 422
+	http.StatusForbidden:             true, // 403, Zed
 }
 
 // IsModelFitError reports whether an upstream failure means the chosen model is

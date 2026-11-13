@@ -15,6 +15,7 @@ import (
 	"time"
 
 	utls "github.com/refraction-networking/utls"
+	xproxy "golang.org/x/net/proxy"
 )
 
 // TLS fingerprint spoofing for outbound HTTPS.
@@ -28,7 +29,8 @@ import (
 //     so private/reserved IPs stay blocked.
 //   - Proxying: net/http would finish a proxied handshake with crypto/tls
 //     (Transport.dialConn/addTLS), defeating the spoof. The dialer therefore
-//     tunnels through the proxy itself (CONNECT) and keeps Transport.Proxy nil.
+//     tunnels through the proxy itself (HTTP CONNECT, or the SOCKS5
+//     handshake for socks5:// pools) and keeps Transport.Proxy nil.
 //     Environment proxy semantics are replicated exactly by consulting
 //     http.ProxyFromEnvironment with a synthetic request.
 //   - Introspection: transportProxyAssignments records how each transport dials,
@@ -162,7 +164,6 @@ func (d *utlsDialer) dialPlainContext(ctx context.Context, network, addr string)
 // full CONNECT timeout when it lost.
 func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string) (net.Conn, error) {
 	proxyURL := d.resolveProxy(host)
-	dialer := NewSafeDialer()
 
 	targets := []string{addr}
 	if d.doh != nil {
@@ -174,6 +175,7 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 	}
 
 	if proxyURL == "" {
+		dialer := NewSafeDialer()
 		var lastErr error
 		for _, target := range targets {
 			conn, err := dialer.DialContext(ctx, network, target)
@@ -192,7 +194,11 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 	if err != nil {
 		return nil, fmt.Errorf("proxy.utlsDialer: invalid proxy URL: %w", err)
 	}
-	proxyAddr := canonicalProxyAddr(pu)
+	// The pool URL is operator-supplied, so its endpoint is not the SSRF
+	// surface — the tunneled request target is judged separately. Without
+	// this, a pool that lives on loopback or a tailnet address (the shape
+	// every self-hosted egress relay has) can never be dialed.
+	dialer := newSafeDialerForProxy(newProxyAllowlist(proxyAllowlistHosts(pu)...))
 	var lastErr error
 	for _, target := range targets {
 		// One dead record must not consume the caller's whole budget: with a
@@ -205,18 +211,9 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 		if len(targets) > 1 {
 			attemptCtx, cancel = context.WithTimeout(ctx, dohDialAttemptTimeout)
 		}
-		conn, err := dialer.DialContext(attemptCtx, network, proxyAddr)
+		conn, err := d.dialViaProxy(attemptCtx, network, dialer, pu, target)
 		if err != nil {
 			cancel()
-			lastErr = err
-			if ctx.Err() != nil {
-				break
-			}
-			continue
-		}
-		if err := proxyConnect(attemptCtx, conn, target, pu); err != nil {
-			cancel()
-			_ = conn.Close()
 			lastErr = err
 			if ctx.Err() != nil {
 				break
@@ -235,6 +232,89 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 	return nil, lastErr
 }
 
+// dialViaProxy opens one tunneled connection to target through the proxy
+// at pu, dispatching on the proxy scheme: socks5:// and socks5h:// take
+// the SOCKS5 handshake, everything else the HTTP CONNECT the dialer has
+// always done. The caller owns the per-target attempt loop and deadline.
+func (d *utlsDialer) dialViaProxy(ctx context.Context, network string, dialer *net.Dialer, pu *url.URL, target string) (net.Conn, error) {
+	switch strings.ToLower(pu.Scheme) {
+	case "socks5", "socks5h":
+		return d.dialSocks5(ctx, network, dialer, pu, target)
+	default:
+		conn, err := dialer.DialContext(ctx, network, canonicalProxyAddr(pu))
+		if err != nil {
+			return nil, err
+		}
+		if err := proxyConnect(ctx, conn, target, pu); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		return conn, nil
+	}
+}
+
+// dialSocks5 performs the SOCKS5 handshake (RFC 1928, RFC 1929 auth) to
+// target through the proxy at pu, via golang.org/x/net/proxy.
+//
+// The scheme decides who resolves the target host: socks5:// resolves it
+// locally and hands the proxy an address, socks5h:// hands the proxy the
+// hostname and lets it resolve remotely. The TCP dial to the proxy itself
+// goes through the caller's safe dialer (the same allowlisted dialer the
+// CONNECT path uses), so the proxy endpoint keeps its SSRF exemption and
+// the handshake inherits the attempt context's deadline and cancellation
+// through the dialer's DialContext.
+func (d *utlsDialer) dialSocks5(ctx context.Context, network string, dialer *net.Dialer, pu *url.URL, target string) (net.Conn, error) {
+	var auth *xproxy.Auth
+	if pu.User != nil {
+		pw, _ := pu.User.Password()
+		auth = &xproxy.Auth{User: pu.User.Username(), Password: pw}
+	}
+	socksTarget := target
+	if strings.EqualFold(pu.Scheme, "socks5") {
+		resolved, err := d.resolveSocks5Target(ctx, target)
+		if err != nil {
+			return nil, fmt.Errorf("proxy.utlsDialer: SOCKS5 local resolve %s: %w", target, err)
+		}
+		socksTarget = resolved
+	}
+	sd, err := xproxy.SOCKS5("tcp", canonicalProxyAddr(pu), auth, dialer)
+	if err != nil {
+		return nil, fmt.Errorf("proxy.utlsDialer: SOCKS5 dialer: %w", err)
+	}
+	cd, ok := sd.(xproxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("proxy.utlsDialer: SOCKS5 dialer has no DialContext")
+	}
+	conn, err := cd.DialContext(ctx, network, socksTarget)
+	if err != nil {
+		return nil, fmt.Errorf("proxy.utlsDialer: SOCKS5 dial %s via %s: %w", socksTarget, pu.Host, err)
+	}
+	return conn, nil
+}
+
+// resolveSocks5Target resolves a non-IP target host locally (socks5://
+// semantics: the client resolves, the proxy dials the address). IP targets
+// pass through untouched. It consults the package's lookupIPAddr seam —
+// the same indirection the proxy resolver uses — so a test can supply
+// answers without touching the process resolver.
+func (d *utlsDialer) resolveSocks5Target(ctx context.Context, target string) (string, error) {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return "", err
+	}
+	if net.ParseIP(host) != nil {
+		return target, nil
+	}
+	addrs, err := lookupIPAddr(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("no addresses for %s", host)
+	}
+	return net.JoinHostPort(addrs[0].IP.String(), port), nil
+}
+
 // resolveProxy returns the proxy URL for targetHost, or "" for direct.
 // An explicit pin wins; otherwise the environment is consulted with exactly
 // the semantics of http.ProxyFromEnvironment.
@@ -246,9 +326,12 @@ func (d *utlsDialer) resolveProxy(targetHost string) string {
 		return ""
 	}
 	// http.ProxyFromEnvironment only inspects req.URL, so a synthetic request
-	// reproduces its HTTPS_PROXY/NO_PROXY behavior exactly.
+	// reproduces its HTTPS_PROXY/NO_PROXY behavior exactly. It is consulted
+	// through the package's proxyFromEnvironment indirection (which defaults
+	// to the stdlib function) so a test can supply an ambient proxy without
+	// depending on the stdlib's once-cached environment view.
 	req := &http.Request{URL: &url.URL{Scheme: "https", Host: targetHost}}
-	if u, err := http.ProxyFromEnvironment(req); err == nil && u != nil {
+	if u, err := proxyFromEnvironment(req); err == nil && u != nil {
 		return u.String()
 	}
 	return ""
@@ -259,9 +342,12 @@ func canonicalProxyAddr(pu *url.URL) string {
 	host := pu.Hostname()
 	port := pu.Port()
 	if port == "" {
-		if pu.Scheme == "https" {
+		switch strings.ToLower(pu.Scheme) {
+		case "https":
 			port = "443"
-		} else {
+		case "socks5", "socks5h":
+			port = "1080"
+		default:
 			port = "80"
 		}
 	}

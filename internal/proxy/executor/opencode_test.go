@@ -451,16 +451,17 @@ func TestForwardOpencode_MuseSpark_EdgeRelay(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &providers.ProviderConfig{
-		BaseURL: srv.URL, // local fake upstream; leave its path intact
-		StaticHeaders: map[string]string{
-			"x-relay-target": "https://opencode.ai",
-			"x-relay-path":   "/zen/v1/chat/completions",
-		},
+		BaseURL:  "https://opencode.ai/zen/v1",
+		RelayURL: srv.URL,
+	}
+
+	client := &http.Client{
+		Transport: proxy.RelayTransport(srv.URL, http.DefaultTransport),
 	}
 
 	rec := httptest.NewRecorder()
 	req := &Request{
-		Client:        srv.Client(),
+		Client:        client,
 		Config:        cfg,
 		APIKey:        "public",
 		Body:          []byte(`{"model":"muse-spark-1.3-contributor-free","input":"test"}`),
@@ -596,12 +597,13 @@ func TestForwardOpencode_MuseSpark13_ResponsesRouting(t *testing.T) {
 
 func TestOpenCodeInferenceBase(t *testing.T) {
 	tests := []struct{ input, want string }{
-		{"https://opencode.ai/zen/v1/chat/completions", "https://opencode.ai/inference/v1"},
-		{"https://opencode.ai/zen/v1", "https://opencode.ai/inference/v1"},
-		{"http://127.0.0.1:9000/zen/v1/chat/completions", "http://127.0.0.1:9000/inference/v1"},
+		{"https://opencode.ai/zen/v1/chat/completions", "https://opencode.ai/inference/openai/v1"},
+		{"https://opencode.ai/zen/v1", "https://opencode.ai/inference/openai/v1"},
+		{"http://127.0.0.1:9000/zen/v1/chat/completions", "http://127.0.0.1:9000/inference/openai/v1"},
 		{"http://127.0.0.1:9000", "http://127.0.0.1:9000"},
 		{"https://relay.example/api", "https://relay.example/api"},
-		{"https://opencode.ai/inference/v1", "https://opencode.ai/inference/v1"},
+		{"https://opencode.ai/inference/openai/v1", "https://opencode.ai/inference/openai/v1"},
+		{"https://opencode.ai/inference/v1", "https://opencode.ai/inference/openai/v1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -644,6 +646,26 @@ func TestOpencodeChatURL(t *testing.T) {
 		t.Run(tt.input, func(t *testing.T) {
 			if got := opencodeChatURL(tt.input); got != tt.want {
 				t.Errorf("opencodeChatURL(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// The messages lane keeps the legacy prefix: the v2 gate's
+// /inference/openai/v1 surface has no /messages route (404).
+func TestOpenCodeMessagesInferenceBase(t *testing.T) {
+	tests := []struct{ input, want string }{
+		{"https://opencode.ai/zen/v1/chat/completions", "https://opencode.ai/inference/v1"},
+		{"https://opencode.ai/zen/v1/messages", "https://opencode.ai/inference/v1"},
+		{"https://opencode.ai/inference/openai/v1", "https://opencode.ai/inference/v1"},
+		{"https://opencode.ai/inference/v1", "https://opencode.ai/inference/v1"},
+		{"http://127.0.0.1:9000", "http://127.0.0.1:9000"},
+		{"https://relay.example/api", "https://relay.example/api"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := opencodeMessagesInferenceBase(tt.input); got != tt.want {
+				t.Errorf("opencodeMessagesInferenceBase(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -773,7 +795,7 @@ func TestForwardOpencodeGo_MuseSparkResponsesRouting(t *testing.T) {
 // inference chat lane with public credentials — never the user's go key.
 func TestForwardOpencodeGo_SpaceBunnyFreeTakesInferenceGate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/inference/v1/chat/completions") {
+		if !strings.HasSuffix(r.URL.Path, "/inference/openai/v1/chat/completions") {
 			t.Errorf("expected inference chat lane, got %s", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer public" {

@@ -669,13 +669,34 @@ func init() {
 		"gemini-4-argon":        geminiWebCaps,
 	}
 
+	// qw-web overrides the generic *qwen* pattern rows. Tool calling on
+	// the web surface is a prompt-injected protocol (the bracket-marker
+	// format of executor/qwen_web_tools.go, phase 2) — Tools is true
+	// because the executor implements it, verified live on staging
+	// 2026-11-02. Context windows: the site advertises a 1M-token window
+	// for the current Max/Plus line (research report 2026-11-02); the
+	// two Omni models are not in that line, so they carry a conservative
+	// 256K — a stated guess, not a measured figure.
+	qwenWebText := Capabilities{Tools: true, Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 1000000}
+	qwenWebVision := Capabilities{Vision: true, Tools: true, Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 1000000}
+	qwenWebOmni := Capabilities{Vision: true, AudioInput: true, VideoInput: true, Tools: true, Reasoning: true, ThinkingFormat: "qwen", ContextWindow: 262144}
+	providerCapabilities["qw-web"] = map[string]Capabilities{
+		"qwen3.7-plus":       qwenWebVision,
+		"qwen3.8-max":        qwenWebText,
+		"qwen3.8-omni-flash": qwenWebOmni,
+		"qwen3.7-max":        qwenWebText,
+		"qwen3.6-plus":       qwenWebVision,
+		"qwen3.5-plus":       qwenWebVision,
+		"qwen3.5-omni-plus":  qwenWebOmni,
+	}
+
 	// mimo-web overrides any generic *mimo* pattern rows. The web surface
 	// has no native tool channel and the executor does not synthesize one,
 	// so Tools stays false. Context windows are the Studio's own published
 	// figures (its /open-apis/bot/config) for the v2.6 line; the v2.5 line
 	// publishes none there, so it carries none here rather than a guess.
-	mimoWebCaps := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ContextWindow: 1000000}
-	mimoWebLegacyCaps := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}
+	mimoWebCaps := Capabilities{Vision: true, Reasoning: true, Search: true, ContextWindow: 1000000}
+	mimoWebLegacyCaps := Capabilities{Vision: true, Reasoning: true, Search: true}
 	providerCapabilities["mimo-web"] = map[string]Capabilities{
 		"mimo-v2.6-flash":                 mimoWebCaps,
 		"mimo-v2.6-pro":                   mimoWebCaps,
@@ -746,11 +767,27 @@ func init() {
 	// PROVIDER_CAPABILITIES["minimax-code-global"] = PROVIDER_CAPABILITIES["minimax-code"]).
 	providerCapabilities["minimax-code-global"] = providerCapabilities["minimax-code"]
 
+	// zcode: ZCode start-plan lane. The gateway accepts the Anthropic Messages
+	// wire with the same GLM models as the apikey lane; thinking follows the
+	// zai format (the executor already maps it).
+	providerCapabilities["zcode"] = map[string]Capabilities{
+		"glm-5.3":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 131072},
+		"glm-5.3-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 131072},
+	}
 	// DaoXE (daoxe) — OpenAI-compatible free tier
 	providerCapabilities["daoxe"] = map[string]Capabilities{
 		"gpt-4o":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
 		"gpt-4o-mini":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
 		"gpt-3.5-turbo": {Tools: true},
+	}
+
+	// Cloudflare AI (workers-ai). Mistral Small 3.1 and Kimi K2.6 are vision
+	// models: keep their image_url parts instead of flattening them to text.
+	// Cloudflare AI speaks the OpenAI wire format, so they take openai thinking.
+	// Kimi K2.6 uses the kimi thinking level set (levelMax) per the fixture.
+	providerCapabilities["cloudflare-ai"] = map[string]Capabilities{
+		"@cf/mistralai/mistral-small-3.1-24b-instruct": {Vision: true, Tools: true, ThinkingFormat: "openai"},
+		"@cf/moonshotai/kimi-k2.6":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi"},
 	}
 
 	// NaN.Builders (nanbuilders) — OpenAI-compatible free tier
@@ -770,6 +807,7 @@ func init() {
 	// Aliases share the same capabilities catalog
 	providerCapabilities["dx"] = providerCapabilities["daoxe"]
 	providerCapabilities["nan"] = providerCapabilities["nanbuilders"]
+	providerCapabilities["hc"] = providerCapabilities["hcnsec"]
 	providerCapabilities["oad"] = providerCapabilities["openadapter"]
 
 	initPatternIndex()
@@ -808,11 +846,17 @@ var patternCapabilities = []patternCapability{
 	{pattern: "*claude*opus-4.8*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
 	{pattern: "*claude*sonnet-4.6*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
 	{pattern: "*claude*sonnet-4.7*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
+	// Dashed ids (Bedrock `us.anthropic.claude-opus-4-7`) miss the dotted patterns above and
+	// would fall to *claude*opus-4* (budget), which Opus 4.7/4.8 reject with a 400.
+	{pattern: "*claude*opus-4-7*", caps: Capabilities{Vision: true, PDF: true, Reasoning: true, Search: true, ThinkingFormat: "claude-adaptive"}},
+	{pattern: "*claude*opus-4-8*", caps: Capabilities{Vision: true, PDF: true, Reasoning: true, Search: true, ThinkingFormat: "claude-adaptive"}},
 	{pattern: "*claude*haiku*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 	{pattern: "*claude*opus*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 	{pattern: "*claude*sonnet*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
-	{pattern: "*claude*fable*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
-	{pattern: "*claude*mythos*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
+	// Fable/Mythos: thinking is always on — `enabled`+budget_tokens and `disabled` both 400.
+	// Covers prefixed ids such as Bedrock `us.anthropic.claude-fable-5-1`.
+	{pattern: "*claude*fable*", caps: Capabilities{Vision: true, PDF: true, Reasoning: true, Search: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000}},
+	{pattern: "*claude*mythos*", caps: Capabilities{Vision: true, PDF: true, Reasoning: true, Search: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000}},
 	{pattern: "*claude-3*", caps: Capabilities{Vision: true, Tools: true}},
 	{pattern: "*claude*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 

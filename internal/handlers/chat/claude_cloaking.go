@@ -2,6 +2,8 @@ package chat
 
 import (
 	json "9router/proxy/internal/fastjson"
+	"9router/proxy/internal/log"
+	"9router/proxy/internal/proxy/executor"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,9 +13,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-
-	"9router/proxy/internal/log"
-	"9router/proxy/internal/proxy/executor"
 )
 
 // Claude OAuth cloaking — ports the Next.js dashboard's
@@ -360,7 +359,7 @@ func cloakClaudeTools(req map[string]any) map[string]string {
 	if tc, ok := req["tool_choice"].(map[string]any); ok {
 		if tc["type"] == "tool" {
 			if name, ok := tc["name"].(string); ok && clientToolNames[name] {
-				tc["name"] = name + claudeToolSuffix
+				tc["name"] = suffixClaudeToolName(name)
 			}
 		}
 	}

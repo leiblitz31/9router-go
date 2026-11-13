@@ -516,12 +516,52 @@ func TestSetupServerRouter_CodexResetCreditsAreLive(t *testing.T) {
 	}
 }
 
-// TestSetupServerRouter_OptionsDoesNotBypassApiKeyElsewhere pins that OPTIONS
-// handling never becomes a blanket passthrough in RequireApiKey: an OPTIONS
-// request never carries credentials, so opening every protected route to it
-// would be the wrong fix. (Upstream additionally registers per-path preflights
-// for its CORS-bearing public reads; the fork's router does not carry those
-// routes, so that half of the upstream test pair is not ported.)
+// TestSetupServerRouter_CORSPreflightOptionsRoutes pins the preflights a browser
+// sends before the CORS-bearing public reads. They are registered outside the
+// API-key group on purpose: an OPTIONS request never carries credentials, so a
+// blanket passthrough in RequireApiKey was the wrong fix — it opened every
+// protected route. Per-path registration keeps the surface at these four.
+func TestSetupServerRouter_CORSPreflightOptionsRoutes(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := db.NewRepo(database)
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	for _, path := range []string{"/health", "/api/health", "/api/tags", "/tags"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest(http.MethodOptions, path, nil))
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("OPTIONS %s status = %d, want 204", path, rec.Code)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("OPTIONS %s Access-Control-Allow-Origin = %q, want *", path, got)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "OPTIONS") {
+				t.Errorf("OPTIONS %s Access-Control-Allow-Methods = %q, want OPTIONS included", path, got)
+			}
+		})
+	}
+
+	// The public GET half has to carry the same headers, or a cross-origin read
+	// fails even though its preflight passed. /api/tags and /tags sit inside the
+	// API-key group, so an anonymous GET there is a 401 and its CORS headers are
+	// irrelevant — only the preflight is pinned for them above.
+	for _, path := range []string{"/health", "/api/health"} {
+		t.Run("GET "+path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("GET %s Access-Control-Allow-Origin = %q, want *", path, got)
+			}
+		})
+	}
+}
+
+// The per-path preflights must not become a general bypass: an OPTIONS on a
+// route that is not one of those four still goes through RequireApiKey.
 func TestSetupServerRouter_OptionsDoesNotBypassApiKeyElsewhere(t *testing.T) {
 	database, cleanup := setupTestDB(t)
 	defer cleanup()

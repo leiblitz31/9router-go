@@ -140,6 +140,13 @@
   let ponytailLevel = $state('full')
   let adhdEnabled = $state(false)
   let adhdLevel = $state('full')
+  // A user-authored system prompt, separate from the built-in style savers:
+  // house style, language, a coding convention. Prefix is the first thing the
+  // model reads; suffix is its last word, which is what survives a turn of
+  // untrusted content.
+  let systemPromptEnabled = $state(false)
+  let systemPromptPrefix = $state('')
+  let systemPromptSuffix = $state('')
   let semanticCacheEnabled = $state(false)
   let semanticCacheTTL = $state('1440')
   let semanticCacheMaxEntries = $state('1000')
@@ -162,6 +169,7 @@
     adhdLevel = 'full'
     ponytailEnabled = false
     headroomEnabled = false
+    headroomAutostart = false
 
     await patchSetting({
       rtkEnabled: true,
@@ -171,6 +179,7 @@
       adhdLevel: 'full',
       ponytailEnabled: false,
       headroomEnabled: false,
+      headroomAutostart: false,
     })
 
     recommendedApplied = true
@@ -283,6 +292,9 @@
       if (typeof settings.ponytailLevel === 'string' && settings.ponytailLevel) ponytailLevel = settings.ponytailLevel
       if (typeof settings.adhdEnabled === 'boolean') adhdEnabled = settings.adhdEnabled
       if (typeof settings.adhdLevel === 'string' && settings.adhdLevel) adhdLevel = settings.adhdLevel
+      if (typeof settings.systemPromptEnabled === 'boolean') systemPromptEnabled = settings.systemPromptEnabled
+      if (typeof settings.systemPromptPrefix === 'string') systemPromptPrefix = settings.systemPromptPrefix
+      if (typeof settings.systemPromptSuffix === 'string') systemPromptSuffix = settings.systemPromptSuffix
       if (typeof settings.semanticCacheEnabled === 'boolean') semanticCacheEnabled = settings.semanticCacheEnabled
       if (typeof settings.semanticCacheTTL === 'number' && settings.semanticCacheTTL > 0) semanticCacheTTL = String(settings.semanticCacheTTL)
       if (typeof settings.semanticCacheMaxEntries === 'number' && settings.semanticCacheMaxEntries > 0) semanticCacheMaxEntries = String(settings.semanticCacheMaxEntries)
@@ -516,6 +528,11 @@ f6e5d4c3b2a1   redis:7-alpine "docker-entrypoint.s…"   2 hours ago     Up 2 ho
     headroomEngine = value
     await patchSetting({ headroomEngine: value })
     refreshHeadroomStatus()
+  }
+
+  async function handleToggleHeadroomAutostart(value: boolean) {
+    headroomAutostart = value
+    await patchSetting({ headroomAutostart: value })
   }
 
   async function handleHeadroomUrlBlur() {
@@ -766,6 +783,18 @@ f6e5d4c3b2a1   redis:7-alpine "docker-entrypoint.s…"   2 hours ago     Up 2 ho
     patchSetting({ adhdLevel: levelId })
   }
 
+  function handleToggleSystemPrompt(value: boolean) {
+    systemPromptEnabled = value
+    patchSetting({ systemPromptEnabled: value })
+  }
+
+  function saveSystemPrompt() {
+    patchSetting({
+      systemPromptPrefix,
+      systemPromptSuffix,
+    })
+  }
+
   function copyInstallCommand() {
     copyToClipboard('pip install "headroom-ai[proxy]"')
     copiedInstallCmd = true
@@ -792,6 +821,7 @@ f6e5d4c3b2a1   redis:7-alpine "docker-entrypoint.s…"   2 hours ago     Up 2 ho
         if (data.rtkRawRetention === 'never' || data.rtkRawRetention === 'failures' || data.rtkRawRetention === 'always') rtkRawRetention = data.rtkRawRetention
 
         headroomEnabled = !!data.headroomEnabled
+        headroomAutostart = data.headroomAutostart === true
         headroomUrl = data.headroomUrl || 'http://localhost:8787'
         // Same normalization as the settings effect: anything that is not the
         // external engine means the built-in one.
@@ -1376,6 +1406,18 @@ f6e5d4c3b2a1   redis:7-alpine "docker-entrypoint.s…"   2 hours ago     Up 2 ho
 
     {#if headroomStatus.installed && headroomExpanded}
       <div class="mb-3 ml-1 pl-3 pb-4 border-l-2 border-border">
+        <!-- Autostart with 9router -->
+        <div class="flex items-center justify-between gap-4 py-2 border-b border-border/50 mb-3 max-w-lg">
+          <div>
+            <p class="text-xs font-medium text-text-main">Autostart with 9router</p>
+            <p class="text-[11px] text-text-muted">Automatically launch local Headroom proxy when 9router-go boots</p>
+          </div>
+          <Toggle
+            size="sm"
+            checked={headroomAutostart}
+            onChange={() => handleToggleHeadroomAutostart(!headroomAutostart)}
+          />
+        </div>
         <div class="flex items-center gap-2 flex-wrap">
           <span class="text-xs text-text-muted">
             Compression extras{headroomExtras.version ? ` · v${headroomExtras.version}` : ''}:
@@ -1893,7 +1935,64 @@ f6e5d4c3b2a1   redis:7-alpine "docker-entrypoint.s…"   2 hours ago     Up 2 ho
       </div>
     {/if}
 
-    <!-- 6. Prompt & Response Cache -->
+    <!-- 6. Custom system prompt -->
+    <div class="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <p class="font-medium">Custom system prompt</p>
+          <span class="text-xs px-2 py-0.5 rounded font-medium {systemPromptEnabled ? 'bg-success/15 text-success' : 'bg-surface-3 text-text-muted'}">
+            {systemPromptEnabled ? 'Active' : 'Disabled'}
+          </span>
+        </div>
+        <p class="text-sm text-text-muted">
+          Inject your own instruction into every request. The prefix leads the system prompt; the suffix lands after it, where
+          it survives a turn of untrusted content.
+        </p>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <Toggle
+          checked={systemPromptEnabled}
+          onChange={() => handleToggleSystemPrompt(!systemPromptEnabled)}
+        />
+      </div>
+    </div>
+
+    {#if systemPromptEnabled}
+      <div class="py-3 px-4 rounded-lg bg-surface-2/40 border border-border mt-3 space-y-3">
+        <div class="space-y-1">
+          <label class="text-xs font-medium text-text-muted" for="system-prompt-prefix">Prefix</label>
+          <textarea
+            id="system-prompt-prefix"
+            bind:value={systemPromptPrefix}
+            rows="2"
+            placeholder="House style, language, conventions — read before anything else"
+            class="w-full px-3 py-2 rounded-lg bg-surface-1 border border-border text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-primary/40"
+          ></textarea>
+        </div>
+        <div class="space-y-1">
+          <label class="text-xs font-medium text-text-muted" for="system-prompt-suffix">Suffix</label>
+          <textarea
+            id="system-prompt-suffix"
+            bind:value={systemPromptSuffix}
+            rows="2"
+            placeholder="Last word the model reads — e.g. always answer in Vietnamese"
+            class="w-full px-3 py-2 rounded-lg bg-surface-1 border border-border text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-primary/40"
+          ></textarea>
+        </div>
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <p class="text-xs text-text-muted">Applied to chat, Responses and Claude requests alike.</p>
+          <button
+            type="button"
+            onclick={saveSystemPrompt}
+            class="px-3 py-1.5 rounded text-xs font-medium bg-primary text-white hover:opacity-90 transition-opacity cursor-pointer"
+          >
+            Save prompt
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- 7. Prompt & Response Cache -->
     <div class="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
       <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2 flex-wrap">
@@ -2033,6 +2132,23 @@ f6e5d4c3b2a1   redis:7-alpine "docker-entrypoint.s…"   2 hours ago     Up 2 ho
       <p class="text-xs text-text-muted">
         Request timeout in milliseconds. Defaults to 3000 ms.
       </p>
+    </div>
+
+    <div class="flex items-center justify-between py-2 border-t border-border">
+      <div>
+        <p class="text-sm font-medium text-text-main">Autostart with 9router</p>
+        <p class="text-xs text-text-muted">
+          {!headroomStatus?.installed
+            ? 'Requires Headroom to be installed first'
+            : 'Launch local Headroom proxy on 9router-go startup'}
+        </p>
+      </div>
+      <Toggle
+        checked={headroomAutostart}
+        disabled={!headroomStatus?.installed}
+        title={!headroomStatus?.installed ? 'Install Headroom first to enable autostart' : ''}
+        onChange={() => handleToggleHeadroomAutostart(!headroomAutostart)}
+      />
     </div>
 
     {#if headroomManaged}

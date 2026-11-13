@@ -68,8 +68,20 @@ func systemReminderText(content string) string {
 }
 
 func collapseTextParts(parts []OpenAIContentBlock) any {
-	if len(parts) == 1 && parts[0].Type == "text" {
-		return parts[0].Text
+	// Only flatten content when every part is text. Any non-text part
+	// (image_url, file, …) keeps the content as an array so vision models
+	// receive their image parts. For text-only parts, join into one string.
+	allText := true
+	texts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p.Type != "text" {
+			allText = false
+			break
+		}
+		texts = append(texts, p.Text)
+	}
+	if allText {
+		return strings.Join(texts, "\n")
 	}
 	return parts
 }
@@ -607,15 +619,10 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 					continue
 				}
 			}
-			// Strip empty text blocks (Anthropic 400s on empty text). The same
-			// emptiness rule decides whether the whole message survives below,
-			// so both read it from one place — a whitespace-only block must not
-			// slip through one pass and be dropped by the other. A thinking
-			// block with no visible text dies the same way: the Messages API
-			// rejects it outright (400 "each thinking block must contain
-			// non-whitespace thinking") and a valid signature does not save it
-			// (upstream #4727).
-			if (bType == claudeBlockText || bType == claudeBlockThinking) && !isContentfulBlock(block) {
+			// Strip empty text blocks and invalid thinking blocks. The same
+			// contentful rule decides whether the whole message survives below,
+			// so both read it from one place.
+			if (bType == "text" || bType == "thinking") && !isContentfulBlock(block) {
 				changed = true
 				continue
 			}
@@ -675,6 +682,26 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 		changed = true
 	}
 
+	// Drop Claude Code identity from the system field so it is not forwarded
+	// to the raw Anthropic API. Only the exact Claude Code banner prefix
+	// ("You are Claude Code...") is treated as identity; a user prompt such as
+	// "expert on Anthropic Agent SDK" is preserved. If removal empties the
+	// system field, the "system" key is deleted entirely rather than left as
+	// "" or [].
+	if systemVal, ok := req["system"]; ok {
+		cleaned := dropClaudeIdentitySystemBlock(systemVal)
+		before, _ := json.Marshal(systemVal)
+		after, _ := json.Marshal(cleaned)
+		if string(before) != string(after) {
+			if isEmptySystem(cleaned) {
+				delete(req, "system")
+			} else {
+				req["system"] = cleaned
+			}
+			changed = true
+		}
+	}
+
 	if sanitizeClaudeToolIDs(messagesRaw) {
 		changed = true
 	}
@@ -687,6 +714,82 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 		return out
 	}
 	return body
+}
+
+// claudeIdentityBanner is the exact Claude Code system-prompt banner
+// prefix. Only a system block whose text starts with this banner is
+// treated as Claude Code identity and dropped; arbitrary user text that
+// merely mentions Claude Code or Agent SDK (e.g. "expert on Anthropic
+// Agent SDK") is preserved.
+const claudeIdentityBanner = "You are Claude Code"
+
+// isClaudeIdentityBanner reports whether s is the Claude Code system
+// banner (exact, case-insensitive prefix match).
+func isClaudeIdentityBanner(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(strings.ToLower(s), strings.ToLower(claudeIdentityBanner))
+}
+
+// dropClaudeIdentitySystemBlock removes leading system blocks that carry
+// Claude Code identity, which are not appropriate for the raw Anthropic
+// API. system may be a string (legacy OpenAI shape) or an array of
+// content blocks [{type,text,...}]. Only leading blocks are dropped so
+// legitimate system text after them survives.
+func dropClaudeIdentitySystemBlock(system any) any {
+	switch s := system.(type) {
+	case string:
+		if isClaudeIdentityBanner(s) {
+			return ""
+		}
+		return system
+	case []any:
+		return dropLeadingIdentityBlocks(s)
+	default:
+		return system
+	}
+}
+
+// dropLeadingIdentityBlocks strips identity blocks from the front of a
+// system block array. It stops at the first non-identity block so
+// legitimate system text below survives.
+func dropLeadingIdentityBlocks(blocks []any) []any {
+	start := 0
+	for start < len(blocks) {
+		b, ok := blocks[start].(map[string]any)
+		if !ok {
+			break
+		}
+		if t, _ := b["type"].(string); t != "" && t != "text" {
+			break
+		}
+		text, _ := b["text"].(string)
+		if !isClaudeIdentityBanner(text) {
+			break
+		}
+		start++
+	}
+	if start == 0 {
+		return blocks
+	}
+	if start >= len(blocks) {
+		return []any{}
+	}
+	out := make([]any, 0, len(blocks)-start)
+	out = append(out, blocks[start:]...)
+	return out
+}
+
+// isEmptySystem reports whether a cleaned system value is empty and the
+// "system" key should be deleted entirely.
+func isEmptySystem(system any) bool {
+	switch s := system.(type) {
+	case string:
+		return strings.TrimSpace(s) == ""
+	case []any:
+		return len(s) == 0
+	default:
+		return system == nil
+	}
 }
 
 // DefaultClaudeToolType ensures all tools in a Claude-format request have a type (defaulting to "custom" if missing).
@@ -941,6 +1044,8 @@ func AnchorClaudeCacheWithTTL(body []byte, ttl string) []byte {
 					if cur, ok := m["cache_control"].(map[string]any); !ok || cur["type"] != "ephemeral" || cur["ttl"] != want["ttl"] {
 						m["cache_control"] = want
 					}
+				} else {
+					delete(m, "cache_control")
 				}
 			}
 		}

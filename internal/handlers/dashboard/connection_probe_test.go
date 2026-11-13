@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/db"
+	internalproxy "9router/proxy/internal/proxy"
 	"9router/proxy/internal/proxy/oauth"
 )
 
@@ -629,6 +630,32 @@ func TestTestConnection_NousOAuthUsesMintedAPIKey(t *testing.T) {
 	}
 }
 
+func TestTestConnection_OpencodeQuotaLimit(t *testing.T) {
+	repo, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	connID := "conn-opencode-test"
+	if err := repo.CreateProviderConnectionFull(connID, "opencode", "apikey", "OpenCode Free", nil, `{"defaultModel":"deepseek-v4.1-flash-free"}`); err != nil {
+		t.Fatalf("create connection: %v", err)
+	}
+
+	errMsg := "Free usage limit reached. Free models work in OpenCode"
+	withProbeStub(t, func(call int, p capturedProbe) (int, []byte, error) {
+		return http.StatusTooManyRequests, []byte(`{"error":{"message":"` + errMsg + `","type":"FreeUsageLimitError"}}`), nil
+	})
+
+	status, body := postTestConnection(t, repo, connID)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if body["valid"] != false {
+		t.Errorf("expected valid=false, got %v", body["valid"])
+	}
+	if body["error"] != errMsg {
+		t.Errorf("expected error %q, got %q", errMsg, body["error"])
+	}
+}
+
 func TestProbeHTTPClient_Socks5Proxy(t *testing.T) {
 	h := &DashboardHandler{}
 	data := connectionProbeData{
@@ -646,15 +673,18 @@ func TestProbeHTTPClient_Socks5Proxy(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *http.Transport, got %T", client.Transport)
 	}
-	if tr.Proxy == nil {
-		t.Fatal("expected tr.Proxy to be configured")
+	// Fork: t.Proxy stays nil by design — the uTLS dialer tunnels through
+	// the assigned proxy itself, because net/http would otherwise finish a
+	// proxied handshake with crypto/tls and kill the fingerprint spoof. The
+	// assignment is recorded in the transport registry; ProxyURLFor is the
+	// introspection point, not t.Proxy.
+	if tr.Proxy != nil {
+		t.Fatal("transport installed t.Proxy; the uTLS dialer tunnels manually and must keep it nil")
 	}
-	dummyReq, _ := http.NewRequest("GET", "https://api.openai.com", nil)
-	resolved, err := tr.Proxy(dummyReq)
-	if err != nil {
-		t.Fatalf("tr.Proxy error: %v", err)
+	if tr.DialTLSContext == nil {
+		t.Fatal("transport has no DialTLSContext; the fingerprinted handshake path is missing")
 	}
-	if resolved == nil || resolved.String() != "socks5h://192.168.22.206:1080" {
-		t.Errorf("resolved = %v, want socks5h://192.168.22.206:1080", resolved)
+	if got := internalproxy.ProxyURLFor(client); got != "socks5h://192.168.22.206:1080" {
+		t.Errorf("ProxyURLFor(client) = %q, want socks5h://192.168.22.206:1080 (assigned SOCKS5 proxy)", got)
 	}
 }

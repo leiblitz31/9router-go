@@ -173,6 +173,14 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 	embeddingsURL := buildEmbeddingsURL(providerCfg.BaseURL)
 	finalBody := handlerutil.UpdateModelInBody(body, modelInfo.Model)
 
+	// Google Gemini embeddings forward dimensions as outputDimensionality (upstream #1366).
+	if providers.ResolveAlias(modelInfo.Provider) == "gemini" {
+		finalBody = forwardGeminiEmbeddingDimensions(finalBody)
+	}
+
+	if isGitHubCopilotProvider(modelInfo.Provider) {
+		finalBody = wrapCopilotEmbeddingInput(finalBody)
+	}
 	req, err := http.NewRequestWithContext(r.Context(), "POST", embeddingsURL, strings.NewReader(string(finalBody)))
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("create request: %v", err))
@@ -203,8 +211,17 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// The connection's own client, not h.Client: an assigned proxy pool — a
+	// CONNECT proxy or an edge relay — is the operator's egress choice, and this
+	// lane used to skip it entirely and answer from the host's real IP.
+	client, clientErr := h.ChatH.GetClientForConnection(connData)
+	if clientErr != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, clientErr.Error())
+		return
+	}
+
 	start := time.Now()
-	resp, err := h.Client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("upstream error: %v", err))
 		return
@@ -227,6 +244,113 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 		}
 		h.ChatH.LogUsage(r.Context(), logInfo, nil, latencyMs, body, nil)
 	}
+}
+
+// HandleRerank forwards /v1/rerank requests to upstream providers.
+//
+// Rerank is the same shape as embeddings — a model in, a JSON body out, no
+// streaming — so it follows the embeddings handler's structure exactly: resolve
+// the model, pick a connection, forward with the provider's auth and static
+// headers, and log the usage. The URL is derived from the provider's base the
+// same way buildEmbeddingsURL does, because a rerank lane lives on the same
+// OpenAI-compatible host as the embeddings one.
+func (h *MediaHandler) HandleRerank(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "embedding"))
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	defer func() { _ = r.Body.Close() }()
+	var reqBody struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &reqBody); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if reqBody.Model == "" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing model")
+		return
+	}
+	if !h.ChatH.EnforceModelAccess(w, r, reqBody.Model) {
+		return
+	}
+	modelInfo, err := h.ChatH.ResolveModel(reqBody.Model)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	conn, connData, err := h.ChatH.GetBestConnectionWithContext(r.Context(), modelInfo.Provider, modelInfo.ConnectionID, nil, modelInfo.Model)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	providerCfg, err := h.ChatH.GetProviderConfig(modelInfo.Provider, connData)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	apiKey := chat.ExtractAPIKey(connData)
+	if apiKey == "" {
+		handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no API key found")
+		return
+	}
+	rerankURL := buildRerankURL(providerCfg.BaseURL)
+	finalBody := handlerutil.UpdateModelInBody(body, modelInfo.Model)
+	req, err := http.NewRequestWithContext(r.Context(), "POST", rerankURL, strings.NewReader(string(finalBody)))
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("create request: %v", err))
+		return
+	}
+	req.Header.Set(constants.HeaderContentType, constants.ContentTypeJSON)
+	handlerutil.SetAuthHeader(req, apiKey, providerCfg.AuthHeader, providerCfg.AuthScheme)
+	for k, v := range providerCfg.StaticHeaders {
+		if req.Header.Get(k) == "" {
+			req.Header.Set(k, v)
+		}
+	}
+	// The connection's own client, not h.Client: an assigned proxy pool is the
+	// operator's egress choice, and this lane must not bypass it.
+	client, clientErr := h.ChatH.GetClientForConnection(connData)
+	if clientErr != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, clientErr.Error())
+		return
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("upstream error: %v", err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+	if resp.StatusCode == http.StatusOK {
+		_ = h.Repo.UpdateConnectionLastUsed(conn.ID)
+		latencyMs := time.Since(start).Milliseconds()
+		logInfo := &shared.UsageLogInfo{
+			Provider:     modelInfo.Provider,
+			Model:        modelInfo.Model,
+			ConnectionID: conn.ID,
+			APIKey:       apiKey,
+			Endpoint:     "/v1/rerank",
+		}
+		h.ChatH.LogUsage(r.Context(), logInfo, nil, latencyMs, body, nil)
+	}
+}
+
+// buildRerankURL derives the rerank lane from a provider's base URL. A base
+// that already names a chat or embeddings lane is rewritten to the rerank
+// sibling, so a connection saved with either spelling still resolves.
+func buildRerankURL(baseURL string) string {
+	for _, lane := range []string{"/chat/completions", "/embeddings"} {
+		if strings.Contains(baseURL, lane) {
+			return strings.Replace(baseURL, lane, "/rerank", 1)
+		}
+	}
+	return strings.TrimRight(baseURL, "/") + "/rerank"
 }
 
 // HandleImages handles /v1/images/generations.
@@ -666,6 +790,40 @@ func (h *MediaHandler) HandleVideoGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// defaultWebSearchModel returns "search-combo" if available, then any webSearch combo, then falls back to tavily/search.
+func (h *MediaHandler) defaultWebSearchModel() string {
+	if h.Repo != nil {
+		if combo, err := h.Repo.GetComboByName("search-combo"); err == nil && combo != nil && combo.Models != "" {
+			return "search-combo"
+		}
+		if combos, err := h.Repo.GetCombos(); err == nil {
+			for _, c := range combos {
+				if c != nil && c.Kind != nil && *c.Kind == "webSearch" && c.Models != "" {
+					return c.Name
+				}
+			}
+		}
+	}
+	return "gpt-4o"
+}
+
+// defaultWebFetchModel returns "fetch-combo" if available, then any webFetch combo, then falls back to jina-reader.
+func (h *MediaHandler) defaultWebFetchModel() string {
+	if h.Repo != nil {
+		if combo, err := h.Repo.GetComboByName("fetch-combo"); err == nil && combo != nil && combo.Models != "" {
+			return "fetch-combo"
+		}
+		if combos, err := h.Repo.GetCombos(); err == nil {
+			for _, c := range combos {
+				if c != nil && c.Kind != nil && *c.Kind == "webFetch" && c.Models != "" {
+					return c.Name
+				}
+			}
+		}
+	}
+	return "jina-reader"
+}
+
 // HandleSearch handles /v1/search.
 func (h *MediaHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "webSearch"))
@@ -675,7 +833,7 @@ func (h *MediaHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	h.forwardMediaRequest(w, r, body, "gpt-4o", "/v1/search")
+	h.forwardMediaRequest(w, r, body, h.defaultWebSearchModel(), "/v1/search")
 }
 
 // HandleScrape handles /v1/scrape.
@@ -687,7 +845,7 @@ func (h *MediaHandler) HandleScrape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	h.forwardMediaRequest(w, r, body, "gpt-4o", "/v1/scrape")
+	h.forwardMediaRequest(w, r, body, h.defaultWebFetchModel(), "/v1/scrape")
 }
 
 // HandleWebFetch handles /v1/web/fetch.
@@ -735,7 +893,7 @@ func (h *MediaHandler) HandleWebFetch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	h.forwardMediaRequest(w, r, body, "jina-reader", "/v1/web/fetch")
+	h.forwardMediaRequest(w, r, body, h.defaultWebFetchModel(), "/v1/web/fetch")
 }
 
 // targetPrivate reports whether host names an address the gateway must not
@@ -801,6 +959,12 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				}
 			}
 		}
+	}
+	if (endpoint == "/v1/search" || endpoint == "/v1/scrape") && (model == "search" || model == "default" || model == "web" || model == "webSearch") {
+		model = h.defaultWebSearchModel()
+	}
+	if endpoint == "/v1/web/fetch" && (model == "fetch" || model == "default" || model == "web" || model == "webFetch") {
+		model = h.defaultWebFetchModel()
 	}
 	// Per-API-key access control. This is the single funnel for images, TTS,
 	// STT, video, search, scrape and fetch, so gating here covers all of them
@@ -1034,7 +1198,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				lastStatus = resp.StatusCode
 				continue
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			copyUpstreamHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			io.Copy(w, resp.Body)
@@ -1442,7 +1606,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	io.Copy(w, resp.Body)
 
 	if resp.StatusCode == http.StatusOK && conn != nil {
-		h.Repo.UpdateConnectionLastUsed(conn.ID)
+		_ = h.Repo.UpdateConnectionLastUsed(conn.ID)
 		latencyMs := time.Since(start).Milliseconds()
 		logInfo := &shared.UsageLogInfo{
 			Provider:     modelInfo.Provider,

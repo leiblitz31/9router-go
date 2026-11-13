@@ -6,7 +6,9 @@ import (
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/middleware"
+	"9router/proxy/internal/modelhealth"
 	"9router/proxy/internal/observ"
+	"9router/proxy/internal/resilience"
 	"9router/proxy/internal/semanticcache"
 	"github.com/go-chi/chi/v5"
 )
@@ -24,6 +26,11 @@ type DashboardHandler struct {
 	SecondaryProbeURL string
 	TokenSaver        *shared.TokenSaverConfig
 	SemanticCache     *semanticcache.Cache
+	// Resilience is the provider-level admission control the data plane
+	// consults. Held here so the dashboard reports the same layer a request was
+	// judged against rather than a second estimate that can drift from it. Nil
+	// when the handler was built outside a boot (tests, tooling).
+	Resilience *resilience.Controller
 	// Limiter is the process-wide rate limiter, shared with the data plane so the
 	// dashboard reports the same provider windows the dispatch gate enforces. It
 	// is optional: a handler built outside a boot (tests, tooling) has none, and
@@ -33,6 +40,18 @@ type DashboardHandler struct {
 	// library. Nil means the production importer; a test points it at an
 	// httptest server.
 	jailbreakImport *jailbreakImporter
+	// ModelHealth is the automatic model-health loop. It is optional for the
+	// same reason Limiter is: a handler built outside a boot has none, and the
+	// operator-action recording the disabled-models write performs is skipped
+	// rather than invented. Wiring it matters — without it a model the operator
+	// re-enables stays marked scheduler-owned, so the loop either refuses to
+	// disable it again or silently re-enables it on the next good probe.
+	//
+	// It is read per request rather than snapshotted: the router is built
+	// before the app's OnStart hook starts the scheduler, so a handler that
+	// captured the loop at construction would hold nil in production and
+	// record nothing.
+	ModelHealth *modelhealth.Loop
 }
 
 // NewDashboardHandler initializes a DashboardHandler with the provided Repo.
@@ -82,12 +101,17 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/connections/{id}/test", h.HandleTestConnection)
 		r.Post("/providers/{id}/test", h.HandleTestConnection)
 		r.Get("/providers/{id}/models", h.HandleGetConnectionModels)
+		r.Get("/providers/{id}/export-keys", h.HandleExportProviderKeys)
 		// Bulk removal for the rows the import path writes; the single-row form
 		// stays at DELETE /models/custom/{key}.
 		r.Delete("/providers/{id}/models", h.HandleDeleteProviderModels)
 		r.Get("/providers/{id}/overrides", h.HandleGetProviderOverrides)
 		r.Put("/providers/{id}/overrides", h.HandleSaveProviderOverrides)
 		r.Post("/providers/validate", h.HandleValidateProvider)
+		// The provider registry is the single source of truth for the dashboard's
+		// catalog (category, icon, colour, auth type, service kinds), so the SPA
+		// fetches it instead of shipping a second copy that can drift.
+		r.Get("/providers/catalog", h.HandleGetProviderCatalog)
 
 		// Provider Nodes (Custom Endpoints)
 		r.Get("/provider-nodes", h.HandleGetProviderNodes)
@@ -215,11 +239,19 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Get("/tunnel/status", h.HandleTunnelStatus)
 		r.Post("/tunnel/enable", h.HandleTunnelEnable)
 		r.Post("/tunnel/disable", h.HandleTunnelDisable)
+		// Rewrites the tunnel's ingress rule to point at this gateway's own
+		// origin. Separate from enable: an operator who moved the gateway to a
+		// new port needs the rule fixed without tearing the tunnel down.
+		r.Post("/tunnel/repair-origin", h.HandleTunnelRepairOrigin)
 		r.Get("/tunnel/tailscale-check", h.HandleTailscaleCheck)
 		r.Post("/tunnel/tailscale-enable", h.HandleTailscaleEnable)
 		r.Post("/tunnel/tailscale-disable", h.HandleTailscaleDisable)
 		// Usage & Quotas
 		r.Get("/usage/providers", h.HandleGetUsageProviders)
+		// Usage per client API key. Registered before the {connectionId}
+		// route: chi matches in order, so a route added after it would be
+		// read as a connection id.
+		r.Get("/usage/api-keys", h.HandleGetUsageByAPIKey)
 		r.Get("/usage/{connectionId}", h.HandleGetConnectionUsage)
 		// Codex reset credits. These sit one segment deeper than the
 		// per-connection usage route, so chi matches them without the static
@@ -227,13 +259,17 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Get("/usage/{connectionId}/reset-credits", h.HandleListCodexResetCredits)
 		r.Post("/usage/{connectionId}/reset-credits/consume", h.HandleConsumeCodexResetCredit)
 
+		// GLM Reset Cards (Z.ai international). Only for provider == "glm".
+		r.Get("/usage/{connectionId}/glm-reset-cards", h.HandleGetGLMResetCards)
+		r.Post("/usage/{connectionId}/glm-reset-cards", h.HandleRedeemGLMResetCard)
 
 		// Claude reset credits (cedar_ember grants).
 		r.Get("/usage/{connectionId}/claude-reset-credits", h.HandleListClaudeResetCredits)
 		r.Post("/usage/{connectionId}/claude-reset-credits/consume", h.HandleConsumeClaudeResetCredit)
 
-
 		// Cache Analytics & Management
+		r.Get("/resilience", h.HandleGetResilience)
+		r.Post("/resilience/reset", h.HandleResetResilience)
 		r.Get("/cache", h.HandleGetCache)
 		r.Delete("/cache", h.HandleDeleteCache)
 		r.Get("/cache/entries", h.HandleGetCacheEntries)

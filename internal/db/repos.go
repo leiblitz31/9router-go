@@ -47,6 +47,12 @@ type Repo struct {
 	// recorder, so a handler reads it per request instead of snapshotting a
 	// nil at construction. See audit_recorder.go.
 	auditRecorder atomic.Value // *audit.Recorder
+	// budgetColsOnce/budgetCols cache whether the apiKeys table carries the
+	// F-2 budget columns. The answer is a property of the schema, which does
+	// not change while the process runs, and the probe sits on the dashboard's
+	// boot path — so it runs once, like settingsCache.
+	budgetColsOnce sync.Once
+	budgetCols     bool
 }
 
 // cachedSettings is one parsed settings row and the row content it was

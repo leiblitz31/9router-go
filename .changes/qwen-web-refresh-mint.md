@@ -1,0 +1,5 @@
+### Fix qw-web account token mint (real frontend refresh call)
+
+- The mint called `POST chat.qwen.ai/api/v1/auths/` — wrong host, method, and path — and was refused 405 before the session cookie was ever judged, so every qw-web account token died permanently at its 15-minute expiry. The mint now makes the refresh call the site's own frontend makes, captured live from the operator's browser: `GET auth.qwen.ai/api/v2/auths/refresh` with cookie credentials.
+- The refresh needs the union of two header sets, measured live: the lane's Baxia headers (the browser set verbatim is refused with `Bad_Request: Invalid request header`) plus the capture's `x-request-origin` (the chat set without it is refused with `Bad_Request: Missing origin`).
+- The refresh response rotates the session via Set-Cookie; the rotated cookie is merged into the stored `qwenCookie` and persisted alongside the new token, so the next mint presents live credentials. Mint refusal errors now carry the upstream envelope's code and details.

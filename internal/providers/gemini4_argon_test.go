@@ -52,6 +52,19 @@ func TestGemini4ArgonRegistry(t *testing.T) {
 	}
 }
 
+// TestGemini3KeepsMinimalLevel is the regression guard for the Gemini 3.8
+// floor: the tiered ids answer 400 "Thinking level MINIMAL is not
+// supported" to a thinkingLevel minimal — probed live via the antigravity
+// lane — so LOW is the floor here too, the same rejection Gemini 4 Argon
+// gave. The pre-merge fork test asserted minimal was kept; the probe
+// supersedes it (upstream thinkingLevels.js pattern *gemini-3.8*).
+func TestGemini3KeepsMinimalLevel(t *testing.T) {
+	levels := GetThinkingLevels("gemini", "gemini-3.8-flash")
+	if slices.Contains(levels, "minimal") {
+		t.Errorf("gemini-3.8-flash levels = %v, want minimal excluded (probed 400)", levels)
+	}
+}
+
 // Gemini 4 Argon (2026-10): unified 1M window, tunable thinking low|medium|high
 // (no minimal), paid only, intro pricing $2/$10. Regression coverage for the
 // registry/capabilities/pricing wiring (matching upstream tests/unit/gemini-4-argon.test.js).

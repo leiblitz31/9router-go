@@ -16,12 +16,21 @@ func sanitizeToolArgs(toolName, argsJSON string) string {
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		// If args is a JSON string (e.g. "\"query\""), try to unwrap
-		var s string
-		if err2 := json.Unmarshal([]byte(argsJSON), &s); err2 == nil && s != "" {
-			args = map[string]any{"query": s}
-		} else {
-			return argsJSON
+		if repaired := RepairTruncatedJSON(argsJSON); repaired != argsJSON {
+			if errRep := json.Unmarshal([]byte(repaired), &args); errRep == nil {
+				argsJSON = repaired
+			}
+		}
+	}
+	if args == nil {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			// If args is a JSON string (e.g. "\"query\""), try to unwrap
+			var s string
+			if err2 := json.Unmarshal([]byte(argsJSON), &s); err2 == nil && s != "" {
+				args = map[string]any{"query": s}
+			} else {
+				return argsJSON
+			}
 		}
 	}
 	if args == nil {
@@ -123,7 +132,7 @@ func sanitizeToolArgs(toolName, argsJSON string) string {
 		}
 	}
 
-	sanitized, err := json.Marshal(args)
+	sanitized, err := json.Marshal(args, json.Deterministic(true))
 	if err != nil {
 		return argsJSON
 	}
@@ -400,15 +409,15 @@ func sanitizeBashArgs(args map[string]any) {
 			args["command"] = cmd
 		} else if cl, ok := args["CommandLine"].(string); ok && cl != "" {
 			args["command"] = cl
+		} else if sc, ok := args["script"].(string); ok && sc != "" {
+			args["command"] = sc
 		}
 	}
-	// Strip extra fields that Muse Spark sometimes hallucinates (e.g. description inside input)
-	// Bash tool only allows 'command' (and maybe 'description' at tool level, not inside input)
-	for k := range args {
-		if k != "command" {
-			delete(args, k)
-		}
-	}
+	delete(args, "cmd")
+	delete(args, "CommandLine")
+	delete(args, "script")
+	delete(args, "thought")
+	delete(args, "explanation")
 }
 
 // maxReadLimit caps the read tool "limit" arg; larger values are clamped,

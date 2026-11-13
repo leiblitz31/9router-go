@@ -1,5 +1,5 @@
-github.com/andybalholm/brotli v1.2.0 h1:ukwgCxwYrmACq68yiUqwIWnGY0cTPox/M94sVwToPjQ=
-github.com/andybalholm/brotli v1.2.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
+github.com/andybalholm/brotli v1.2.7 h1:UgafRPGMam5ySHfRkhthMqOFA6IFoeF3D7mWIDLjG5A=
+github.com/andybalholm/brotli v1.2.7/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/aws/aws-sdk-go-v2 v1.47.3 h1:HRoT/MkNi3bjO5xF4dCzLzvVmkvRGHj3/cLINDnJejk=
 github.com/aws/aws-sdk-go-v2 v1.47.3/go.mod h1:xSl+OSI5ZUw6bSMupWc218zE5Pl+65MCCu3ySWFY99A=
 github.com/aws/aws-sdk-go-v2/config v1.33.9 h1:Hv6bcQUJVnmuWaKjqD6Ot8sE75NrWsWV20oGT5aWle0=

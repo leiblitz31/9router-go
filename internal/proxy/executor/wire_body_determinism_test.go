@@ -63,6 +63,122 @@ func TestWireBodiesAreDeterministic(t *testing.T) {
 				}`), "muse-spark-1.3-contributor")
 			},
 		},
+		{
+			// The Codex Responses lane: transformed from Chat Completions with
+			// tools, system instructions, and messages. Must be deterministic
+			// so OpenAI prompt prefix caching hits across conversation turns.
+			name:    "codex responses body from chat completions",
+			wantKey: "input",
+			call: func(t *testing.T) ([]byte, error) {
+				b, _, err := buildResponsesBody([]byte(`{
+					"model": "gpt-6.1-sol",
+					"messages": [
+						{"role": "system", "content": "You are a helpful assistant."},
+						{"role": "user", "content": "Hello"}
+					],
+					"tools": [
+						{"type": "function", "function": {"name": "Read", "description": "read file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}}
+					]
+				}`))
+				if err != nil {
+					return nil, err
+				}
+				b = stripCodexUnsupportedTokenParams(b)
+				b = rewriteCodexUpstreamModel(b)
+				return b, nil
+			},
+		},
+		{
+			// Codex Responses lane from pre-shaped Responses input: must preserve
+			// deterministic prefix across multiple turns.
+			name:    "codex responses body from responses input",
+			wantKey: "input",
+			call: func(t *testing.T) ([]byte, error) {
+				b, _, err := buildResponsesBody([]byte(`{
+					"model": "gpt-5.3-codex",
+					"stream": true,
+					"store": false,
+					"input": [
+						{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "ping"}]}
+					]
+				}`))
+				if err != nil {
+					return nil, err
+				}
+				b = stripCodexUnsupportedTokenParams(b)
+				b = rewriteCodexUpstreamModel(b)
+				return b, nil
+			},
+		},
+		{
+			name:    "openai renameMaxTokensBody",
+			wantKey: "max_completion_tokens",
+			call: func(t *testing.T) ([]byte, error) {
+				return renameMaxTokensBody([]byte(`{
+					"model": "gpt-4o",
+					"messages": [{"role": "user", "content": "hello"}],
+					"max_tokens": 100,
+					"temperature": 0.7,
+					"top_p": 1
+				}`)), nil
+			},
+		},
+		{
+			name:    "claude ensureMessagesFor",
+			wantKey: "messages",
+			call: func(t *testing.T) ([]byte, error) {
+				return ensureMessagesFor([]byte(`{
+					"messages": [
+						{"role": "system", "content": "You are helpful"},
+						{"role": "user", "content": "hi"}
+					],
+					"model": "claude-sonnet-4-5",
+					"max_tokens": 1024,
+					"tools": [
+						{"type": "function", "function": {"name": "test", "description": "desc", "parameters": {"type": "object"}}}
+					],
+					"reasoning_effort": "high"
+				}`), "claude", "claude-sonnet-4-5"), nil
+			},
+		},
+		{
+			name:    "deepseek NormalizeDeepSeekThinkingToolChoice",
+			wantKey: "tool_choice",
+			call: func(t *testing.T) ([]byte, error) {
+				return NormalizeDeepSeekThinkingToolChoice([]byte(`{
+					"model": "deepseek-chat",
+					"messages": [{"role": "user", "content": "hi"}],
+					"tools": [{"type": "function", "function": {"name": "test"}}],
+					"tool_choice": {"type": "function", "function": {"name": "test"}}
+				}`)), nil
+			},
+		},
+		{
+			name:    "nvidia normalizeNvidiaReasoning",
+			wantKey: "reasoning_content",
+			call: func(t *testing.T) ([]byte, error) {
+				return normalizeNvidiaReasoning([]byte(`{
+					"model": "meta/llama-3.1-70b-instruct",
+					"messages": [
+						{"role": "assistant", "reasoning": "thought", "content": "answer"},
+						{"role": "user", "content": "hi"}
+					],
+					"temperature": 0.5,
+					"top_p": 0.9
+				}`)), nil
+			},
+		},
+		{
+			name:    "zed BuildZedCompletionBody",
+			wantKey: "provider_request",
+			call: func(t *testing.T) ([]byte, error) {
+				return BuildZedCompletionBody([]byte(`{
+					"model": "claude-haiku-5-5",
+					"messages": [{"role": "user", "content": "hi"}],
+					"max_tokens": 100
+				}`), ZedWireModel{Provider: "anthropic", Model: "claude-haiku-5-5"}, "thread-1")
+			},
+		},
 	}
 
 	for _, tt := range tests {

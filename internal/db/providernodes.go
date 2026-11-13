@@ -3,8 +3,8 @@ package db
 import (
 	"context"
 	"database/sql"
-	json "encoding/json/v2"
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"fmt"
 	"time"
 

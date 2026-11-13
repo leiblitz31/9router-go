@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -112,7 +113,7 @@ func ForwardCodex(w http.ResponseWriter, req *Request) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData, responsesLite)
+	resp, err := proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData, responsesLite, sessionID)
 	if err != nil {
 		return fmt.Errorf("ForwardCodex: %w", err)
 	}
@@ -154,7 +155,7 @@ func applyCodexCompact(cfg *providers.ProviderConfig, body []byte) (*providers.P
 		return cfg, body
 	}
 	delete(envelope, "_compact")
-	out, err := json.Marshal(envelope)
+	out, err := marshalStable(envelope)
 	if err != nil {
 		return cfg, body
 	}
@@ -176,7 +177,7 @@ func ForwardIflow(w http.ResponseWriter, req *Request) error {
 			reqMap["stream_options"] = map[string]any{"include_usage": true}
 		}
 	}
-	reqBody, err := json.Marshal(reqMap)
+	reqBody, err := marshalStable(reqMap)
 	if err != nil {
 		return fmt.Errorf("marshal iflow body: %w", err)
 	}
@@ -223,7 +224,7 @@ func ForwardKimchi(w http.ResponseWriter, req *Request) error {
 
 	CleanKimchiBody(reqBody)
 
-	cleanedBody, err := json.Marshal(reqBody)
+	cleanedBody, err := marshalStable(reqBody)
 	if err != nil {
 		return fmt.Errorf("marshal cleaned body: %w", err)
 	}
@@ -481,6 +482,15 @@ func toCommandcodeImageBlock(part map[string]any) map[string]any {
 // buildCommandcodeBody transforms OpenAI request payload into CommandCode schema
 // {threadId, memory, config, params} matching upstream openaiToCommandCodeRequest.
 func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
+	return buildCommandcodeBodyForSession(body, model, "")
+}
+
+// buildCommandcodeBodyForSession is buildCommandcodeBody with a
+// conversation-stable threadId derived from commandcodeSessionKey (headers,
+// body session fields, conversation prefix, connection id — in that order),
+// matching upstream toCommandCodeSessionUuid. An empty key yields a random
+// UUID.
+func buildCommandcodeBodyForSession(body []byte, model, sessionID string) ([]byte, error) {
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return body, err
@@ -516,14 +526,14 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 		params["max_tokens"] = commandcodeMaxTokens(p)
 		m["params"] = params
 		if _, hasThread := m["threadId"]; !hasThread {
-			m["threadId"] = uuid.New().String()
+			m["threadId"] = commandcodeSessionUUID(sessionID)
 		}
 		if _, hasMem := m["memory"]; !hasMem {
 			m["memory"] = ""
 		}
 		if _, hasCfg := m["config"]; !hasCfg {
 			m["config"] = map[string]any{
-				"workingDir":    "/",
+				"workingDir":    commandcodeWorkingDir,
 				"date":          time.Now().UTC().Format("2006-01-02"),
 				"environment":   providers.NodePlatform(),
 				"structure":     []any{},
@@ -560,81 +570,8 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 	if tools, ok := m["tools"].([]any); ok && len(tools) > 0 {
 		params["tools"] = commandcodeTools(convertOpenAIToolsToClaude(tools))
 	}
-	// The fork carries tool_choice through (converted to the Anthropic shape
-	// by the switch below) rather than dropping it: a client pinning a tool
-	// would otherwise lose the pin silently, and CommandCode takes the
-	// Anthropic shapes. The raw OpenAI value never survives — the switch
-	// rewrites or deletes it. It is only carried when the request actually
-	// has tools: without tools the key is meaningless, and upstream's
-	// whitelist pins its absence there.
-	if rawTools, ok := m["tools"].([]any); ok && len(rawTools) > 0 {
-		if tc, ok := m["tool_choice"]; ok && tc != nil {
-			params["tool_choice"] = tc
-		}
-	}
 	if effort, ok := m["reasoning_effort"]; ok && effort != nil {
 		params["reasoning_effort"] = effort
-	}
-
-	// Tools: upstream validates Anthropic-shaped definitions ({name, input_schema}).
-	// OpenAI's {"type":"function","function":{…}} is rejected with
-	// 400 "expected string, received undefined at params.tools[0].name".
-	if rawTools, ok := params["tools"].([]any); ok {
-		tools := make([]any, 0, len(rawTools))
-		for _, rt := range rawTools {
-			tm, ok := rt.(map[string]any)
-			if !ok {
-				continue
-			}
-			if fn, ok := tm["function"].(map[string]any); ok {
-				name, _ := fn["name"].(string)
-				if name == "" {
-					continue
-				}
-				out := map[string]any{"name": name}
-				if d, _ := fn["description"].(string); d != "" {
-					out["description"] = d
-				}
-				if p, ok := fn["parameters"]; ok && p != nil {
-					out["input_schema"] = p
-				} else {
-					out["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
-				}
-				tools = append(tools, out)
-				continue
-			}
-			if _, ok := tm["name"].(string); ok { // already Anthropic-shaped / provider tool
-				tools = append(tools, tm)
-			}
-		}
-		if len(tools) == 0 {
-			delete(params, "tools")
-			delete(params, "tool_choice")
-		} else {
-			params["tools"] = tools
-		}
-	}
-
-	// tool_choice: upstream takes Anthropic strings only ("auto"/"any"/{type:"tool",name}).
-	switch tc := params["tool_choice"].(type) {
-	case string:
-		switch tc {
-		case "required":
-			params["tool_choice"] = map[string]any{"type": "any"}
-		case "auto":
-			params["tool_choice"] = map[string]any{"type": "auto"}
-		default: // "none"/unknown
-			delete(params, "tool_choice")
-		}
-	case map[string]any:
-		if fn, ok := tc["function"].(map[string]any); ok {
-			name, _ := fn["name"].(string)
-			if name == "" {
-				delete(params, "tool_choice")
-			} else {
-				params["tool_choice"] = map[string]any{"type": "tool", "name": name}
-			}
-		}
 	}
 
 	// CommandCode messages require content as array of blocks (never raw string)
@@ -647,10 +584,10 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 	}
 
 	payload := map[string]any{
-		"threadId": uuid.New().String(),
+		"threadId": commandcodeSessionUUID(sessionID),
 		"memory":   "",
 		"config": map[string]any{
-			"workingDir":    "/",
+			"workingDir":    commandcodeWorkingDir,
 			"date":          time.Now().UTC().Format("2006-01-02"),
 			"environment":   providers.NodePlatform(),
 			"structure":     []any{},
@@ -663,14 +600,16 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 		"params": params,
 	}
 
-	// json.Marshal is deliberate here: this path mints a fresh threadId on
-	// every request, so the body differs call to call whatever the member
-	// order is. The caller-shaped `params` path above keeps a supplied
-	// threadId and is the one that must stay byte-stable.
+	// json.Marshal is fine here: encoding/json sorts map keys, and threadId
+	// is derived from the client session, so a repeat turn from one session
+	// serialises byte-identically for the prefix cache. The caller-shaped
+	// `params` path above keeps marshalStable for the same reason.
 	return json.Marshal(payload)
 }
 
 // ForwardCommandcode forwards to CommandCode with NDJSON→SSE translation.
+// 502/503/504 (HTTP status or in-stream error before any byte is written)
+// are retried twice with a linear backoff, as upstream's executor does.
 func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 	var oreq struct {
 		Model string `json:"model"`
@@ -679,25 +618,68 @@ func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 		log.Warn("executor", "commandcode unmarshal body", "error", err)
 	}
 
-	reqBody, err := buildCommandcodeBody(req.Body, oreq.Model)
+	body := InjectReasoningContent(req.Body, "commandcode")
+	// commandcodeSessionKey, not req.SessionID alone: the upstream prompt
+	// cache is keyed on the threadId/x-session-id pair, and a client that
+	// carries its session in the body (Claude Code's metadata.user_id) or
+	// sends no session at all must not fall through to a per-request random
+	// id — that re-cached the whole prefix on every request (upstream
+	// decolua/9router#5006 measured 0 cache reads on 4.7B prompt tokens).
+	reqBody, err := buildCommandcodeBodyForSession(body, oreq.Model,
+		commandcodeSessionKey(body, req.SessionID, req.ConnectionID))
 	if err != nil {
 		return fmt.Errorf("marshal commandcode body: %w", err)
 	}
-	// Build request with custom headers (not using proxy.ForwardCommandcode)
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var envelope struct {
+		ThreadID string `json:"threadId"`
+	}
+	_ = json.Unmarshal(reqBody, &envelope)
+	for attempt := 0; ; attempt++ {
+		err = forwardCommandcodeOnce(ctx, w, req, reqBody, envelope.ThreadID, oreq.Model)
+		if attempt >= commandcodeMaxRetries || !isCommandcodeRetryable(err) {
+			return err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func isCommandcodeRetryable(err error) bool {
+	var ue *proxy.UpstreamError
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.StatusCode == http.StatusBadGateway ||
+		ue.StatusCode == http.StatusServiceUnavailable ||
+		ue.StatusCode == http.StatusGatewayTimeout
+}
+
+func forwardCommandcodeOnce(ctx context.Context, w http.ResponseWriter, req *Request, reqBody []byte, threadID, model string) error {
 	r, err := http.NewRequestWithContext(ctx, "POST", req.Config.BaseURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+req.APIKey)
-	r.Header.Set("x-session-id", uuid.New().String())
-	r.Header.Set("x-command-code-version", "0.25.7")
-	r.Header.Set("x-cli-environment", "cli")
-	r.Header.Set("User-Agent", "commandcode/0.25.7 (cli)")
+	// x-session-id mirrors the body's threadId, as the official CLI does.
+	r.Header.Set("x-session-id", threadID)
+	r.Header.Set("x-project-slug", commandcodeProjectSlug)
+	// Defaults mirror the registry StaticHeaders (command-code@1.88.0);
+	// the loop below lets a configured value win.
+	r.Header.Set("User-Agent", "cli")
+	r.Header.Set("x-command-code-version", "1.88.0")
+	r.Header.Set("x-cli-environment", "production")
+	r.Header.Set("x-cli-surface", "cli")
+	r.Header.Set("x-taste-learning", "false")
 	r.Header.Set("Accept", "text/event-stream")
 	if req.Config != nil && req.Config.StaticHeaders != nil {
 		for k, v := range req.Config.StaticHeaders {
@@ -722,7 +704,10 @@ func ForwardCommandcode(w http.ResponseWriter, req *Request) error {
 		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody}
 	}
 
-	return handleCommandcodeStream(w, req, resp.Body, oreq.Model)
+	if !req.IsStream {
+		return handleCommandcodeNonStream(w, req, resp.Body, model)
+	}
+	return handleCommandcodeStream(w, req, resp.Body, model)
 }
 
 // ForwardOpencode handles requests for opencode (free tier).
@@ -769,9 +754,14 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		// response (translator.ConcealFingerprintTools).
 		// #677: the first attempt already sends the full genuine tool profile,
 		// so the gate escalation re-sends the same body with a fresh session.
+		// Upstream fingerprint: the v2 gate expects the CLI <env> marker;
+		// applied before conceal so the gate escalation re-sends it verbatim.
+		transformedBody = translator.ApplyFingerprintSystemPrompt(transformedBody)
 		preConceal := transformedBody
 		firstBody, firstMap := translator.ConcealOpenCodeV2FingerprintTools(preConceal, true, isOpenCodeAutoToolChoiceModel(cleanModel))
 
+		// The lane URL is what the relay forwards to, so it is built the same way
+		// for a relayed connection as for a direct one.
 		cfg := *req.Config
 		isRelay := cfg.StaticHeaders != nil && cfg.StaticHeaders["x-relay-target"] != ""
 		targetURL := ""
@@ -816,7 +806,7 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		}
 
 		if req.IsStream {
-			stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, 0, "opencode-responses")
+			stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, cfg.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), "opencode-responses")
 			defer stallReader.Close()
 			return handleCodexStream(w, req, stallReader)
 		}
@@ -830,6 +820,10 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	// on the lane already emits reasoning_content, so the lift is a no-op
 	// there (upstream quirks.reasoningAliasFields).
 	req.LiftReasoningAliases = true
+	// Upstream fingerprint: the v2 gate expects the CLI <env> marker in the
+	// system prompt; the reqMap pass below re-asserts it via
+	// ensureOpenCodeEnvMarker, so this is a no-op when already complete.
+	body = translator.ApplyFingerprintSystemPrompt(body)
 
 	// Upstream OpenCode free tier strictly requires stream=true.
 	// Non-streaming calls are blocked with 403 FreeTierError.
@@ -921,7 +915,9 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	if req.IsStream {
 		return execSSEStream(w, resp.Body, req)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	data, err := readBodyOnceRetry(ctx, resp, func() (*http.Response, error) {
+		return send(sessionUsed, firstBody)
+	}, 10*1024*1024)
 	if err != nil {
 		return fmt.Errorf("read opencode response: %w", err)
 	}
@@ -933,12 +929,10 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 }
 
 // opencodeInferenceBase rewrites a zen-layout base URL to the v2 inference
-// gate's /inference/v1 prefix. Any host mirroring the zen layout follows the
+// gate's /inference/openai/v1 prefix. Any host mirroring the zen layout follows the
 // same migration, so the rewrite keys off the prefix rather than the host. A
 // base with no zen prefix — a custom endpoint, or the registry default that
-// already points at /inference/v1 — is returned untouched. This stays the
-// zen lane's mapping: only the keyless oc free lane moves to openai/v1
-// (opencodeFreeInferenceBase), never the keyed zen lane.
+// already points at /inference/openai/v1 — is returned untouched.
 func opencodeInferenceBase(base string) string {
 	base = strings.TrimRight(base, "/")
 	base = strings.TrimSuffix(base, "/chat/completions")
@@ -946,7 +940,31 @@ func opencodeInferenceBase(base string) string {
 	base = strings.TrimSuffix(base, "/responses")
 	switch {
 	case strings.HasSuffix(base, "/zen/v1"):
+		return strings.TrimSuffix(base, "/zen/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/openai/v1"):
+		return base
+	case strings.HasSuffix(base, "/inference/v1"):
+		return strings.TrimSuffix(base, "/inference/v1") + "/inference/openai/v1"
+	default:
+		return base
+	}
+}
+
+// opencodeMessagesInferenceBase keeps a zen-layout base URL on the legacy
+// /inference/v1 prefix: the v2 gate's /inference/openai/v1 surface has no
+// /messages route (404), while the legacy prefix still serves Claude
+// Messages. Mirrors opencodeInferenceBase, keyed off the prefix rather than
+// the host.
+func opencodeMessagesInferenceBase(base string) string {
+	base = strings.TrimRight(base, "/")
+	base = strings.TrimSuffix(base, "/chat/completions")
+	base = strings.TrimSuffix(base, "/messages")
+	base = strings.TrimSuffix(base, "/responses")
+	switch {
+	case strings.HasSuffix(base, "/zen/v1"):
 		return strings.TrimSuffix(base, "/zen/v1") + "/inference/v1"
+	case strings.HasSuffix(base, "/inference/openai/v1"):
+		return strings.TrimSuffix(base, "/inference/openai/v1") + "/inference/v1"
 	case strings.HasSuffix(base, "/inference/v1"):
 		return base
 	default:
@@ -1156,8 +1174,15 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 	delete(reqMap, "stream_options")
 	delete(reqMap, "store")
 	delete(reqMap, "reasoning_effort")
+	delete(reqMap, "n")
 
-	updated, err := json.Marshal(reqMap)
+	// MiniMax exposes a Claude-compatible endpoint but rejects Anthropic's extended
+	// output_config parameter with a generic 400 "invalid params" (upstream #820).
+	if provider == "minimax" || provider == "minimax-cn" {
+		delete(reqMap, "output_config")
+	}
+
+	updated, err := marshalStable(reqMap)
 	if err != nil {
 		return body
 	}
@@ -1181,6 +1206,7 @@ func enforceClaudeThinkingSampling(reqMap map[string]any) {
 	if thinking == nil {
 		return
 	}
+
 	tType, _ := thinking["type"].(string)
 	if tType != "enabled" && tType != "adaptive" {
 		return
@@ -1781,9 +1807,13 @@ func opencodeGoInferenceBase(base string) string {
 	base = strings.TrimSuffix(base, "/responses")
 	switch {
 	case strings.HasSuffix(base, "/zen/go/v1"):
-		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/v1"
-	case strings.HasSuffix(base, "/inference/v1"):
+		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/go/openai/v1"):
+		return strings.TrimSuffix(base, "/inference/go/openai/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/openai/v1"):
 		return base
+	case strings.HasSuffix(base, "/inference/v1"):
+		return strings.TrimSuffix(base, "/inference/v1") + "/inference/openai/v1"
 	default:
 		return base
 	}
@@ -1811,6 +1841,7 @@ func stripOpencodeGoResponseFormat(reqMap map[string]any, cleanModel string) {
 func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel string) error {
 	body := InjectReasoningContent(req.Body, "opencode-go")
 	body, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+	body = translator.ApplyFingerprintSystemPrompt(body)
 	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
 	w = NewToolNameRestoringWriter(w, toolNameMap)
 	// Same execute/CALL_TOOL bridge as the free chat lane: streaming only —
@@ -1838,14 +1869,9 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 		}
 	}
 
+	// One lane URL for both egress paths: a relay forwards to whatever this names.
 	cfg := *req.Config
-	if isRelayConfig(&cfg) {
-		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
-		cfg.StaticHeaders["x-relay-path"] = "/inference/v1/chat/completions"
-		cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
-	} else {
-		cfg.BaseURL = opencodeGoInferenceBase(cfg.BaseURL) + "/chat/completions"
-	}
+	cfg.BaseURL = opencodeGoInferenceBase(cfg.BaseURL) + "/chat/completions"
 	baseHeaders := cfg.StaticHeaders
 	hint := opencodeSessionHint(req, true)
 	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, hint, true)
@@ -1981,16 +2007,11 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 			return fmt.Errorf("normalize opencode-go muse-spark body: %w", err)
 		}
 
+		// The lane URL is what a relay forwards to, so it is built without a relay
+		// branch.
 		cfg := *req.Config
-		isRelay := cfg.StaticHeaders != nil && cfg.StaticHeaders["x-relay-target"] != ""
-		if isRelay {
-			headersCopy := make(map[string]string, len(cfg.StaticHeaders))
-			for k, v := range cfg.StaticHeaders {
-				headersCopy[k] = v
-			}
-			headersCopy["x-relay-path"] = "/zen/go/v1/responses"
-			cfg.StaticHeaders = headersCopy
-		} else if !strings.HasSuffix(cfg.BaseURL, "/responses") {
+		cfg.BaseURL = strings.Replace(cfg.BaseURL, "opencode.ai/zen/go/v1", "opencode.ai/inference/go/openai/v1", 1)
+		if !strings.HasSuffix(cfg.BaseURL, "/responses") {
 			baseURL := strings.TrimRight(cfg.BaseURL, "/")
 			if strings.HasSuffix(baseURL, "/chat/completions") {
 				baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
@@ -2033,7 +2054,7 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		}
 
 		if req.IsStream {
-			stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, 0, "opencode-go-responses")
+			stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, cfg.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), "opencode-go-responses")
 			defer stallReader.Close()
 			return handleCodexStream(w, req, stallReader)
 		}

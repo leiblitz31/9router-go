@@ -117,7 +117,7 @@ func rewriteCodexUpstreamModel(body []byte) []byte {
 		return body
 	}
 	m["model"] = upstream
-	out, err := json.Marshal(m)
+	out, err := marshalStable(m)
 	if err != nil {
 		return body
 	}
@@ -144,6 +144,7 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 		MaxTokens           *int   `json:"max_tokens,omitempty"`
 		MaxCompletionTokens *int   `json:"max_completion_tokens,omitempty"`
 		MaxOutputTokens     *int   `json:"max_output_tokens,omitempty"`
+		PromptCacheKey      any    `json:"prompt_cache_key,omitempty"`
 	}
 	if err := json.Unmarshal(body, &quickCheck); err == nil && quickCheck.Input != nil {
 		var m map[string]any
@@ -152,6 +153,9 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 			m["model"] = cleanModel
 			m["stream"] = true
 			m["store"] = false
+			if quickCheck.PromptCacheKey != nil {
+				m["prompt_cache_key"] = quickCheck.PromptCacheKey
+			}
 			if m["max_output_tokens"] == nil {
 				if quickCheck.MaxCompletionTokens != nil {
 					m["max_output_tokens"] = *quickCheck.MaxCompletionTokens
@@ -291,7 +295,8 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 		// executor's rule, not the translator's — the Codex backend rewrites
 		// the field in normalizeCodexServiceTier, while the other Responses
 		// providers take it as sent.
-		ServiceTier jsontext.Value `json:"service_tier,omitempty"`
+		ServiceTier    jsontext.Value `json:"service_tier,omitempty"`
+		PromptCacheKey jsontext.Value `json:"prompt_cache_key,omitempty"`
 	}
 	if err := json.Unmarshal(body, &oreq); err != nil {
 		return nil, "", fmt.Errorf("parse request: %w", err)
@@ -448,10 +453,19 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 		if rEffort == "max" {
 			rEffort = "xhigh"
 		}
-		respReq["reasoning"] = map[string]any{
-			"effort":  rEffort,
+		reasoningMap := map[string]any{
 			"summary": "auto",
+			"effort":  rEffort,
 		}
+		if oreq.Reasoning != nil {
+			if existing, ok := oreq.Reasoning.(map[string]any); ok {
+				for k, v := range existing {
+					reasoningMap[k] = v
+				}
+				reasoningMap["effort"] = rEffort
+			}
+		}
+		respReq["reasoning"] = reasoningMap
 	} else if oreq.Reasoning != nil {
 		respReq["reasoning"] = oreq.Reasoning
 	}
@@ -552,6 +566,12 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 	// truthiness and therefore leaves null in the body.
 	if oreq.ServiceTier.Kind() != jsontext.KindInvalid {
 		respReq["service_tier"] = oreq.ServiceTier
+	}
+	if oreq.PromptCacheKey.Kind() != jsontext.KindInvalid {
+		var pck any
+		if json.Unmarshal(oreq.PromptCacheKey, &pck) == nil && pck != nil {
+			respReq["prompt_cache_key"] = pck
+		}
 	}
 
 	if oreq.ParallelToolCalls != nil {
@@ -876,21 +896,11 @@ func normalizeTopLevelReasoning(reqMap map[string]any) bool {
 // deepSeekV4Pro is the wire id the deepseek -max/-none catalog aliases map to.
 const deepSeekV4Pro = "deepseek-v4-pro"
 
-// deepSeekV4ProAlias is 9router's own catalog alias table, ported from upstream
-// reasoningContentInjector.js DEEPSEEK_V4_PRO_ALIASES. The alias id is not a
-// wire id, so the request is sent as the base model with the thinking toggle in
-// top-level `thinking.type` and the effort in `reasoning_effort` (empty effort =
-// no reasoning_effort key, i.e. thinking disabled). The toggle is a top-level
-// field, not the SDK `extra_body` wrapper: `extra_body` is Python-SDK sugar that
-// never reaches the wire, so only the top-level shape would actually disable
-// thinking on `-none`.
 var deepSeekV4ProAlias = map[string][2]string{
 	"deepseek-v4-pro-max":  {"enabled", "max"},
 	"deepseek-v4-pro-none": {"disabled", ""},
 }
 
-// applyDeepSeekV4ProAlias rewrites reqMap in place when modelLower is one of the
-// deepseek-v4-pro alias ids. It reports whether anything changed.
 func applyDeepSeekV4ProAlias(reqMap map[string]any, modelLower string) bool {
 	alias, ok := deepSeekV4ProAlias[modelLower]
 	if !ok {
@@ -907,8 +917,17 @@ func applyDeepSeekV4ProAlias(reqMap map[string]any, modelLower string) bool {
 	return true
 }
 
+// Closed value set gets a named type (repo AGENTS.md §4.C).
+type reasoningInjectScope int
+
+const (
+	reasoningInjectNone reasoningInjectScope = iota
+	reasoningInjectAll
+	reasoningInjectToolCalls
+)
+
 // InjectReasoningContent ensures assistant messages in request body have reasoning_content
-// injected (e.g. " " placeholder) for providers like opencode, deepseek, or kimi models,
+// injected (e.g. " " placeholder) for providers like opencode, deepseek, commandcode, or kimi models,
 // and strips foreign/unsupported keys (such as "reasoning", "thinking", "thought") that cause
 // upstream schema validation errors (e.g. "Unrecognized request argument supplied: messages[2].reasoning.").
 func InjectReasoningContent(body []byte, provider string) []byte {
@@ -925,11 +944,18 @@ func InjectReasoningContent(body []byte, provider string) []byte {
 	modelStr, _ := reqMap["model"].(string)
 	modelLower := strings.ToLower(modelStr)
 
+	scope := reasoningInjectNone
+	// Provider rule wins over model rules (upstream reasoningContentInjector.js: providerRule || modelRule, PR #5290)
 	isOpenCode := provider == "opencode" || provider == "opencode-go" || provider == "opencode-zen"
-	isDeepSeek := strings.Contains(modelLower, "deepseek") || isOpenCode
-	isKimi := strings.HasPrefix(modelLower, "kimi-")
+	if provider == "commandcode" {
+		scope = reasoningInjectAll
+	} else if strings.Contains(modelLower, "deepseek") || isOpenCode {
+		scope = reasoningInjectAll
+	} else if strings.HasPrefix(modelLower, "kimi-") {
+		scope = reasoningInjectToolCalls
+	}
 
-	if !isDeepSeek && !isKimi {
+	if scope == reasoningInjectNone {
 		return body
 	}
 
@@ -959,7 +985,7 @@ func InjectReasoningContent(body []byte, provider string) []byte {
 				changed = true
 			}
 
-			if isKimi {
+			if scope == reasoningInjectToolCalls {
 				toolCalls, hasTC := msgMap["tool_calls"].([]any)
 				if !hasTC || len(toolCalls) == 0 {
 					msgs[i] = msgMap

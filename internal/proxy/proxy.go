@@ -220,6 +220,27 @@ func replayInsecureTLS(ctx context.Context, proxyURL, method, url string, header
 	return send(InsecureClientFor(proxyURL), retryReq)
 }
 
+// ProxyURLFor reports the proxy a client dials, or "" when it dials directly.
+// It unwraps FallbackTransport (the poolless client's wrapper) before reading
+// the transport registry. Other packages use it where upstream reads
+// t.Proxy: the uTLS transports keep t.Proxy nil by design (the dialer
+// tunnels manually so the fingerprinted handshake survives), so t.Proxy
+// cannot answer what they dial.
+func ProxyURLFor(client *http.Client) string {
+	if client == nil {
+		return ""
+	}
+	rt := client.Transport
+	if fb, ok := rt.(*FallbackTransport); ok {
+		rt = fb.Base
+	}
+	tr, ok := rt.(*http.Transport)
+	if !ok {
+		return ""
+	}
+	return proxyURLForTransport(tr)
+}
+
 // proxyURLFor reports the proxy a client dials, or "" when it dials directly.
 // The egress choice is read from the transport registry for transports built
 // by NewSafeTransport* (see utls_dialer.go); t.Proxy itself stays nil there
@@ -233,13 +254,23 @@ func proxyURLFor(client *http.Client) string {
 	if !ok {
 		return ""
 	}
+	return proxyURLForTransport(tr)
+}
+
+// proxyURLForTransport is the transport-level core of proxyURLFor.
+func proxyURLForTransport(tr *http.Transport) string {
+	if tr == nil {
+		return ""
+	}
 	proxyFor := tr.Proxy
 	if a := lookupTransportProxy(tr); a.kind != proxyKindNone {
 		if a.kind == proxyKindExplicit {
 			return a.url
 		}
-		// kind == proxyKindEnv: resolve exactly like http.ProxyFromEnvironment.
-		proxyFor = http.ProxyFromEnvironment
+		// kind == proxyKindEnv: resolve exactly like http.ProxyFromEnvironment,
+		// through the package indirection so tests can supply an ambient
+		// proxy without depending on the stdlib's once-cached environment.
+		proxyFor = proxyFromEnvironment
 	}
 	if proxyFor == nil {
 		return ""
@@ -363,6 +394,25 @@ func ForbidsDirectReplay(client *http.Client) bool {
 	return forbidsDirectReplay(client)
 }
 
+// transportDialsViaProxy reports whether rt hands plain-http requests to a
+// proxy itself (a Proxy func is set). The uTLS tunnel transports answer false:
+// their proxy is dialed only inside the TLS handshake, so a plain-http target
+// would never reach it.
+func transportDialsViaProxy(rt http.RoundTripper) bool {
+	for {
+		switch t := rt.(type) {
+		case *http.Transport:
+			return t.Proxy != nil
+		case forbidDirectReplayTransport:
+			rt = t.base
+		case *FallbackTransport:
+			rt = t.Base
+		default:
+			return false
+		}
+	}
+}
+
 // DoRequest sends an HTTP POST to url with body and auth, returns the raw response.
 // Caller must close resp.Body.
 //
@@ -374,9 +424,28 @@ func ForbidsDirectReplay(client *http.Client) bool {
 // disabled, for the corporate proxies and antivirus middleboxes that re-sign
 // TLS, unless STRICT_SSL forbids it.
 func DoRequest(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
-	return retryTransientUpstream(ctx, func() (*http.Response, error) {
-		return doRequestOnce(ctx, client, method, url, headers, body)
+	return retryTransientUpstream(ctx, func(c context.Context) (*http.Response, error) {
+		return doRequestOnce(c, client, method, url, headers, body)
 	})
+}
+
+// SendOnce sends one JSON request through client and returns whatever answer
+// arrives, whatever its status. Unlike DoRequest it never replays: no
+// transient-status retry, no direct replay after an apparent proxy failure (a
+// text/plain 403 from the endpoint itself looks like one), and no insecure-TLS
+// retry. It is for requests the router must not repeat on its own initiative,
+// such as a custom JSON business endpoint whose operation may already have
+// run. The caller owns resp.Body and decides which statuses are errors.
+func SendOnce(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
+	req, err := newJSONRequest(ctx, method, url, headers, body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	resp, err := send(client, req)
+	if err != nil {
+		return nil, fmt.Errorf("upstream request: %w", err)
+	}
+	return resp, nil
 }
 
 // doRequestOnce performs a single attempt.
@@ -384,6 +453,15 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 	req, err := newJSONRequest(ctx, method, url, headers, body)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
+	}
+	// The proxied uTLS transports tunnel TLS only (Proxy is nil, the tunnel is
+	// opened in DialTLSContext), so net/http dials a plain-http target itself
+	// and the request leaves from the host's real IP. For a strict connection
+	// that is the one outcome the flag exists to prevent: refuse before the
+	// dial. A transport that does carry a Proxy func handles plain http
+	// itself, so it is left to dial and report the proxy's own refusal.
+	if req.URL.Scheme == "http" && (strictOnly(req.Context()) || forbidsDirectReplay(client)) && !transportDialsViaProxy(client.Transport) {
+		return nil, fmt.Errorf("plain-http target %s cannot travel through the assigned proxy (%w)", req.URL.Host, ErrStrictProxyRequired)
 	}
 
 	resp, err := send(client, req)

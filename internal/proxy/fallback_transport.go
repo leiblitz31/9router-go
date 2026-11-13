@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -69,14 +68,14 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 			directReq.Body, _ = req.GetBody()
 		}
 		directResp, directErr := direct.RoundTrip(directReq)
-		if err != nil && directErr != nil && errors.Is(directErr, ErrSSRFBlocked) {
-			// The direct fallback can never succeed where the target
-			// resolves to a private/reserved address (e.g. a sandbox whose
-			// DNS maps every external host to a sentinel range): the guard
-			// refuses the dial by design. Reporting the SSRF refusal would
-			// bury the primary proxy failure that actually needs attention,
-			// so surface the primary error and note the refused fallback.
-			return nil, fmt.Errorf("FallbackTransport: primary proxy error (direct fallback refused by SSRF protection): %w", err)
+		// When the primary leg failed outright (an error, not a response)
+		// and the direct fallback cannot even dial — the SSRF guard refuses
+		// it — the primary proxy failure is the actionable error. Reporting
+		// the guard verdict instead would bury the real failure (a stalled
+		// or refused proxy) behind it. A 403 response from the primary keeps
+		// the old behavior: the direct error surfaces.
+		if directErr != nil && err != nil && errors.Is(directErr, ErrSSRFBlocked) {
+			return nil, err
 		}
 		return directResp, directErr
 	}

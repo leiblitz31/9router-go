@@ -2,8 +2,8 @@ package providers
 
 import (
 	"net/http"
-	"os"
 	"strings"
+	"time"
 )
 
 // ProviderConfig describes how to reach an upstream provider.
@@ -38,6 +38,14 @@ type ProviderConfig struct {
 	// not strip them.
 	PreserveCacheControl bool
 
+	// HeaderOverrides is the operator's per-provider Custom Headers, kept apart
+	// from StaticHeaders so a forwarder can apply it last. StaticHeaders is
+	// written by both the registry and an executor; an override is the operator
+	// correcting that value, and an executor that rebuilds its own header map
+	// would otherwise drop it. Upstream applies these after buildHeaders for
+	// exactly that reason (open-sse/executors/base.js:132).
+	HeaderOverrides map[string]string
+
 	// UpstreamIsAnthropic marks an entry whose upstream speaks Anthropic Messages while
 	// the client may speak OpenAI, on a host that is not api.anthropic.com. The existing
 	// detection keys off that host, so a gateway like Bedrock needs its own flag for the
@@ -64,6 +72,33 @@ type ProviderConfig struct {
 	// endpoint strictly rejects tool declarations that omit the `type` field
 	// (e.g. MiniMax). When true, DefaultClaudeToolType will inject `type: "custom"`.
 	RequireClaudeToolType bool
+
+	// RelayURL is the edge relay (vercel/cloudflare/deno/netlify) an assigned
+	// proxy pool puts in front of this provider, or "" when the request leaves
+	// directly. It is a hint for the executors, not a rewrite: BaseURL stays the
+	// real provider endpoint and the connection's client moves the dial to the
+	// relay (internal/proxy.RelayTransport). Upstream expresses the same thing as
+	// proxyOptions.vercelRelayUrl.
+	//
+	// An executor reads it only to opt OUT of something the relay cannot carry.
+	// Opencode's stealth TLS client owns the socket, so it stands aside when a
+	// relay fronts the request; everything else needs no provider-specific code,
+	// which is the point.
+	RelayURL string
+
+	// ProxyPoolID is the proxy pool this connection routed through, or "" when
+	// the request leaves directly. It is the gateway's own identity for the
+	// egress, not a request header: the breaker and the semaphore key on
+	// provider+pool so one dead pool opens its own gate instead of taking every
+	// other egress for that provider with it (internal/handlers/chat
+	// resilienceProxyKey).
+	//
+	// It is deliberately NOT written into HeaderOverrides: that map is applied
+	// to the outbound request (internal/proxy/openai.go ApplyHeaderOverrides),
+	// so an internal key there would be sent to every upstream provider.
+	ProxyPoolID string
+	// StallTimeoutMs is the optional per-provider stall timeout in milliseconds.
+	StallTimeoutMs int `json:"stallTimeoutMs,omitempty"`
 }
 
 // Bedrock protocol constants. Region is substituted per request by the executor, so the
@@ -113,7 +148,11 @@ func BedrockModelFamily(providerID, model string) (ok bool, hint string) {
 }
 
 // IsGeminiNative returns true if provider uses Gemini-native format.
-func (p *ProviderConfig) IsGeminiNative() bool { return p.Format == "gemini-native" }
+func (p *ProviderConfig) IsGeminiNative() bool {
+	// Cloud Code Assist speaks the same Gemini envelope with a different
+	// wrapper, so it routes through the same native handler.
+	return p.Format == "gemini-native" || p.Format == "gemini-cli"
+}
 
 // IsGeminiOpenAICompat returns true if provider is Gemini behind an
 // OpenAI-compatible endpoint whose tool schema validation is as strict as the
@@ -178,7 +217,6 @@ var modelsListURL = map[string]string{
 	// SumoPod exposes the standard OpenAI /v1/models catalogue (auth required,
 	// same contract as tokenharbor/dahl).
 	"sumopod": "https://ai.sumopod.com/v1/models",
-	"hcnsec":  "https://api.hcnsec.cn/v1/models",
 	// Command Code publishes its whole Provider API catalogue on the standard
 	// OpenAI /v1/models shape, keyless: every id it sells, the free tiers
 	// included (reflection/beam:free, stealth/glyph-cluster:free,
@@ -226,6 +264,7 @@ var modelsListURL = map[string]string{
 	// is absent, so the shape needs no special case here.
 	"ollama":     "https://ollama.com/api/tags",
 	"openrouter": "https://openrouter.ai/api/v1/models",
+	"hcnsec":     "https://api.hcnsec.cn/v1/models",
 }
 
 // modelsListHeaders carries the extra headers one live-catalogue endpoint
@@ -336,23 +375,41 @@ func MergeHeaderOverrides(headers, overrides map[string]string) map[string]strin
 	return res
 }
 
-// KnownProviders maps provider IDs to their upstream configuration.
-// cloudflareAIBaseURL builds the Workers AI chat-completions route. The
-// account id is per-connection state — every cloudflare-ai connection stores
-// its own in providerSpecificData — so the registry cannot bake one in. A
-// CLOUDFLARE_ACCOUNT_ID env var still wins for single-account deployments;
-// without it the URL keeps an {accountId} placeholder that the chat layer
-// fills from the selected connection (see getProviderConfig). Baking the
-// env var in unconditionally sent every cf/* request to /accounts//ai/v1/...
-// whenever the variable was unset, and Cloudflare answered 7003.
-func cloudflareAIBaseURL() string {
-	account := strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCOUNT_ID"))
-	if account == "" {
-		account = "{accountId}"
+// ApplyHeaderOverrides returns a copy of headers with the operator's overrides
+// applied last, matching an existing name case-insensitively.
+//
+// MergeHeaderOverrides replaces by exact key, which is enough for the generic
+// forward path because both sides spell the header the same way. An executor
+// that assembles its own map is the different case: CodeBuddy writes
+// `X-IDE-Type` while an operator's entry may be `x-ide-type`, and a
+// case-sensitive set would leave both keys in the map, where which one wins
+// depends on map iteration order. Matching the key already present keeps
+// exactly one entry per name, which is what the operator's correction means.
+func ApplyHeaderOverrides(headers, overrides map[string]string) map[string]string {
+	if len(overrides) == 0 {
+		return headers
 	}
-	return "https://api.cloudflare.com/client/v4/accounts/" + account + "/ai/v1/chat/completions"
+	res := make(map[string]string, len(headers)+len(overrides))
+	for k, v := range headers {
+		res[k] = v
+	}
+	for name, value := range overrides {
+		applied := false
+		for existing := range res {
+			if strings.EqualFold(existing, name) {
+				res[existing] = value
+				applied = true
+				break
+			}
+		}
+		if !applied {
+			res[name] = value
+		}
+	}
+	return res
 }
 
+// KnownProviders maps provider IDs to their upstream configuration.
 var KnownProviders = map[string]ProviderConfig{
 	"openai": {
 		BaseURL:    "https://api.openai.com/v1/chat/completions",
@@ -396,6 +453,19 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme:   "bearer",
 		SystemoneURL: "https://v1m.ir/v1/systemone",
 	},
+	// Nace Drex — decision models on the System One protocol, the same lane
+	// shape as v1m: a state plus typed questions (noul / choice / score) in,
+	// calibrated probabilities out. The lane forwards the body and the JSON
+	// reply untouched, so a score answer's `legend` array and every
+	// `confidence` reach the client as Drex returns them. drex-max also reads
+	// a top-level `images` array; the text-only drex-v2.0 answers 422 when it
+	// is non-empty, so nothing rewrites images here (upstream v0.5.112,
+	// f7f6f5e; catalog verified live against console.nace.ai/v1/models).
+	"nace": {
+		AuthHeader:   "Authorization",
+		AuthScheme:   "bearer",
+		SystemoneURL: "https://console.nace.ai/v1/systemone",
+	},
 	"anthropic": {
 		BaseURL:    "https://api.anthropic.com/v1/messages",
 		AuthHeader: "x-api-key",
@@ -434,6 +504,18 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	// Qwen Web: chat.qwen.ai reached in its anonymous guest mode. There is
+	// no credential at all — the site answers a guest carrying only the
+	// synthetic Baxia anti-bot tokens the executor generates (verified live
+	// from this gateway's egress, 2026-11-02) — so the entry is NoAuth like
+	// gemini-web's, with a placeholder key for the plumbing that wants one.
+	"qw-web": {
+		BaseURL:       "https://chat.qwen.ai/api/v2/chat/completions",
+		AuthHeader:    "Authorization",
+		AuthScheme:    "bearer",
+		DefaultAPIKey: "guest",
+		NoAuth:        true,
+	},
 	// Xiaomi MiMo Studio: the signed-in web chat at aistudio.xiaomimimo.com.
 	// A distinct deployment from the `xiaomi-mimo` API above, with its own
 	// credential and quota, so it is never aliased onto it (section 3.A).
@@ -446,6 +528,9 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	// SumoPod — Indonesian AI gateway (ai.sumopod.com), OpenAI-compatible
+	// chat completions with 60+ models across Claude, Gemini, GPT, DeepSeek,
+	// Qwen, GLM, Kimi, MiniMax, Seed, Grok, Hy and Mimo.
 	"hcnsec": {
 		BaseURL:        "https://api.hcnsec.cn/v1/chat/completions",
 		AuthHeader:     "Authorization",
@@ -453,9 +538,6 @@ var KnownProviders = map[string]ProviderConfig{
 		ThinkingFormat: "openai",
 		TTSURL:         "https://api.hcnsec.cn/v1/audio/speech",
 	},
-	// SumoPod — Indonesian AI gateway (ai.sumopod.com), OpenAI-compatible
-	// chat completions with 60+ models across Claude, Gemini, GPT, DeepSeek,
-	// Qwen, GLM, Kimi, MiniMax, Seed, Grok, Hy and Mimo.
 	"sumopod": {
 		BaseURL:    "https://ai.sumopod.com/v1/chat/completions",
 		AuthHeader: "Authorization",
@@ -500,13 +582,13 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 	},
 	"opencode": {
-		BaseURL:       "https://opencode.ai/inference/v1/chat/completions",
+		BaseURL:       "https://opencode.ai/inference/openai/v1/chat/completions",
 		AuthHeader:    "Authorization",
 		AuthScheme:    "bearer",
 		DefaultAPIKey: "public",
 		NoAuth:        true,
 		SystemoneURL:  "https://opencode.ai/zen/v1/systemone",
-		StaticHeaders: map[string]string{"x-opencode-client": "desktop", "User-Agent": "opencode/latest/2.0.32/cli"},
+		StaticHeaders: map[string]string{"x-opencode-client": "cli", "User-Agent": "opencode/latest/2.1.4/cli"},
 	},
 	// Pay-as-you-go lane (upstream open-sse/providers/registry/opencode-zen.js):
 	// a key is required, and the same key answers /chat/completions, /messages
@@ -520,7 +602,7 @@ var KnownProviders = map[string]ProviderConfig{
 		SystemoneURL: "https://opencode.ai/zen/v1/systemone",
 		StaticHeaders: map[string]string{
 			"x-opencode-client": "desktop",
-			"User-Agent":        "opencode/1.18.31",
+			"User-Agent":        "opencode/1.19.4",
 		},
 	},
 	"gemini": {
@@ -556,18 +638,12 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://api.githubcopilot.com/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
-		StaticHeaders: map[string]string{
-			"copilot-integration-id":              "vscode-chat",
-			"editor-version":                      "vscode/1.110.0",
-			"editor-plugin-version":               "copilot-chat/0.38.0",
-			"user-agent":                          "GitHubCopilotChat/0.38.0",
-			"openai-intent":                       "conversation-panel",
-			"x-github-api-version":                "2025-04-01",
-			"x-vscode-user-agent-library-version": "electron-fetch",
-			"X-Initiator":                         "user",
-			"Accept":                              "application/json",
-			"Content-Type":                        "application/json",
-		},
+		// CLI identity, not the VS Code extension identity: Copilot exposes a
+		// wider entitled catalogue to `copilot-developer-cli` than to
+		// `vscode-chat`, so the old headers imported fewer models than the
+		// account owns and advertised ones it is not entitled to. See
+		// GitHubCopilotChatHeaders for why the header set is exactly the CLI's.
+		StaticHeaders: GitHubCopilotChatHeaders("", ""),
 	},
 	"mistral": {
 		BaseURL:    "https://api.mistral.ai/v1/chat/completions",
@@ -622,7 +698,7 @@ var KnownProviders = map[string]ProviderConfig{
 		ImageURL:   "https://token.sensenova.cn/v1/images/generations",
 	},
 	"cloudflare-ai": {
-		BaseURL:        cloudflareAIBaseURL(),
+		BaseURL:        "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
 		AuthHeader:     "Authorization",
 		AuthScheme:     "bearer",
 		ThinkingFormat: "openai",
@@ -736,12 +812,12 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme:     "bearer",
 		ThinkingFormat: "openai",
 		StaticHeaders: map[string]string{
-			// Official @tencent-ai/codebuddy-code 2.179.3 UA (see
-			// executor/codebuddy.go codebuddyCLIVersion).
-			"User-Agent":          "CLI/2.179.3 CodeBuddy/2.179.3",
+			"User-Agent":          "CLI/2.133.1 CodeBuddy/2.133.1",
 			"X-Product":           "SaaS",
 			"X-IDE-Type":          "CLI",
 			"X-IDE-Name":          "CLI",
+			"X-IDE-Version":       "2.133.1",
+			"X-Domain":            "www.codebuddy.cn",
 			"x-requested-with":    "XMLHttpRequest",
 			"x-codebuddy-request": "1",
 		},
@@ -785,6 +861,14 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://api.z.ai/api/coding/paas/v4/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+	},
+	// zcode: ZCode start-plan lane. Auth is the plan JWT stored on each
+	// connection (device-flow login), never a shared key — the same shape as
+	// kimi and muse. Format=claude: the plan endpoint speaks Anthropic Messages,
+	// so the dispatcher converts OpenAI bodies and flags the reply lane.
+	"zcode": {
+		BaseURL: "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages",
+		Format:  FormatClaude,
 	},
 	"kimchi": {
 		BaseURL:    "https://llm.kimchi.dev/openai/v1/chat/completions",
@@ -848,9 +932,13 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 		StaticHeaders: map[string]string{
-			"User-Agent":             "commandcode/0.25.7 (cli)",
-			"x-command-code-version": "0.25.7",
-			"x-cli-environment":      "cli",
+			// Static identity headers of command-code@1.88.0
+			// buildCommandAuthHeaders() (upstream decolua/9router b1effa03).
+			"User-Agent":             "cli",
+			"x-command-code-version": "1.88.0",
+			"x-cli-environment":      "production",
+			"x-cli-surface":          "cli",
+			"x-taste-learning":       "false",
 		},
 	},
 	// Command Code's documented Provider API (commandcode.ai/docs/provider):
@@ -1301,9 +1389,15 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 	},
 	"gemini-cli": {
-		BaseURL:    "https://daily-cloudcode-pa.googleapis.com/v1internal",
+		// Cloud Code Assist speaks the Gemini envelope: the body is
+		// {project, model, request} and the path is :generateContent on the
+		// v1internal root. Without the format marker a request fell through to
+		// ForwardOpenAI and POSTed an OpenAI body at cloudcode-pa, which that
+		// endpoint cannot answer.
+		BaseURL:    "https://cloudcode-pa.googleapis.com/v1internal",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+		Format:     "gemini-cli",
 	},
 	"google-pse": {
 		BaseURL:      "https://www.googleapis.com/customsearch/v1",
@@ -1458,6 +1552,16 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	"atmorouter": {
+		BaseURL:    "https://atmorouter.dev/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
+	"runcrate": {
+		BaseURL:    "https://api.runcrate.ai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 }
 
 // RetryableStatusCodes are HTTP status codes that trigger account fallback.
@@ -1480,6 +1584,19 @@ func PreservesCacheControl(provider string) bool {
 	return false
 }
 
+// StrictReasoningRemoving reports whether a provider rejects unknown
+// assistant-message reasoning fields echoed on history (upstream
+// paramSupport dropMessageFields): groq, mistral, and cerebras answer 400
+// or 422 on reasoning_content/reasoning/reasoning_details replayed by
+// reasoning clients (e.g. Hermes).
+func StrictReasoningRemoving(provider string) bool {
+	switch provider {
+	case "groq", "mistral", "cerebras":
+		return true
+	}
+	return false
+}
+
 // IsLocalByDesign reports whether a provider's official upstream is intended
 // to run locally on loopback (e.g. ollama-local on localhost:11434).
 func IsLocalByDesign(provider string) bool {
@@ -1487,4 +1604,14 @@ func IsLocalByDesign(provider string) bool {
 		return cfg.LocalByDesign
 	}
 	return false
+}
+
+// ResolveStallTimeout returns the stall timeout for this provider config.
+// If c != nil && c.StallTimeoutMs > 0, returns time.Duration(c.StallTimeoutMs) * time.Millisecond.
+// Otherwise returns defaultTimeout.
+func (c *ProviderConfig) ResolveStallTimeout(defaultTimeout time.Duration) time.Duration {
+	if c != nil && c.StallTimeoutMs > 0 {
+		return time.Duration(c.StallTimeoutMs) * time.Millisecond
+	}
+	return defaultTimeout
 }

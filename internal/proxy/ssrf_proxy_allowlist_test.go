@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -215,23 +217,73 @@ func TestAmbientEnvironmentWithoutAProxyExemptsNothing(t *testing.T) {
 	}
 }
 
+// startConnectProxy runs a loopback CONNECT proxy that acknowledges every
+// tunnel and forwards it to target. A made-up name in the CONNECT line is
+// therefore fine: the point under test is that the transport dials the proxy,
+// not that the proxy resolves anything.
+func startConnectProxy(t *testing.T, target string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if line == "\r\n" {
+						break
+					}
+				}
+				up, err := net.Dial("tcp", target)
+				if err != nil {
+					return
+				}
+				defer up.Close()
+				_, _ = c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+				go func() { _, _ = io.Copy(up, br) }()
+				_, _ = io.Copy(c, up)
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
 // TestRequestThroughALoopbackProxyReachesIt is the end-to-end form of the bug:
 // a real listener on 127.0.0.1 acting as the operator's proxy, used by a
 // transport built the way the chat path builds one. Before the exemption every
 // one of these requests died with ErrSSRFBlocked.
+//
+// The target is HTTPS on purpose. The uTLS transport tunnels plain HTTP by
+// dialing the target directly (net/http never consults the dialer's proxy for
+// that path), so an http:// URL would test the direct dialer, not the proxy
+// hop this exemption exists for.
 func TestRequestThroughALoopbackProxyReachesIt(t *testing.T) {
 	var seenPath string
-	fakeProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
-	defer fakeProxy.Close()
+	defer upstream.Close()
 
-	tr := NewSafeTransportWithProxy(fakeProxy.URL, false)
+	proxyAddr := startConnectProxy(t, upstream.Listener.Addr().String())
+
+	tr := NewSafeTransportWithProxy("http://"+proxyAddr, true)
 	client := &http.Client{Transport: tr, Timeout: 10 * time.Second}
 
-	resp, err := client.Get("http://upstream.invalid/v1/models")
+	resp, err := client.Get(upstream.URL + "/v1/models")
 	if err != nil {
 		if errors.Is(err, ErrSSRFBlocked) {
 			t.Fatalf("request through a loopback proxy = %v; the operator's own proxy must not be treated as an SSRF target", err)
@@ -241,10 +293,10 @@ func TestRequestThroughALoopbackProxyReachesIt(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200 from the fake proxy", resp.StatusCode)
+		t.Errorf("status = %d, want 200 from the fake upstream", resp.StatusCode)
 	}
 	if seenPath != "/v1/models" {
-		t.Errorf("proxy saw path %q, want /v1/models", seenPath)
+		t.Errorf("upstream saw path %q, want /v1/models", seenPath)
 	}
 }
 

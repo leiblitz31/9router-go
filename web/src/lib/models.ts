@@ -14,6 +14,7 @@ export interface ProviderModel {
 }
 
 export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
+  "zcode": "zcode",
   "agnes": "agnes",
   "bai": "bai",
   "atria": "atria",
@@ -116,6 +117,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "poolside": "ps",
   "qoder": "qd",
   "qoder-cn": "qdcn",
+  "qw-web": "qw",
   "recraft": "recraft",
   "runwayml": "runway",
   "sambanova": "samba",
@@ -143,6 +145,8 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "xiaomi-mimo": "mimo",
   "xiaomi-tokenplan": "xmtp",
   "zed": "zd",
+  "atmorouter": "atmo",
+  "runcrate": "rc",
 };
 
 const FREEBUFF_MODELS: ProviderModel[] = [
@@ -1000,9 +1004,7 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "@cf/black-forest-labs/flux-1-schnell",
       "name": "FLUX.1 Schnell",
-      "params": [
-        "size"
-      ],
+      "params": [],
       "kind": "image"
     },
     {
@@ -2805,6 +2807,36 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Gemini 4 Argon"
     }
   ],
+  "qw-web": [
+    {
+      "id": "qwen3.7-plus",
+      "name": "Qwen3.7 Plus"
+    },
+    {
+      "id": "qwen3.8-max",
+      "name": "Qwen3.8 Max"
+    },
+    {
+      "id": "qwen3.8-omni-flash",
+      "name": "Qwen3.8 Omni Flash"
+    },
+    {
+      "id": "qwen3.7-max",
+      "name": "Qwen3.7 Max"
+    },
+    {
+      "id": "qwen3.6-plus",
+      "name": "Qwen3.6 Plus"
+    },
+    {
+      "id": "qwen3.5-plus",
+      "name": "Qwen3.5 Plus"
+    },
+    {
+      "id": "qwen3.5-omni-plus",
+      "name": "Qwen3.5 Omni Plus"
+    }
+  ],
   "gh": [
     {
       "id": "gpt-5-mini",
@@ -2969,6 +3001,16 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "glm-4.5-air",
       "name": "GLM-4.5-Air"
+    }
+  ],
+  "zcode": [
+    {
+      "id": "glm-5.3",
+      "name": "GLM 5.3"
+    },
+    {
+      "id": "glm-5.3-flash",
+      "name": "GLM 5.3 Flash"
     }
   ],
   "glm": [
@@ -6550,6 +6592,24 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     }
   ],
   "zd": [],
+  "atmo": [
+    { "id": "cc/claude-sonnet-4-6", "name": "Claude Sonnet 4.6" },
+    { "id": "cc/claude-opus-4-7", "name": "Claude Opus 4.7" },
+    { "id": "cx/gpt-5.6-sol", "name": "GPT-5.6 Sol" },
+    { "id": "cb/gemini-3.1-pro", "name": "Gemini 3.1 Pro" },
+    { "id": "cbcn/glm-5.3", "name": "GLM 5.3" },
+    { "id": "ali/kimi-k2.7-code", "name": "Kimi K2.7 Code" },
+    { "id": "ali/qwen3.8-max", "name": "Qwen 3.8 Max" },
+    { "id": "ali/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash" }
+  ],
+  "rc": [
+    { "id": "deepseek-ai/DeepSeek-V4.1-Flash", "name": "DeepSeek V4.1 Flash" },
+    { "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "name": "DeepSeek V4.1 Flash 1017" },
+    { "id": "zai-org/GLM-5.3", "name": "GLM 5.3" },
+    { "id": "zai-org/GLM-5.3-Flash", "name": "GLM 5.3 Flash" },
+    { "id": "Qwen/Qwen3.8-Flash", "name": "Qwen3.8 Flash" },
+    { "id": "openai/gpt-oss-120b", "name": "gpt-oss 120B" }
+  ],
   "af": [
     {
       "id": "gpt-oss-120b",

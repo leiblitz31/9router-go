@@ -198,3 +198,124 @@ func TestFilterToOpenAIFormatJSONKeepsCacheControlForTheQuirkProvider(t *testing
 		t.Errorf("cache_control was stripped for a provider that keeps it: %s", out)
 	}
 }
+
+// TestWrapForAntigravityIsDeterministic verifies that WrapForAntigravity produces
+// identical bytes across multiple runs even with tool declarations and safety settings.
+func TestWrapForAntigravityIsDeterministic(t *testing.T) {
+	geminiBody := []byte(`{
+		"contents": [{"role":"user","parts":[{"text":"hello"}]}],
+		"tools": [{
+			"functionDeclarations": [{
+				"name": "search_code",
+				"description": "search codebase",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"query": {"type": "string"},
+						"limit": {"type": "integer"}
+					},
+					"required": ["query"]
+				}
+			}]
+		}]
+	}`)
+	first, err := WrapForAntigravity(geminiBody, "proj-1", "gemini-2.5-pro")
+	if err != nil {
+		t.Fatalf("WrapForAntigravity: %v", err)
+	}
+	var firstEnvelope AntigravityRequest
+	if err := json.Unmarshal(first, &firstEnvelope); err != nil {
+		t.Fatalf("unmarshal first: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		got, err := WrapForAntigravity(geminiBody, "proj-1", "gemini-2.5-pro")
+		if err != nil {
+			t.Fatalf("WrapForAntigravity: %v", err)
+		}
+		var gotEnvelope AntigravityRequest
+		if err := json.Unmarshal(got, &gotEnvelope); err != nil {
+			t.Fatalf("unmarshal got %d: %v", i, err)
+		}
+		if !bytes.Equal(gotEnvelope.Request, firstEnvelope.Request) {
+			t.Fatalf("WrapForAntigravity inner request not deterministic:\nfirst: %s\ngot:   %s", firstEnvelope.Request, gotEnvelope.Request)
+		}
+	}
+}
+
+// TestInjectOpenCodeEnvMarkerIsDeterministic verifies that InjectOpenCodeEnvMarker
+// produces byte-identical results across multiple runs.
+func TestInjectOpenCodeEnvMarkerIsDeterministic(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek-v4.1",
+		"messages": [{"role":"user","content":"hello"}],
+		"max_tokens": 100,
+		"temperature": 0.7
+	}`)
+	first := ApplyFingerprintSystemPrompt(body)
+	for i := 0; i < 50; i++ {
+		got := ApplyFingerprintSystemPrompt(body)
+		if !bytes.Equal(got, first) {
+			t.Fatalf("ApplyFingerprintSystemPrompt output not deterministic:\nfirst: %s\ngot:   %s", first, got)
+		}
+	}
+}
+
+// TestResponsesToChatRequestIsDeterministic verifies that ResponsesToChatRequest
+// produces byte-identical request bodies across runs.
+func TestResponsesToChatRequestIsDeterministic(t *testing.T) {
+	respBody := []byte(`{
+		"model": "gpt-4o",
+		"input": [{"type":"message","role":"user","content":"hello"}],
+		"tools": [{"type":"function","name":"read","description":"read a file","parameters":{"type":"object"}}],
+		"temperature": 0.5
+	}`)
+	first, err := ResponsesToChatRequest(respBody)
+	if err != nil {
+		t.Fatalf("ResponsesToChatRequest: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		got, err := ResponsesToChatRequest(respBody)
+		if err != nil {
+			t.Fatalf("ResponsesToChatRequest: %v", err)
+		}
+		if !bytes.Equal(got.Body, first.Body) {
+			t.Fatalf("ResponsesToChatRequest Body not deterministic:\nfirst: %s\ngot:   %s", first.Body, got.Body)
+		}
+	}
+}
+
+// TestSanitizeOpenAIToolsIsDeterministic verifies that SanitizeOpenAITools
+// produces byte-identical results across runs.
+func TestSanitizeOpenAIToolsIsDeterministic(t *testing.T) {
+	body := []byte(`{
+		"model": "gemini-2.5-flash",
+		"messages": [{"role":"user","content":"hi"}],
+		"tools": [{
+			"type": "function",
+			"function": {
+				"name": "edit",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"path": {"type": "string"},
+						"content": {"type": "string"}
+					},
+					"additionalProperties": false
+				}
+			}
+		}]
+	}`)
+	first, err := SanitizeOpenAITools(body)
+	if err != nil {
+		t.Fatalf("SanitizeOpenAITools: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		got, err := SanitizeOpenAITools(body)
+		if err != nil {
+			t.Fatalf("SanitizeOpenAITools: %v", err)
+		}
+		if !bytes.Equal(got, first) {
+			t.Fatalf("SanitizeOpenAITools output not deterministic:\nfirst: %s\ngot:   %s", first, got)
+		}
+	}
+}

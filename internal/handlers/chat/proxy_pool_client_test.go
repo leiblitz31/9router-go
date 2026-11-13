@@ -3,6 +3,8 @@ package chat
 import (
 	"net/http"
 	"testing"
+
+	internalproxy "9router/proxy/internal/proxy"
 )
 
 func TestGetClientForConnection_PoolsAndReusesClient(t *testing.T) {
@@ -94,16 +96,20 @@ func TestGetClientForConnection_Socks5ProxyPool(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected *http.Transport, got %T", client.Transport)
 			}
-			if tr.Proxy == nil {
-				t.Fatal("expected tr.Proxy to be set for SOCKS5 proxy")
+			// Fork: t.Proxy stays nil by design — the uTLS dialer tunnels
+			// through the assigned proxy itself, because net/http would
+			// otherwise finish a proxied handshake with crypto/tls and kill
+			// the fingerprint spoof. The assignment is recorded in the
+			// transport registry; ProxyURLFor is the introspection point,
+			// not t.Proxy.
+			if tr.Proxy != nil {
+				t.Fatal("transport installed t.Proxy; the uTLS dialer tunnels manually and must keep it nil")
 			}
-			dummyReq, _ := http.NewRequest("GET", "https://api.openai.com", nil)
-			resolvedProxy, err := tr.Proxy(dummyReq)
-			if err != nil {
-				t.Fatalf("tr.Proxy returned error: %v", err)
+			if tr.DialTLSContext == nil {
+				t.Fatal("transport has no DialTLSContext; the fingerprinted handshake path is missing")
 			}
-			if resolvedProxy == nil || resolvedProxy.String() != tt.proxyURL {
-				t.Errorf("tr.Proxy = %v, want %s", resolvedProxy, tt.proxyURL)
+			if got := internalproxy.ProxyURLFor(client); got != tt.proxyURL {
+				t.Errorf("ProxyURLFor(client) = %q, want %s (assigned SOCKS5 proxy)", got, tt.proxyURL)
 			}
 		})
 	}

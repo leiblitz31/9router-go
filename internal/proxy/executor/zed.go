@@ -153,7 +153,7 @@ func BuildZedCompletionBody(openAIRequest []byte, wire ZedWireModel, threadID st
 	if threadID = strings.TrimSpace(threadID); threadID != "" {
 		envelope["thread_id"] = threadID
 	}
-	payload, merr := json.Marshal(envelope)
+	payload, merr := marshalStable(envelope)
 	if merr != nil {
 		return nil, fmt.Errorf("zed: marshal completion envelope: %w", merr)
 	}
@@ -752,7 +752,7 @@ func ForwardZed(w http.ResponseWriter, req *Request) error {
 			}
 			streamBody = io.NopCloser(bytes.NewReader(data))
 		}
-		stall := proxy.NewStallReaderWithContext(req.Ctx, streamBody, 0, "zed")
+		stall := proxy.NewStallReaderWithContext(req.Ctx, streamBody, req.Config.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), "zed")
 		bodyCloser = stall
 		return zedPipeStream(w, req, wire, stall)
 	}

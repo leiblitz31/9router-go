@@ -7,11 +7,6 @@ import (
 	"strings"
 )
 
-// StatusReauthRequired is the testStatus stamped on a connection whose OAuth
-// grant is dead: only a re-login fixes it, so the dashboard must say so
-// instead of reporting a generic failure.
-const StatusReauthRequired = "reauth_required"
-
 // OAuthRefreshError carries the HTTP status a token endpoint rejected a
 // refresh with. Without it a revoked grant is indistinguishable from a token
 // endpoint blip once the status is flattened into a message, and the router

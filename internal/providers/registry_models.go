@@ -87,6 +87,12 @@ var ProviderModels = map[string][]string{
 	// API-key `deepseek` row above: a request naming one of them must reach the
 	// browser-login provider, never the API-key one.
 	"deepseek-web": {"deepseek-v4-pro", "deepseek-v4-pro-think", "deepseek-v4-pro-search", "deepseek-v4-pro-think-search", "deepseek-v4-flash", "deepseek-v4-flash-think", "deepseek-v4-flash-search", "deepseek-v4-flash-think-search", "deepseek-chat", "deepseek-reasoner", "DeepSeek-R1", "DeepSeek-R1-Search", "DeepSeek-V3.2", "DeepSeek-Search"},
+	// qw-web lists exactly what chat.qwen.ai's own model picker offers a
+	// Free account (verified live 2026-11-02); qwen3.7-plus is the picker's
+	// default. These ids belong to the web surface only and are not merged
+	// into any API provider's row.
+	"qw-web": {"qwen3.7-plus", "qwen3.8-max", "qwen3.8-omni-flash", "qwen3.7-max", "qwen3.6-plus", "qwen3.5-plus", "qwen3.5-omni-plus"},
+	"qw":     {"qwen3.7-plus", "qwen3.8-max", "qwen3.8-omni-flash", "qwen3.7-max", "qwen3.6-plus", "qwen3.5-plus", "qwen3.5-omni-plus"},
 	"hcnsec": {
 		"auto",
 		"DeepSeek-V4-Flash",
@@ -262,6 +268,7 @@ var ProviderModels = map[string][]string{
 	"vertex-partner":       {"deepseek-ai/deepseek-v3.2-maas", "qwen/qwen3-next-80b-a3b-thinking-maas", "qwen/qwen3-next-80b-a3b-instruct-maas", "zai-org/glm-5-maas"},
 	"volcengine-ark":       {"Doubao-Seed-2.0-Code", "Doubao-Seed-2.0-pro", "Doubao-Seed-2.0-lite", "Doubao-Seed-Code", "DeepSeek-V4-Flash", "DeepSeek-V4-Pro", "GLM-5.1", "MiniMax-M2.7", "Kimi-K2.6"},
 	"v1m":                  {"rev-latest", "v1m-decision-engine"},
+	"nace":                 {"drex-max", "drex-v2.0"},
 	"voyage":               {"voyage-3-large", "voyage-3.5", "voyage-3.5-lite", "voyage-code-3", "voyage-finance-2", "voyage-law-2", "voyage-multilingual-2"},
 	"voyage-ai":            {"voyage-3-large", "voyage-3.5", "voyage-3.5-lite", "voyage-code-3", "voyage-finance-2", "voyage-law-2", "voyage-multilingual-2"},
 	"vx":                   {"gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "veo-3.1-generate-preview", "veo-3.1-fast-generate-preview", "veo-3.0-generate-001", "veo-2.0-generate-001"},
@@ -270,6 +277,9 @@ var ProviderModels = map[string][]string{
 	"xiaomi-mimo":          {"mimo-x-pro-preview", "mimo-x-flash-preview", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-omni", "mimo-v2-flash", "mimo-v2.5-tts"},
 	"xiaomi-tokenplan":     {"mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.5-asr", "mimo-v2.5-tts", "mimo-v2.5-tts-voiceclone", "mimo-v2.5-tts-voicedesign"},
 	"xmtp":                 {"mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.5-asr", "mimo-v2.5-tts", "mimo-v2.5-tts-voiceclone", "mimo-v2.5-tts-voicedesign"},
+	"zcode":                {"glm-5.3", "glm-5.3-flash"},
+	"atmorouter":           {"cc/claude-sonnet-4-6", "cc/claude-opus-4-7", "cx/gpt-5.6-sol", "cb/gemini-3.1-pro", "cbcn/glm-5.3", "ali/kimi-k2.7-code", "ali/qwen3.8-max", "ali/deepseek-v4.1-flash"},
+	"runcrate":             {"deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "zai-org/GLM-5.3", "zai-org/GLM-5.3-Flash", "Qwen/Qwen3.8-Flash", "openai/gpt-oss-120b"},
 }
 
 // ProviderModelKinds maps provider alias/ID → model id → service kind for the
@@ -587,7 +597,8 @@ var ProviderModelKinds = map[string]map[string]string{
 		"speech-2.8-turbo": "tts",
 	},
 	"mistral": {
-		"mistral-embed": "embedding",
+		"mistral-embed":             "embedding",
+		"mistral-moderation-latest": "moderation",
 	},
 	"nanobanana": {
 		"nanobanana-flash": "image",
@@ -717,6 +728,10 @@ var ProviderModelKinds = map[string]map[string]string{
 	"v1m": {
 		"rev-latest":          "systemone",
 		"v1m-decision-engine": "systemone",
+	},
+	"nace": {
+		"drex-max":  "systemone",
+		"drex-v2.0": "systemone",
 	},
 	"vertex": {
 		"veo-2.0-generate-001":          "video",

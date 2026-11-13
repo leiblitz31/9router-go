@@ -76,11 +76,16 @@
   // label — the field holds a token and calling it a cookie would send the
   // operator to the wrong place in DevTools.
   let isDeepSeekWeb = $derived(providerId === 'deepseek-web')
+  // Qwen's credential is a session token (a JWT out of localStorage), not a
+  // cookie either — same reasoning as DeepSeek's label above.
+  let isQwenWeb = $derived(providerId === 'qw-web')
   let credentialLabel = $derived(
     isMistral && formMistralUsageType === 'vibe'
       ? 'Vibe API Key'
       : isDeepSeekWeb
         ? 'User Token'
+        : isQwenWeb
+          ? 'Session Token'
         : isCookie
           ? 'Cookie Value'
           : providerId === 'qoder'
@@ -92,19 +97,21 @@
       ? 'API Key from chat.mistral.ai/code/extensions'
       : isDeepSeekWeb
         ? 'the userToken from chat.deepseek.com localStorage'
-      : isCookie
-        ? providerId === 'grok-web'
-          ? 'sso=xxxxx... or just the raw value'
-          : providerId === 'gemini-web'
-            ? '__Secure-1PSID=...; __Secure-1PSIDTS=...'
-            : 'eyJhbGciOi...'
-        : isXaiApiKey
-          ? 'xai-...'
-          : providerId === 'qoder'
-            ? 'pt-...'
-            : usesAwsCredentialForm
-              ? 'AWS secret access key'
-              : ''
+        : isQwenWeb
+          ? 'the token from chat.qwen.ai localStorage'
+          : isCookie
+            ? providerId === 'grok-web'
+              ? 'sso=xxxxx... or just the raw value'
+              : providerId === 'gemini-web'
+                ? '__Secure-1PSID=...; __Secure-1PSIDTS=...'
+                : 'eyJhbGciOi...'
+            : isXaiApiKey
+              ? 'xai-...'
+              : providerId === 'qoder'
+                ? 'pt-...'
+                : usesAwsCredentialForm
+                  ? 'AWS secret access key'
+                  : ''
   )
   let modalTitle = $derived(`Add ${providerName || providerId} ${credentialLabel}`)
 
@@ -147,6 +154,8 @@
   let chromeImportNote = $state('')
   /** The site's own session cookie, for the providers whose WAF reads one. */
   let formDeepSeekCookie = $state('')
+  /** Qwen's session cookie: its `token` cookie is the root the router mints fresh JWTs from. */
+  let formQwenCookie = $state('')
 
   // Bulk state
   let bulkText = $state('')
@@ -189,6 +198,7 @@
     cloudflareAccountId = ''
     region = catalogItem?.defaultRegion || catalogItem?.regions?.[0]?.id || ''
     awsData = { accessKeyId: '', sessionToken: '', profile: '', region: region }
+    formQwenCookie = ''
     validating = false
     validation = null
     validationNote = ''
@@ -232,6 +242,12 @@
       // The site's own session cookie. It is a credential: the WAF reads it,
       // and the server seals it with the rest.
       return { deepSeekCookie: formDeepSeekCookie.trim() }
+    }
+    if (providerId === 'qw-web' && formQwenCookie.trim()) {
+      // The site's own session cookie. It is a credential: its `token`
+      // cookie is what the router mints fresh JWTs from when the pasted
+      // one expires, and the server seals it with the rest.
+      return { qwenCookie: formQwenCookie.trim() }
     }
     return undefined
   }
@@ -891,6 +907,26 @@
                 <p class="text-xs text-text-muted mt-1">
                   The WAF reads this cookie, so a request without it is a request the site does not
                   recognise. It is sealed with the rest of the credential.
+                </p>
+              </div>
+            {/if}
+
+            {#if providerId === 'qw-web'}
+              <div>
+                <label for="connQwenCookie" class={labelCls}>
+                  Session cookie <span class="text-text-muted text-xs font-normal">(optional — the site's own)</span>
+                </label>
+                <input
+                  id="connQwenCookie"
+                  type="text"
+                  bind:value={formQwenCookie}
+                  placeholder="token=…; cna=…"
+                  class="{inputCls} font-mono"
+                />
+                <p class="text-xs text-text-muted mt-1">
+                  The cookie's <span class="font-mono">token</span> cookie is the root of the session:
+                  with it stored, the router can mint a fresh token when the pasted one expires instead
+                  of the connection going dead. It is sealed with the rest of the credential.
                 </p>
               </div>
             {/if}

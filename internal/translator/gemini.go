@@ -338,6 +338,7 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 				if ts == "" {
 					ts = GetGeminiThoughtSignature(tc.ID, sessionID, oreq.Model)
 				}
+				ts = NormalizeGeminiThoughtSignature(ts)
 				if ts == "" && !firstFunctionCallSeen {
 					ts = DefaultThinkingSignature
 				}
@@ -430,7 +431,27 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 	req.Contents = NormalizeGeminiContents(req.Contents, oreq.Model)
 
 	// Tools
-	if len(oreq.Tools) > 0 {
+	// tool_choice maps to Gemini toolConfig mode:
+	//   "none"   -> NONE  (don't call any tool; don't send tool declarations)
+	//   "required" -> ANY (force at least one tool call)
+	//   "auto"/unset -> VALIDATED (default)
+	toolConfigMode := "VALIDATED"
+	toolChoiceStr := ""
+	if len(oreq.ToolChoice) > 0 {
+		var s string
+		if json.Unmarshal(oreq.ToolChoice, &s) == nil {
+			toolChoiceStr = s
+		}
+	}
+	if toolChoiceStr != "" {
+		switch toolChoiceStr {
+		case "none":
+			toolConfigMode = "NONE"
+		case "required":
+			toolConfigMode = "ANY"
+		}
+	}
+	if toolChoiceStr != "none" && len(oreq.Tools) > 0 {
 		var openaiTools []OpenAITool
 		if err := json.Unmarshal(oreq.Tools, &openaiTools); err != nil {
 			return nil, fmt.Errorf("parse tools: %w", err)
@@ -449,9 +470,18 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 			req.Tools = []GeminiTool{{FunctionDeclarations: decls}}
 			req.ToolConfig = map[string]any{
 				"functionCallingConfig": map[string]any{
-					"mode": "VALIDATED",
+					"mode": toolConfigMode,
 				},
 			}
+		}
+	}
+	if toolChoiceStr == "none" && req.ToolConfig == nil {
+		// No tool declarations but tool_choice: none — still tell Gemini not to
+		// invoke any built-in capability.
+		req.ToolConfig = map[string]any{
+			"functionCallingConfig": map[string]any{
+				"mode": "NONE",
+			},
 		}
 	}
 
@@ -583,7 +613,7 @@ func moveFunctionResponsesLast(parts []GeminiPart) []GeminiPart {
 func extractThoughtSig(id string) string {
 	const sep = "__ts__"
 	if _, after, ok := strings.CutLast(id, sep); ok && after != "" {
-		return after
+		return NormalizeGeminiThoughtSignature(after)
 	}
 	return ""
 }
@@ -1040,9 +1070,14 @@ func convertContentToGeminiParts(content any) []GeminiPart {
 								mimeType := url[5:semi]
 								if comma := strings.Index(url, ","); comma > 0 {
 									data := url[comma+1:]
-									parts = append(parts, GeminiPart{
-										InlineData: &GeminiInlineData{MimeType: mimeType, Data: data},
-									})
+									// Claude under Antigravity rejects images >5MB base64
+									// (OMP max-image-payload-bytes 5242880 in google-antigravity.kdl).
+									// Dropping over-budget frames keeps the turn alive.
+									if len(data) <= 5242880 {
+										parts = append(parts, GeminiPart{
+											InlineData: &GeminiInlineData{MimeType: mimeType, Data: data},
+										})
+									}
 								}
 							}
 						} else if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {

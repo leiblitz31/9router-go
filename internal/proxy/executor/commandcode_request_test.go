@@ -2,8 +2,15 @@ package executor
 
 import (
 	json "encoding/json/v2"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"9router/proxy/internal/providers"
 )
 
 // commandcodeParamsForTest runs buildCommandcodeBody and returns payload["params"]
@@ -299,5 +306,422 @@ func TestBuildCommandcodeBody_WhitelistsAPreWrappedParams(t *testing.T) {
 func TestBuildCommandcodeBody_RejectsAPreWrappedParamsThatIsNotAnObject(t *testing.T) {
 	if _, err := buildCommandcodeBody([]byte(`{"model":"m","params":"nope"}`), "m"); err == nil {
 		t.Fatal("a non-object params must be refused")
+	}
+}
+
+// TestCommandcodeMaxTokensResolution pins which client field supplies the
+// output budget. max_completion_tokens is the last source, not the first: a
+// body that still carries max_tokens or max_output_tokens keeps the value it
+// carried before this branch existed.
+func TestCommandcodeMaxTokensResolution(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want any
+	}{
+		{
+			name: "max_tokens wins over max_completion_tokens",
+			body: `{"max_tokens":4096,"max_completion_tokens":2048}`,
+			want: 4096.0,
+		},
+		{
+			name: "max_output_tokens wins over max_completion_tokens",
+			body: `{"max_output_tokens":2048,"max_completion_tokens":4096}`,
+			want: 2048.0,
+		},
+		{
+			name: "max_tokens alone",
+			body: `{"max_tokens":4096}`,
+			want: 4096.0,
+		},
+		{
+			// The shape normalizeChatTokenFields leaves behind for a client
+			// that sent both: max_tokens is gone, so this is the only field
+			// left that names the budget. Reading it is what keeps the
+			// client's value instead of the 1024 default.
+			name: "max_completion_tokens alone, the post-normalizer shape",
+			body: `{"max_completion_tokens":4096}`,
+			want: 4096.0,
+		},
+		{
+			name: "no field falls back to the default",
+			body: `{}`,
+			// The default is a Go int literal, not a decoded JSON number;
+			// both serialise as 1024 on the wire.
+			want: 1024,
+		},
+		{
+			name: "a null value is an absent value",
+			body: `{"max_tokens":null,"max_completion_tokens":3000}`,
+			want: 3000.0,
+		},
+		{
+			name: "all three null falls back to the default",
+			body: `{"max_tokens":null,"max_output_tokens":null,"max_completion_tokens":null}`,
+			want: 1024,
+		},
+		{
+			name: "budget above the provider cap is clamped",
+			body: `{"max_tokens":384000}`,
+			want: 200000.0,
+		},
+		{
+			name: "budget exactly at the provider cap passes through",
+			body: `{"max_tokens":200000}`,
+			want: 200000.0,
+		},
+		{
+			name: "max_completion_tokens above the cap is clamped",
+			body: `{"max_completion_tokens":500000}`,
+			want: 200000.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body map[string]any
+			if err := json.Unmarshal([]byte(tt.body), &body); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			if got := commandcodeMaxTokens(body); got != tt.want {
+				t.Errorf("commandcodeMaxTokens() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildCommandcodeBody_SingleBudgetFieldOnWire pins that resolving the
+// budget never puts a second spelling on the wire: the provider reads
+// params.max_tokens only, and a body carrying both max_tokens and
+// max_completion_tokens is exactly the shape that gets the client's budget
+// discarded when only the first is read.
+func TestBuildCommandcodeBody_SingleBudgetFieldOnWire(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantToks float64
+	}{
+		{
+			name:     "client sent both, max_tokens is kept",
+			body:     `{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":4096,"max_completion_tokens":2048}`,
+			wantToks: 4096,
+		},
+		{
+			name:     "client sent max_completion_tokens only",
+			body:     `{"model":"m","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":2048}`,
+			wantToks: 2048,
+		},
+		{
+			name:     "client sent max_tokens only",
+			body:     `{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":2048}`,
+			wantToks: 2048,
+		},
+		{
+			name:     "client sent no budget",
+			body:     `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+			wantToks: 1024,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := buildCommandcodeBody([]byte(tt.body), "m")
+			if err != nil {
+				t.Fatalf("buildCommandcodeBody() error = %v", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(out, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+
+			// The provider reads params.max_tokens; a top-level copy is dead
+			// weight the schema does not define.
+			for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+				if v, has := payload[key]; has {
+					t.Errorf("envelope carries %q at the top level = %v", key, v)
+				}
+			}
+
+			params, ok := payload["params"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected params object, got %T", payload["params"])
+			}
+			for _, key := range []string{"max_completion_tokens", "max_output_tokens"} {
+				if v, has := params[key]; has {
+					t.Errorf("params carries a second budget spelling %q = %v", key, v)
+				}
+			}
+			if got := params["max_tokens"]; got != tt.wantToks {
+				t.Errorf("params.max_tokens = %v, want %v", got, tt.wantToks)
+			}
+		})
+	}
+}
+
+func TestCommandcodeSlugifyAndSessionUUID(t *testing.T) {
+	if got := commandcodeSlugify("/home/u/My Project"); got != "home-u-my-project" {
+		t.Errorf("slug = %q", got)
+	}
+	if got := commandcodeSlugify("/srv/fooBar/Ünï"); got != "srv-foo-bar-ueni" {
+		t.Errorf("slug = %q", got)
+	}
+	if commandcodeSlugify("/") != "" || commandcodeProjectSlug == "" {
+		t.Errorf("empty slug must fall back, got %q", commandcodeProjectSlug)
+	}
+	a, b := commandcodeSessionUUID("s1"), commandcodeSessionUUID("s1")
+	if a != b || a == commandcodeSessionUUID("s2") {
+		t.Errorf("session uuid not stable/distinct: %s %s", a, b)
+	}
+	if _, err := uuid.Parse(a); err != nil {
+		t.Errorf("not a uuid: %v", err)
+	}
+	a1, a2 := commandcodeSessionUUID(""), commandcodeSessionUUID("")
+	if a1 == a2 {
+		t.Errorf("empty session must be random, got %s twice", a1)
+	}
+}
+
+func TestCommandcodeBodySession(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"no session", `{"model":"m","messages":[]}`, ""},
+		{
+			"claude _session_ suffix",
+			`{"metadata":{"user_id":"user_abc_account__session_9f0c1a2b-3d4e-5f60-7a8b-9c0d1e2f3a4b"}}`,
+			"claude\0009f0c1a2b-3d4e-5f60-7a8b-9c0d1e2f3a4b",
+		},
+		{
+			"claude JSON user_id",
+			`{"metadata":{"user_id":"{\"account_id\":\"acc\",\"session_id\":\"abc123\"}"}}`,
+			"claude\000abc123",
+		},
+		{"raw claude user id", `{"metadata":{"user_id":"user_abc"}}`, "claude\000user_abc"},
+		{"prompt_cache_key", `{"prompt_cache_key":"conv-1"}`, "conv-1"},
+		{"session_id", `{"session_id":"conv-2"}`, "conv-2"},
+		{"conversation_id", `{"conversation_id":"conv-3"}`, "conv-3"},
+		{"prompt_cache_key wins over session_id", `{"prompt_cache_key":"a","session_id":"b"}`, "a"},
+		{"metadata.user_id wins over prompt_cache_key", `{"metadata":{"user_id":"u1"},"prompt_cache_key":"a"}`, "claude\000u1"},
+		{"blank values ignored", `{"prompt_cache_key":"  "}`, ""},
+		{"invalid json", `not json`, ""},
+	}
+	for _, tt := range tests {
+		if got := commandcodeBodySession([]byte(tt.body)); got != tt.want {
+			t.Errorf("%s: commandcodeBodySession = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestCommandcodeSessionKeyStablePerConversation(t *testing.T) {
+	system := []byte(`{"model":"m","system":"You are helpful.","messages":[{"role":"user","content":"first turn"}]}`)
+
+	// A later turn appends messages; the prefix key must not move.
+	turn1 := commandcodeSessionKey(system, "", "conn-1")
+	turn2 := []byte(`{"model":"m","system":"You are helpful.","messages":[{"role":"user","content":"first turn"},{"role":"assistant","content":"ok"},{"role":"user","content":"second turn"}]}`)
+	if got := commandcodeSessionKey(turn2, "", "conn-1"); got != turn1 {
+		t.Errorf("prefix key moved across turns: %q vs %q", turn1, got)
+	}
+
+	// A different first turn is a different conversation.
+	other := []byte(`{"model":"m","system":"You are helpful.","messages":[{"role":"user","content":"different"}]}`)
+	if got := commandcodeSessionKey(other, "", "conn-1"); got == turn1 {
+		t.Errorf("different first user turn must hash differently")
+	}
+
+	// Headers win, then body fields, then prefix, then connection.
+	if got := commandcodeSessionKey(system, "hdr-1", "conn-1"); got != "hdr-1" {
+		t.Errorf("header session must win, got %q", got)
+	}
+	if got := commandcodeSessionKey([]byte(`{"prompt_cache_key":"pc"}`), "", "conn-1"); got != "pc" {
+		t.Errorf("body session must beat prefix/connection, got %q", got)
+	}
+	if got := commandcodeSessionKey(nil, "", "conn-1"); got != "conn\000conn-1" {
+		t.Errorf("connection fallback = %q", got)
+	}
+	if got := commandcodeSessionKey(nil, "", ""); got != "" {
+		t.Errorf("nothing to key on = %q", got)
+	}
+
+	// Whatever the layer, the derived threadId must stay a valid UUID.
+	if _, err := uuid.Parse(commandcodeSessionUUID(turn1)); err != nil {
+		t.Errorf("prefix-derived threadId not a uuid: %v", err)
+	}
+}
+
+func TestForwardCommandcodeRetriesTransient(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("x-project-slug") == "" {
+			t.Errorf("missing x-project-slug")
+		}
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"type":"text-delta","text":"ok"}` + "\n" + `{"type":"finish","finishReason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+	rec := httptest.NewRecorder()
+	err := ForwardCommandcode(rec, &Request{
+		Config: &providers.ProviderConfig{BaseURL: srv.URL}, Client: srv.Client(),
+		Body: []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), SessionID: "s",
+	})
+	if err != nil || calls != 2 || !strings.Contains(rec.Body.String(), "ok") {
+		t.Fatalf("err=%v calls=%d body=%s", err, calls, rec.Body.String())
+	}
+}
+
+// Two requests with no client session must not mint a fresh threadId each:
+// the upstream prompt cache is keyed on it, and a per-request random id
+// re-cached the whole prefix on every turn (decolua/9router#5006).
+func TestForwardCommandcodeThreadIDStableWithoutSession(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("x-session-id"))
+		_, _ = w.Write([]byte(`{"type":"text-delta","text":"ok"}` + "\n" + `{"type":"finish","finishReason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+	send := func(connID, firstUser string) {
+		seen = nil
+		rec := httptest.NewRecorder()
+		err := ForwardCommandcode(rec, &Request{
+			Config: &providers.ProviderConfig{BaseURL: srv.URL}, Client: srv.Client(),
+			Body:         []byte(`{"model":"m","messages":[{"role":"user","content":"` + firstUser + `"}]}`),
+			ConnectionID: connID,
+		})
+		if err != nil {
+			t.Fatalf("ForwardCommandcode: %v", err)
+		}
+	}
+	// Same prefix (system + first user turn) → same threadId even across
+	// connections: identical prefixes are cache-compatible upstream.
+	send("conn-1", "hi")
+	first := seen[0]
+	send("conn-1", "hi")
+	if seen[0] != first {
+		t.Errorf("same conversation minted a second threadId: %q then %q", first, seen[0])
+	}
+	if _, err := uuid.Parse(first); err != nil {
+		t.Errorf("threadId not a uuid: %v", err)
+	}
+	send("conn-1", "a different first turn")
+	if seen[0] == first {
+		t.Errorf("different first user turn must get a different threadId")
+	}
+}
+
+func TestCommandcodeFinishReasonMappedToOpenAI(t *testing.T) {
+	for in, want := range map[string]string{
+		"tool-calls": "tool_calls", "content-filter": "content_filter",
+		"stop": "stop", "length": "length", "error": "stop",
+	} {
+		state := &CommandcodeStreamState{ToolIndexByID: map[string]int{}}
+		ProcessCommandcodeEvent(map[string]any{"type": "finish-step", "finishReason": in}, "finish-step", state)
+		out := ProcessCommandcodeEvent(map[string]any{"type": "finish"}, "finish", state)
+		if len(out) == 0 || !strings.Contains(out[0], `"finish_reason":"`+want+`"`) {
+			t.Errorf("%s: want finish_reason %s, got %v", in, want, out)
+		}
+	}
+}
+
+func TestCommandcodeFinishCarriesCacheUsage(t *testing.T) {
+	state := &CommandcodeStreamState{ToolIndexByID: map[string]int{}}
+	out := ProcessCommandcodeEvent(map[string]any{
+		"type": "finish", "finishReason": "stop",
+		"totalUsage": map[string]any{
+			"inputTokens": 3033.0, "outputTokens": 20.0,
+			"cachedInputTokens": 2944.0, "reasoningTokens": 7.0,
+		},
+	}, "finish", state)
+	if len(out) == 0 {
+		t.Fatal("no chunk")
+	}
+	var chunk struct {
+		Usage struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(out[0]), &chunk); err != nil {
+		t.Fatal(err)
+	}
+	if chunk.Usage.PromptTokens != 3033 || chunk.Usage.PromptTokensDetails.CachedTokens != 2944 || chunk.Usage.CompletionTokensDetails.ReasoningTokens != 7 {
+		t.Errorf("usage = %+v", chunk.Usage)
+	}
+}
+
+func TestCommandcodeUsageFallsBackToFinishStepAndTotals(t *testing.T) {
+	state := &CommandcodeStreamState{ToolIndexByID: map[string]int{}}
+	ProcessCommandcodeEvent(map[string]any{"type": "finish-step", "finishReason": "stop",
+		"usage": map[string]any{"inputTokens": 100.0, "outputTokens": 5.0, "cachedInputTokens": 64.0},
+	}, "finish-step", state)
+	out := ProcessCommandcodeEvent(map[string]any{"type": "finish"}, "finish", state)
+	if len(out) == 0 || !strings.Contains(out[0], `"total_tokens":105`) || !strings.Contains(out[0], `"cached_tokens":64`) {
+		t.Fatalf("chunk = %v", out)
+	}
+	u := commandcodeUsage(state)
+	if u.PromptTokens != 100 || u.CompletionTokens != 5 || u.CachedTokens != 64 {
+		t.Errorf("gateway usage = %+v", u)
+	}
+	est := commandcodeUsage(&CommandcodeStreamState{OutputLength: 40})
+	if est.CompletionTokens != 10 || est.PromptTokens != 0 {
+		t.Errorf("estimate fallback = %+v", est)
+	}
+}
+
+func TestBuildCommandcodeBody_ReasoningBlock(t *testing.T) {
+	input := []byte(`{
+		"model": "zai-org/GLM-5.2",
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{"role": "assistant", "content": "hi", "reasoning_content": " "}
+		]
+	}`)
+
+	resBytes, err := buildCommandcodeBody(input, "zai-org/GLM-5.2")
+	if err != nil {
+		t.Fatalf("failed to build commandcode body: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(resBytes, &payload); err != nil {
+		t.Fatalf("failed to parse payload: %v", err)
+	}
+
+	params, ok := payload["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing params in payload: %#v", payload)
+	}
+
+	msgs, ok := params["messages"].([]any)
+	if !ok || len(msgs) < 2 {
+		t.Fatalf("missing messages in params: %#v", params)
+	}
+
+	asstMsg := msgs[1].(map[string]any)
+	contentBlocks, ok := asstMsg["content"].([]any)
+	if !ok {
+		t.Fatalf("missing content blocks in assistant message: %#v", asstMsg)
+	}
+
+	foundReasoning := false
+	for _, block := range contentBlocks {
+		bMap, ok := block.(map[string]any)
+		if ok && bMap["type"] == "reasoning" && bMap["text"] == " " {
+			foundReasoning = true
+			break
+		}
+	}
+
+	if !foundReasoning {
+		t.Errorf("expected content blocks to contain reasoning block with text ' ', got %#v", contentBlocks)
 	}
 }

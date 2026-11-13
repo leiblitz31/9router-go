@@ -1,10 +1,12 @@
 package translator
 
 import (
+	json "encoding/json/v2"
+	"fmt"
 	"strings"
 )
 
-// Cloud Code Assist ("gemini-cli") client identity.
+// Cloud Code Assist ("gemini-cli") wire shape.
 //
 // The lane shares a host family with antigravity, but the envelope is different
 // in kind: antigravity wraps for an agent surface and carries a userId, a
@@ -12,10 +14,6 @@ import (
 // it is the project, the model, and the request, which is all the backend
 // accepts. Upstream builds it in transformRequest
 // (open-sse/executors/gemini-cli.js:28-34).
-//
-// Only the identity helpers live here: the fork builds the CLI envelope on its
-// own path, but the header injection in internal/proxy (upstream #1089) keys
-// off the same UA and api-client values the CLI itself sends.
 
 const (
 	// GeminiCLIApiClient is the X-Goog-Api-Client value the CLI sends.
@@ -41,4 +39,36 @@ func GeminiCLIModel(model string) string {
 		model = model[:idx]
 	}
 	return model
+}
+
+// WrapForGeminiCLI nests a Gemini payload in the Cloud Code envelope.
+func WrapForGeminiCLI(geminiBody []byte, projectID, modelName string) ([]byte, error) {
+	if len(geminiBody) == 0 {
+		return nil, fmt.Errorf("wrap for gemini-cli: empty body")
+	}
+	// A body that is already an envelope is passed through: a second wrap
+	// would nest it one level deeper and the backend would reject it as a
+	// malformed request.
+	var probe struct {
+		Project string `json:"project"`
+		Model   string `json:"model"`
+		Request any    `json:"request"`
+	}
+	if json.Unmarshal(geminiBody, &probe) == nil && probe.Request != nil && probe.Model != "" {
+		return geminiBody, nil
+	}
+
+	var inner any
+	if err := json.Unmarshal(geminiBody, &inner); err != nil {
+		return nil, fmt.Errorf("wrap for gemini-cli: parse body: %w", err)
+	}
+	out, err := json.Marshal(map[string]any{
+		"project": projectID,
+		"model":   GeminiCLIModel(modelName),
+		"request": inner,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wrap for gemini-cli: marshal envelope: %w", err)
+	}
+	return out, nil
 }

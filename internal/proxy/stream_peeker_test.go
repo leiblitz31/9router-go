@@ -48,18 +48,55 @@ func TestStreamContentPeeker_ZeroContentReturnsError(t *testing.T) {
 	}
 }
 
-func TestStreamContentPeeker_ClaudeThinkingCommits(t *testing.T) {
-	// Port of the #1028 cases from upstream's
-	// TestStreamContentPeeker_ReasoningContentCommits. The reasoning-text
-	// cases of that test are NOT ported: they pin upstream #845 (reasoning
-	// streams count as non-empty), which the fork has never taken — here a
-	// reasoning-only stream stays zero-content so combo fallback can retry.
+func TestStreamContentPeeker_ReasoningContentCommits(t *testing.T) {
 	tests := []struct {
 		name         string
 		chunks       []string
 		expectCommit bool
 		expectErr    error
 	}{
+		{
+			name:         "OpenAI reasoning_content commits",
+			chunks:       []string{"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n"},
+			expectCommit: true,
+			expectErr:    nil,
+		},
+		{
+			name:         "OpenAI reasoning alias commits",
+			chunks:       []string{"data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking...\"}}]}\n\n"},
+			expectCommit: true,
+			expectErr:    nil,
+		},
+		{
+			name:         "OpenAI empty reasoning alias does not commit",
+			chunks:       []string{"data: {\"choices\":[{\"delta\":{\"reasoning\":\"\"}}]}\n\n", "data: [DONE]\n\n"},
+			expectCommit: false,
+			expectErr:    ErrStreamingZeroContent,
+		},
+		{
+			name:         "OpenAI empty reasoning_content does not commit",
+			chunks:       []string{"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}\n\n", "data: [DONE]\n\n"},
+			expectCommit: false,
+			expectErr:    ErrStreamingZeroContent,
+		},
+		{
+			name:         "Anthropic thinking_delta commits",
+			chunks:       []string{"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"let me think\"}}\n\n"},
+			expectCommit: true,
+			expectErr:    nil,
+		},
+		{
+			name:         "Anthropic empty thinking_delta does not commit",
+			chunks:       []string{"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\"}}\n\n", "data: [DONE]\n\n"},
+			expectCommit: false,
+			expectErr:    ErrStreamingZeroContent,
+		},
+		{
+			name:         "Responses reasoning_text.delta commits",
+			chunks:       []string{"data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}\n\n"},
+			expectCommit: true,
+			expectErr:    nil,
+		},
 		{
 			name:         "Claude content_block_start redacted_thinking commits",
 			chunks:       []string{"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"redacted_bytes\"}}\n\n"},

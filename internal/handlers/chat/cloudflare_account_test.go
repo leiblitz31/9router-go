@@ -67,20 +67,25 @@ func TestGetProviderConfig_CloudflareAccountIDSeededConnection(t *testing.T) {
 	}
 }
 
-// A connection without an account id leaves the placeholder untouched — the
-// request still fails upstream, but the resolver must not invent an account
-// or corrupt the URL.
-func TestGetProviderConfig_CloudflareNoAccountIDLeavesPlaceholder(t *testing.T) {
+// A connection without an account id (and no CLOUDFLARE_ACCOUNT_ID fallback)
+// fails fast with a specific error — upstream parity from #865. The resolver
+// must not invent an account, and must never emit a URL with an empty
+// account segment.
+func TestGetProviderConfig_CloudflareNoAccountIDErrors(t *testing.T) {
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "")
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
 
 	handler := NewChatHandler(db.NewRepo(database))
 
 	cfg, err := handler.getProviderConfig("cloudflare-ai", &ConnectionData{})
-	if err != nil {
-		t.Fatalf("getProviderConfig: %v", err)
+	if err == nil {
+		t.Fatalf("getProviderConfig: expected an error, got cfg %+v", cfg)
 	}
-	if strings.Contains(cfg.BaseURL, "/accounts//") {
-		t.Errorf("resolved BaseURL = %q, must never contain an empty account segment", cfg.BaseURL)
+	if cfg != nil {
+		t.Errorf("cfg = %+v, want nil alongside the error", cfg)
+	}
+	if !strings.Contains(err.Error(), "accountId") {
+		t.Errorf("error = %q, want it to name the missing accountId", err)
 	}
 }

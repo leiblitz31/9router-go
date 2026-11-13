@@ -199,36 +199,6 @@ func commandcodeAssistantBlocks(msg map[string]any) []any {
 func commandcodeConvertMessages(rawMsgs []any) (messages []any, system string) {
 	converted := make([]any, 0, len(rawMsgs))
 	systemTexts := make([]string, 0, 2)
-	// OpenAI tool messages usually omit the tool name (they carry only
-	// tool_call_id), but the AI-SDK tool-result block requires toolName.
-	// Learn id → name from the assistant tool_calls, the way the fork's
-	// inline converter did before this helper was extracted.
-	toolNames := map[string]string{}
-	for _, raw := range rawMsgs {
-		msg, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		if role, _ := msg["role"].(string); role != "assistant" {
-			continue
-		}
-		if tcs, ok := msg["tool_calls"].([]any); ok {
-			for _, rawTC := range tcs {
-				tc, ok := rawTC.(map[string]any)
-				if !ok {
-					continue
-				}
-				id, _ := tc["id"].(string)
-				name, _ := tc["name"].(string)
-				if fn, ok := tc["function"].(map[string]any); ok && name == "" {
-					name, _ = fn["name"].(string)
-				}
-				if id != "" && name != "" {
-					toolNames[id] = name
-				}
-			}
-		}
-	}
 	for _, raw := range rawMsgs {
 		msg, ok := raw.(map[string]any)
 		if !ok {
@@ -241,18 +211,7 @@ func commandcodeConvertMessages(rawMsgs []any) (messages []any, system string) {
 				systemTexts = append(systemTexts, text)
 			}
 		case "tool":
-			convertedMsg := commandcodeToolResultMessage(msg)
-			if blocks, ok := convertedMsg["content"].([]any); ok && len(blocks) > 0 {
-				if block, ok := blocks[0].(map[string]any); ok {
-					if name, _ := block["toolName"].(string); name == "" {
-						callID, _ := block["toolCallId"].(string)
-						if learned := toolNames[callID]; learned != "" {
-							block["toolName"] = learned
-						}
-					}
-				}
-			}
-			converted = append(converted, convertedMsg)
+			converted = append(converted, commandcodeToolResultMessage(msg))
 		case "assistant":
 			converted = append(converted, map[string]any{
 				"role":    "assistant",
@@ -268,18 +227,48 @@ func commandcodeConvertMessages(rawMsgs []any) (messages []any, system string) {
 	return converted, strings.Join(systemTexts, "\n\n")
 }
 
+// commandCodeMaxTokensLimit is the ceiling the live /alpha/generate endpoint
+// enforces on params.max_tokens. A larger budget is rejected with a 400, so
+// an over-limit client budget is clamped down to it rather than forwarded.
+const commandCodeMaxTokensLimit = 200000
+
 // commandcodeMaxTokens mirrors upstream `body.max_tokens ?? body.max_output_tokens
-// ?? DEFAULT_MAX_TOKENS`. The fallback stays 1024 (upstream 64000): the free
-// tier the provider bills against rejects a larger budget. A null value is an
-// absent value, the way upstream's nullish coalescing reads it.
+// ?? DEFAULT_MAX_TOKENS`, with one spelling appended: max_completion_tokens.
+// The fallback stays 1024 (upstream 64000): the free tier the provider bills
+// against rejects a larger budget. A null value is an absent value, the way
+// upstream's nullish coalescing reads it.
+//
+// max_completion_tokens is last, not first, so every body that resolved a
+// budget before this branch existed still resolves the same one. It is here
+// because normalizeChatTokenFields drops max_tokens from a body that carries
+// both, and this provider reads only max_tokens: without this branch the
+// client's budget was discarded and the 1024 default was billed in its place.
+//
+// The resolved budget is clamped to commandCodeMaxTokensLimit (upstream
+// decolua/9router#5268): /v1/models advertises 384000 maxOutput for cmc/*,
+// but the endpoint rejects max_tokens above 200000, so an unclamped value
+// turns a working client (pi etc.) into a 400.
 func commandcodeMaxTokens(body map[string]any) any {
-	if v, ok := body["max_tokens"]; ok && v != nil {
-		return v
+	var v any
+	if x, ok := body["max_tokens"]; ok && x != nil {
+		v = x
+	} else if x, ok := body["max_output_tokens"]; ok && x != nil {
+		v = x
+	} else if x, ok := body["max_completion_tokens"]; ok && x != nil {
+		v = x
+	} else {
+		return 1024
 	}
-	if v, ok := body["max_output_tokens"]; ok && v != nil {
-		return v
+	if n, ok := v.(float64); ok && n > commandCodeMaxTokensLimit {
+		return float64(commandCodeMaxTokensLimit)
 	}
-	return 1024
+	if n, ok := v.(int); ok && n > commandCodeMaxTokensLimit {
+		return commandCodeMaxTokensLimit
+	}
+	if n, ok := v.(int64); ok && n > commandCodeMaxTokensLimit {
+		return int64(commandCodeMaxTokensLimit)
+	}
+	return v
 }
 
 // commandcodeTools projects the tool declarations onto the three keys the

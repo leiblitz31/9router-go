@@ -184,22 +184,17 @@ func newOpencodeStealthClient(reference *http.Client) (*opencodeStealthClient, e
 // egress never applies to it (it does not use net/http), which silently
 // bypassed an operator's HTTP_PROXY/ALL_PROXY on the free lane.
 func opencodeProxyFrom(reference *http.Client) string {
+	// The egress is read from the transport registry (proxy.ProxyURLFor),
+	// not from t.Proxy: the uTLS transports keep t.Proxy nil by design —
+	// the dialer tunnels manually so the fingerprinted handshake survives
+	// (net/http ignores DialTLSContext for proxied requests, so a set
+	// t.Proxy would silently downgrade the stealth lane to a plain Go
+	// ClientHello). The registry answers the same question for both
+	// registry-built transports and plain t.Proxy transports.
 	if reference == nil {
 		return ""
 	}
-	rt := reference.Transport
-	if fb, ok := rt.(*proxy.FallbackTransport); ok {
-		rt = fb.Base
-	}
-	transport, ok := rt.(*http.Transport)
-	if !ok {
-		return ""
-	}
-	// The fork's safe transports keep t.Proxy nil and record the egress in
-	// the transport registry (the uTLS dialer tunnels manually), so the
-	// proxy is read through the registry seam; plain transports with
-	// t.Proxy assigned resolve through the same helper.
-	return strings.TrimRight(proxy.TransportProxyURL(transport), "/")
+	return strings.TrimRight(proxy.ProxyURLFor(reference), "/")
 }
 
 func getOpencodeStealthClient(reference *http.Client) (*opencodeStealthClient, error) {

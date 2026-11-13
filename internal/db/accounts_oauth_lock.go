@@ -95,7 +95,7 @@ func ConnectionRequiresReauth(rawData string) bool {
 		return false
 	}
 	status, _ := raw["testStatus"].(string)
-	return status == "reauth_required"
+	return status == providers.StatusReauthRequired
 }
 
 // ConnectionBlockedUntil returns the earliest instant the account becomes
@@ -191,13 +191,14 @@ func (r *Repo) GetConnectionOAuthFailures(connID string) int {
 // (the forward path refreshes, then the project probe force-refreshes) — so
 // the counter only moves once the previous window has run out. Counting the
 // repeats would turn a single bad request into a 20 minute cooldown.
+//
+// When the rejection is terminal (a revoked grant, invalid_grant, an expired
+// refresh token) only a re-login can repair it, so the row is also stamped
+// with testStatus = reauth_required and the account is quarantined from
+// routing for the cooldown window instead of being retried in a loop.
 func (r *Repo) RecordConnectionOAuthFailure(connID string, status int, err error) (time.Time, int, error) {
 	if connID == "" {
 		return time.Time{}, 0, nil
-	}
-	errText := ""
-	if err != nil {
-		errText = err.Error()
 	}
 	now := time.Now().UTC()
 	lockedUntil, failures := r.connectionOAuthState(connID)
@@ -207,41 +208,35 @@ func (r *Repo) RecordConnectionOAuthFailure(connID string, status int, err error
 	until := now.Add(OAuthLockDelay(failures))
 	stamp := now.Format(time.RFC3339)
 	deadGrant := providers.IsRefreshGrantDead(err)
-	lastError, mErr := json.Marshal(map[string]any{
+	lastError, marshalErr := json.Marshal(map[string]any{
 		"status":    status,
-		"message":   errText,
+		"message":   err.Error(),
 		"timestamp": stamp,
 	})
-	if mErr != nil {
-		return time.Time{}, 0, fmt.Errorf("marshal last error for %s: %w", connID, mErr)
+	if marshalErr != nil {
+		return time.Time{}, 0, fmt.Errorf("marshal last error for %s: %w", connID, marshalErr)
 	}
+
+	query := `UPDATE providerConnections
+		SET data = json_set(data,
+			'$.oauthLockedUntil', ?,
+			'$.oauthFailureCount', ?,
+			'$.lastError', json(?)),
+			updatedAt = ?
+		WHERE id = ?`
+	args := []any{until.UTC().Format(time.RFC3339), failures, string(lastError), stamp, connID}
 	if deadGrant {
-		_, execErr := r.db.Exec(
-			`UPDATE providerConnections
-			 SET data = json_set(data,
-			   '$.oauthLockedUntil', ?,
-			   '$.oauthFailureCount', ?,
-			   '$.testStatus', ?,
-			   '$.lastError', json(?)),
-			     updatedAt = ?
-			 WHERE id = ?`,
-			until.UTC().Format(time.RFC3339), failures, providers.StatusReauthRequired, string(lastError), stamp, connID,
-		)
-		if execErr != nil {
-			return time.Time{}, 0, fmt.Errorf("lock connection oauth %s: %w", connID, execErr)
-		}
-		return until, failures, nil
+		query = `UPDATE providerConnections
+			SET data = json_set(data,
+				'$.oauthLockedUntil', ?,
+				'$.oauthFailureCount', ?,
+				'$.testStatus', ?,
+				'$.lastError', json(?)),
+				updatedAt = ?
+			WHERE id = ?`
+		args = []any{until.UTC().Format(time.RFC3339), failures, providers.StatusReauthRequired, string(lastError), stamp, connID}
 	}
-	_, execErr := r.db.Exec(
-		`UPDATE providerConnections
-		 SET data = json_set(data,
-		   '$.oauthLockedUntil', ?,
-		   '$.oauthFailureCount', ?,
-		   '$.lastError', json(?)),
-		     updatedAt = ?
-		 WHERE id = ?`,
-		until.UTC().Format(time.RFC3339), failures, string(lastError), stamp, connID,
-	)
+	_, execErr := r.db.ExecContext(context.Background(), query, args...)
 	if execErr != nil {
 		return time.Time{}, 0, fmt.Errorf("lock connection oauth %s: %w", connID, execErr)
 	}
@@ -252,21 +247,22 @@ func (r *Repo) RecordConnectionOAuthFailure(connID string, status int, err error
 // so a credential that was repaired does not stay out of rotation for the rest
 // of the window, and the next rejection starts from the base cooldown again.
 // The quota cooldown is deliberately left alone: a working token says nothing
-// about a spent quota. A re-authenticated account also sheds its
+// about a spent quota.
+// A re-authenticated account also sheds its
 // reauth_required testStatus so it reports healthy again.
 func (r *Repo) ClearConnectionOAuthLock(connID string) error {
 	if connID == "" {
 		return nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := r.db.Exec(
+	_, err := r.db.ExecContext(context.Background(),
 		`UPDATE providerConnections
-		 SET data = json_set(data,
-		   '$.oauthLockedUntil', NULL,
-		   '$.oauthFailureCount', 0,
-		   '$.testStatus', NULL),
-		     updatedAt = ?
-		 WHERE id = ?`,
+		SET data = json_set(data,
+			'$.oauthLockedUntil', NULL,
+			'$.oauthFailureCount', 0,
+			'$.testStatus', NULL),
+			updatedAt = ?
+		WHERE id = ?`,
 		now, connID,
 	)
 	if err != nil {

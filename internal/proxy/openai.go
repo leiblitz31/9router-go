@@ -38,6 +38,10 @@ func ForwardOpenAI(ctx context.Context, client *http.Client, cfg *providers.Prov
 	if !hasHeaderFold(headers, "Accept") {
 		headers["Accept"] = "*/*"
 	}
+	// The operator's Custom Headers are applied last so they also win over the
+	// defaults set just above, which is the order upstream uses
+	// (open-sse/executors/base.js:132).
+	headers = providers.ApplyHeaderOverrides(headers, cfg.HeaderOverrides)
 	// A streamed answer must not be gzip-compressed on the wire. Go's transport
 	// advertises `Accept-Encoding: gzip` by default, and an edge or provider
 	// that honours it with a buffered compressor releases the whole turn at

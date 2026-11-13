@@ -101,6 +101,9 @@ func commandcodeGoatHeaders(req *Request) map[string]string {
 		for k, v := range req.Config.StaticHeaders {
 			headers[k] = v
 		}
+		for k, v := range req.Config.HeaderOverrides {
+			headers[k] = v
+		}
 	}
 	return headers
 }
@@ -181,7 +184,7 @@ func forwardCommandcodeGoatResponses(w http.ResponseWriter, req *Request, cleanM
 	}
 	if req.IsStream {
 		stallReader := proxy.NewStallReaderWithContext(reqCtx(req), resp.Body,
-			proxy.DefaultStallTimeout, "commandcode-goat-responses")
+			req.Config.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), "commandcode-goat-responses")
 		defer func() { _ = stallReader.Close() }()
 		return handleCodexStream(w, req, stallReader)
 	}

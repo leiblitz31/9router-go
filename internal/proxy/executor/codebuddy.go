@@ -49,7 +49,8 @@ const (
 	codebuddyIntlIDEVer    = "5.8.4"
 	codebuddyIntlDomain    = "www.workbuddy.ai"
 
-	codebuddyCLIVersion     = "2.179.3"
+	// codebuddyCLIVersion is declared once, in codebuddy_identity.go (the
+	// fork's single source of truth for the CN CLI build).
 	codebuddyCLINodeVersion = "v22.23.3"
 	codebuddyCLISDKVersion  = "7.39.0"
 
@@ -133,26 +134,35 @@ func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
 		}
 		return fmt.Errorf("ForwardCodebuddyCN upstream: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	forwardUpstreamResponseHeaders(w, resp.Header)
 
 	if req.IsStream {
 		if !isEventStreamResponse(resp.Header) {
-			data, rerr := io.ReadAll(io.LimitReader(resp.Body, constants.MaxUpstreamBodyBytes))
-			if rerr != nil {
-				return fmt.Errorf("read codebuddy upstream body: %w", rerr)
-			}
-			if !proxy.LooksLikeSSE(data) {
+			// Head sniff instead of a whole-body read: a CodeBuddy stream
+			// that arrives with a JSON content-type keeps streaming frame by
+			// frame, and only a genuine document is read whole.
+			head := sniffStreamHead(resp.Body)
+			if proxy.LooksLikeSSE(head) {
+				// The upstream body stays the Closer: the stall watchdog ends
+				// a stuck stream by closing the reader, so a NopCloser here
+				// would leave it unable to.
+				resp.Body = replayBody{Reader: io.MultiReader(bytes.NewReader(head), resp.Body), Closer: resp.Body}
+			} else {
+				rest, rerr := io.ReadAll(io.LimitReader(resp.Body, constants.MaxUpstreamBodyBytes-int64(len(head))))
+				if rerr != nil {
+					return fmt.Errorf("read codebuddy upstream body: %w", rerr)
+				}
+				data := append(head, rest...)
 				if ferr := codebuddyFailureFrom(data, intl); ferr != nil {
 					return ferr
 				}
 				return jsonResponse(req.Ctx, w, bytes.NewReader(data), req.TranslateResp, req.ResponseBuf)
 			}
-			resp.Body = io.NopCloser(bytes.NewReader(data))
 		}
-		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, 0, "codebuddy-cn")
-		defer stallReader.Close() // stops the shutdown watcher + stall timer
+		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, req.Config.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), "codebuddy-cn")
+		defer func() { _ = stallReader.Close() }() // stops the shutdown watcher + stall timer
 		return execSSEStream(w, stallReader, req)
 	}
 
@@ -305,6 +315,10 @@ func transformCodebuddyBody(body []byte) ([]byte, error) {
 		if role == "user" {
 			if s, ok := m["content"].(string); ok {
 				cp := copyMap(m)
+				if rc, ok := cp["reasoning_content"].(string); ok && rc != "" {
+					cp["reasoning"] = rc
+					delete(cp, "reasoning_content")
+				}
 				cp["content"] = []any{map[string]any{"type": "text", "text": s}}
 				otherMessages = append(otherMessages, cp)
 				continue
@@ -312,6 +326,10 @@ func transformCodebuddyBody(body []byte) ([]byte, error) {
 		}
 		if role == "assistant" {
 			cp := copyMap(m)
+			if rc, ok := cp["reasoning_content"].(string); ok && rc != "" {
+				cp["reasoning"] = rc
+				delete(cp, "reasoning_content")
+			}
 			switch v := cp["content"].(type) {
 			case string:
 				cp["content"] = scrubCodebuddyChannelPhrases(sanitizeChannelMarkers(v))
@@ -368,16 +386,26 @@ func codebuddyDomain(req *Request, cfg *providers.ProviderConfig, intl bool) str
 	if intl {
 		return codebuddyIntlDomain
 	}
+	domain := "www.codebuddy.ai"
 	if cfg != nil && (strings.Contains(cfg.BaseURL, "tencent.com") || strings.Contains(cfg.BaseURL, "copilot.")) {
-		return "copilot.tencent.com"
+		domain = "copilot.tencent.com"
 	}
-	return "www.codebuddy.ai"
+	if req != nil && req.Provider == "codebuddy-cn" && domain == "www.codebuddy.ai" {
+		domain = "www.codebuddy.cn"
+	}
+	return domain
 }
 
 // codebuddyIdentityHeaders is the CN CLI's non-id half: everything the Tencent
 // channel expects on a chat request except the per-request id family.
+//
+// The CN lane tracks the current Tencent CLI build (anti-ban: an outdated UA
+// reads as a silent/bot client). Mirrors upstream registry #3257
+// (codebuddy-cn.js: CLI/2.133.1 + X-IDE-Version). Upstream's unified helper
+// defaults other providers to 2.108.1; this helper is CN-only (the intl lane
+// has its own WorkBuddy identity), so the CN build is the only version here.
 func codebuddyIdentityHeaders(req *Request, cfg *providers.ProviderConfig) map[string]string {
-	return map[string]string{
+	h := map[string]string{
 		"Content-Type":                "application/json; charset=utf-8",
 		"User-Agent":                  "CLI/" + codebuddyCLIVersion + " CodeBuddy/" + codebuddyCLIVersion,
 		"X-Product":                   "SaaS",
@@ -402,6 +430,22 @@ func codebuddyIdentityHeaders(req *Request, cfg *providers.ProviderConfig) map[s
 		"X-Agent-Runtime":             "other",
 		"X-Agent-Type":                "main",
 	}
+	if req != nil && strings.HasPrefix(req.APIKey, "ck_") {
+		h["Authorization"] = "Bearer " + req.APIKey
+		h["X-API-Key"] = req.APIKey
+		delete(h, "X-Domain")
+		h["X-User-Id"] = "anonymous_" + last8(req.APIKey)
+		h["X-IDE-Type"] = "WorkBuddy"
+		h["X-Agent-Runtime"] = "local-agent"
+	}
+	return h
+}
+
+func last8(s string) string {
+	if len(s) > 8 {
+		return s[len(s)-8:]
+	}
+	return s
 }
 
 // codebuddyIntlIdentityHeaders is the WorkBuddy 5.8.4 desktop client's non-id

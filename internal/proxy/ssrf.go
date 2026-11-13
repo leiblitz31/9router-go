@@ -27,6 +27,8 @@ var (
 
 type allowLoopbackKey struct{}
 
+type allowPrivateNetworkingKey struct{}
+
 // WithAllowLoopback returns a child context that permits connections to loopback
 // addresses (127.0.0.1, ::1, localhost). Used for local-by-design providers
 // like ollama-local.
@@ -40,6 +42,27 @@ func IsLoopbackAllowed(ctx context.Context) bool {
 		return false
 	}
 	v, _ := ctx.Value(allowLoopbackKey{}).(bool)
+	return v
+}
+
+// WithAllowPrivateNetworking returns a child context that permits connections
+// to private/reserved addresses for that request only. It is the per-connection
+// opt-in for a connection pointed at a local gateway, behind a Tailscale
+// overlay, or on a LAN peer: the flag rides on the request context, so both
+// the plain forwarder and every executor apply it at dial time. It leaves the
+// process-wide ALLOW_PRIVATE_NETWORKING default untouched for anything that
+// is not a connection.
+func WithAllowPrivateNetworking(ctx context.Context) context.Context {
+	return context.WithValue(ctx, allowPrivateNetworkingKey{}, true)
+}
+
+// IsPrivateNetworkingAllowedFor reports whether the request carries the
+// per-connection private-networking opt-in.
+func IsPrivateNetworkingAllowedFor(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(allowPrivateNetworkingKey{}).(bool)
 	return v
 }
 
@@ -304,9 +327,10 @@ func resolveProxyIPs(ctx context.Context, name string) []net.IP {
 // supply a proxy without mutating the process environment: the stdlib caches
 // the environment on first use for the life of the process, which would make an
 // env-driven test depend on whether an earlier call had already frozen it.
-// The transports themselves keep using the stdlib function directly — see
-// proxyFuncIsAssigned, which tells an assigned proxy from an ambient one by that
-// function's identity.
+// The uTLS dialer (resolveProxy) and the registry introspection
+// (proxyURLForTransport) consult this indirection; t.Proxy itself is never
+// assigned on those transports — see proxyFuncIsAssigned, which tells an
+// assigned proxy from an ambient one by that function's identity.
 var proxyFromEnvironment = http.ProxyFromEnvironment
 
 // ambientProxyURL reports the proxy the environment installs for outbound
@@ -372,6 +396,9 @@ func newSafeDialerForProxy(allow *proxyAllowlist) *net.Dialer {
 		KeepAlive: 30 * time.Second,
 		ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
 			if IsPrivateNetworkingAllowed() {
+				return nil
+			}
+			if IsPrivateNetworkingAllowedFor(ctx) {
 				return nil
 			}
 			host, _, err := net.SplitHostPort(address)
@@ -449,25 +476,25 @@ func NewSafeTransport() *http.Transport {
 	return newTransportWithUTLS(&utlsDialer{useEnvProxy: true}, proxyKindEnv, "")
 }
 
-// NewDirectSafeTransport returns an *http.Transport identical to
+// NewSafeTransportDirect returns an *http.Transport identical to
 // NewSafeTransport but always dialing directly (no proxy), with the same
 // uTLS-spoofed handshake. It is the "true direct" transport used by
 // FallbackTransport when the environment proxy refuses a connection:
 // retrying through the same broken env proxy would be pointless, so the
-// fallback must bypass it entirely. Only callers whose PURPOSE is escaping
-// an ambient proxy — FallbackTransport's direct leg and replayDirect — may
-// use it; everything else goes through NewSafeTransport so the operator's
-// egress path is honoured. (Upstream #1120's spelling; the fork's body
-// stays the uTLS direct transport rather than upstream's plain dialer, so
-// the escape legs keep the spoofed handshake.)
-func NewDirectSafeTransport() *http.Transport {
+// fallback must bypass it entirely.
+func NewSafeTransportDirect() *http.Transport {
 	return newTransportWithUTLS(&utlsDialer{}, proxyKindNone, "")
 }
 
-// NewSafeTransportDirect is the fork's original spelling of
-// NewDirectSafeTransport, kept for existing callers.
-func NewSafeTransportDirect() *http.Transport {
-	return NewDirectSafeTransport()
+// NewDirectSafeTransport is the upstream spelling of NewSafeTransportDirect:
+// the escape-leg transport that dials from the host's own address even when
+// the environment names a proxy. It keeps the fork's uTLS-spoofed handshake
+// (same constructor as NewSafeTransportDirect) rather than upstream's plain
+// dialer, so the fallback/replay legs present the same ClientHello as the
+// primary legs. t.Proxy stays nil, as TestNewDirectSafeTransportNeverProxies
+// pins.
+func NewDirectSafeTransport() *http.Transport {
+	return NewSafeTransportDirect()
 }
 
 // NewSafeTransportWithProxy returns a transport identical to NewSafeTransport
@@ -516,26 +543,4 @@ func NewSafeTransportForProxy(proxyURL string) *http.Transport {
 		return NewSafeTransport()
 	}
 	return NewSafeTransportWithProxy(proxyURL, false)
-}
-
-// NewSafeTransportForSocksProxy returns a plain (non-uTLS) safe transport
-// pinned to a SOCKS proxy pool URL (socks5, socks5h, socks). The uTLS
-// dialer speaks HTTP CONNECT only, so a SOCKS pool cannot ride it; the
-// stdlib transport speaks SOCKS through t.Proxy while the SSRF-filtering
-// dialer still guards the hop to the proxy itself, with the proxy endpoint
-// exempted from the private-IP guard exactly as for an explicit HTTP
-// proxy. Upstream #1120 routes SOCKS pools through its plain
-// NewSafeTransportForProxy; this is the fork-shaped equivalent, and the
-// assignment is recorded in the transport proxy registry like every other
-// explicit proxy.
-func NewSafeTransportForSocksProxy(proxyURL string) *http.Transport {
-	u, err := url.Parse(proxyURL)
-	if err != nil {
-		return NewSafeTransport()
-	}
-	t := constants.DefaultHTTPTransportConfig.NewTransport()
-	t.DialContext = newSafeDialerForProxy(newProxyAllowlist(proxyAllowlistHosts(u)...)).DialContext
-	t.Proxy = http.ProxyURL(u)
-	registerTransportProxy(t, proxyKindExplicit, proxyURL)
-	return t
 }

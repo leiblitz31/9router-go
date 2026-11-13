@@ -29,6 +29,13 @@ const upstreamLevelsFixtureVersion = "v0.5.109"
 // codebuddy-cn/deepseek-v4.1-flash resolves to: the tag's answer is the
 // generic set, the PR's is codebuddy-cn's published set.
 var pendingUpstreamDivergences = map[string]map[string][]string{
+	// Groq gpt-oss accepts only low|medium|high (probed live: minimal/xhigh/auto/none/max
+	// all answer 400). Upstream still advertises the openai format default
+	// [none..xhigh] for groq/gpt-oss, so the picker would offer levels Groq
+	// rejects. Go-intentional divergence, not pending.
+	"groq": {
+		"openai/gpt-oss-120b": {"low", "medium", "high"},
+	},
 	// Upstream #4614 also dropped glm-5v-turbo / kimi-k2.7 / kimi-k2.6 from
 	// the codebuddy-cn capability table, and v0.5.99 keeps them dropped. Go
 	// keeps the rows so a saved combo naming one stays routable, which leaves
@@ -50,6 +57,54 @@ var pendingUpstreamDivergences = map[string]map[string][]string{
 	"agnes": {
 		"agnes-3.0-pro":   {"none", "minimal", "low", "medium", "high", "xhigh"},
 		"agnes-3.0-flash": {"none", "minimal", "low", "medium", "high", "xhigh"},
+	},
+	// Upstream 4c58e7f3 (v0.5.104) adds reasoning entries for the OpenCode Free
+	// ids that ship after the tables were last touched (space-bunny & co); the
+	// captured v0.5.99 fixture still reports "no reasoning" for them, so Go
+	// answers the openai format default instead. Same shape as the agnes rows:
+	// declaring reasoning stops the client from silently losing its
+	// reasoning_effort (#2690), which is worse than publishing levels the
+	// captured tag did not. Delete these when the fixture is re-captured at
+	// v0.5.104 or later.
+	"opencode-go": {
+		"space-bunny-free":           {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"longcat-2.0":                {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"muse-spark-1.2-contributor": {"minimal", "low", "medium", "high", "xhigh"},
+		"muse-spark-1.3-contributor": {"minimal", "low", "medium", "high", "xhigh"},
+	},
+	"ocg": {
+		"space-bunny-free":           {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"longcat-2.0":                {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"muse-spark-1.2-contributor": {"minimal", "low", "medium", "high", "xhigh"},
+		"muse-spark-1.3-contributor": {"minimal", "low", "medium", "high", "xhigh"},
+	},
+	// The fork's own OpenCode free-lane rows answer wider level sets than
+	// the captured fixture: the nemotron rows carry no format, so they
+	// resolve to the openai default, and mimo-v2.6-flash-free keeps its
+	// deepseek-format row (#646 full reasoning support). These six
+	// divergences pre-date the exp.11 merge (identical against the v0.5.99
+	// fixture); they are Go-intentional, not pending.
+	"opencode-zen": {
+		"big-pickle":                      {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"mimo-v2.6-flash-free":            {"none", "low", "medium", "high", "xhigh"},
+		"nemotron-3-ultra-free":           {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"nemotron-3.5-lightning-free":     {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"gemini-3.8-flash":                {"low", "medium", "high"},
+		"gemini-3.7-flash":                {"low", "medium", "high"},
+		"gemini-3.6-flash":                {"low", "medium", "high"},
+		"muse-spark-1.2-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
+		"muse-spark-1.3-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
+	},
+	"ocz": {
+		"big-pickle":                      {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"mimo-v2.6-flash-free":            {"none", "low", "medium", "high", "xhigh"},
+		"nemotron-3-ultra-free":           {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"nemotron-3.5-lightning-free":     {"none", "minimal", "low", "medium", "high", "xhigh"},
+		"gemini-3.8-flash":                {"low", "medium", "high"},
+		"gemini-3.7-flash":                {"low", "medium", "high"},
+		"gemini-3.6-flash":                {"low", "medium", "high"},
+		"muse-spark-1.2-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
+		"muse-spark-1.3-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
 	},
 	// Gemini 3.6/3.7/3.8 answers 400 "Thinking level MINIMAL is not supported for this
 	// model" to a thinkingLevel minimal — probed live through the antigravity
@@ -108,23 +163,6 @@ var pendingUpstreamDivergences = map[string]map[string][]string{
 	"br": {
 		"us.anthropic.claude-fable-5": {"low", "medium", "high", "xhigh", "max"},
 	},
-	"ocz": {
-		"big-pickle":                      {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"mimo-v2.6-flash-free":            {"none", "low", "medium", "high", "xhigh"},
-		"nemotron-3-ultra-free":           {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"nemotron-3.5-lightning-free":     {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"gemini-3.8-flash":                {"low", "medium", "high"},
-		"gemini-3.7-flash":                {"low", "medium", "high"},
-		"gemini-3.6-flash":                {"low", "medium", "high"},
-		"muse-spark-1.2-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
-		"muse-spark-1.3-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
-	},
-	"ocg": {
-		"space-bunny-free":           {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"longcat-2.0":                {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"muse-spark-1.2-contributor": {"minimal", "low", "medium", "high", "xhigh"},
-		"muse-spark-1.3-contributor": {"minimal", "low", "medium", "high", "xhigh"},
-	},
 	"muse": {
 		"muse-spark-1.2-contributor": {"minimal", "low", "medium", "high", "xhigh"},
 		"muse-spark-1.3-contributor": {"minimal", "low", "medium", "high", "xhigh"},
@@ -150,23 +188,7 @@ var pendingUpstreamDivergences = map[string]map[string][]string{
 		"muse-spark-1.2-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
 		"muse-spark-1.3-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
 	},
-	"opencode-go": {
-		"space-bunny-free":           {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"longcat-2.0":                {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"muse-spark-1.2-contributor": {"minimal", "low", "medium", "high", "xhigh"},
-		"muse-spark-1.3-contributor": {"minimal", "low", "medium", "high", "xhigh"},
-	},
-	"opencode-zen": {
-		"big-pickle":                      {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"mimo-v2.6-flash-free":            {"none", "low", "medium", "high", "xhigh"},
-		"nemotron-3-ultra-free":           {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"nemotron-3.5-lightning-free":     {"none", "minimal", "low", "medium", "high", "xhigh"},
-		"gemini-3.8-flash":                {"low", "medium", "high"},
-		"gemini-3.7-flash":                {"low", "medium", "high"},
-		"gemini-3.6-flash":                {"low", "medium", "high"},
-		"muse-spark-1.2-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
-		"muse-spark-1.3-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
-	},
+
 	"oc": {
 		"muse-spark-1.2-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},
 		"muse-spark-1.3-contributor-free": {"minimal", "low", "medium", "high", "xhigh"},

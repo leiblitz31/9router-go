@@ -241,6 +241,150 @@ func (r *Repo) GetUsageGroupByModelSince(since string) ([]UsageGroupRow, error) 
 	return scanUsageGroupRows(rows, "model")
 }
 
+// UsageClientKeyRow is one client-API-key aggregate over a time window.
+//
+// ClientKey holds the masked key the CALLER presented (the shape
+// handlerutil.MaskAPIKey writes), not the upstream credential the
+// provider/model group describes. An operator who resells the gateway needs
+// this axis: it is the key they sold.
+type UsageClientKeyRow struct {
+	ClientKey        string
+	Requests         int
+	Errors           int
+	PromptTokens     int
+	CompletionTokens int
+	CachedTokens     int
+	Cost             float64
+	LastUsed         string
+}
+
+// usageClientKeyCachedTokens sums the cached prompt tokens of a group of rows.
+//
+// The counters live in the row's tokens JSON, so the read has to reach the
+// row. The shapes and their precedence mirror translator.CachedTokensFromJSON,
+// which is what wrote the row: the first shape that is PRESENT wins, and a
+// JSON null is not a value. A shape that is present and zero still wins, which
+// is why the test is "is it there" and not "is it non-zero".
+//
+// Every shape is guarded by json_valid because a row written by an older build
+// may hold no JSON at all, and json_extract on a non-JSON value is an error
+// rather than a zero.
+const usageClientKeyCachedTokens = `
+	COALESCE(SUM(
+		CASE WHEN json_valid(tokens) THEN
+			CASE
+				WHEN json_extract(tokens, '$.cached_tokens') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.cached_tokens'), 0)
+				WHEN json_extract(tokens, '$.cache_read_input_tokens') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.cache_read_input_tokens'), 0)
+				WHEN json_extract(tokens, '$.prompt_tokens_details.cached_tokens') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.prompt_tokens_details.cached_tokens'), 0)
+				WHEN json_extract(tokens, '$.input_tokens_details.cached_tokens') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.input_tokens_details.cached_tokens'), 0)
+				WHEN json_extract(tokens, '$.prompt_eval_cached_count') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.prompt_eval_cached_count'), 0)
+				ELSE 0
+			END
+		ELSE 0
+		END
+	), 0)
+`
+
+// usageGroupByClientKeyQuery is the statement GetUsageGroupByClientKeySince
+// runs.
+//
+// It is a named constant for the reason the three usageHistory reads above
+// are: the query-plan test runs EXPLAIN QUERY PLAN against it, and a copy of
+// the SQL in the test would pin the copy rather than the read — the day the
+// two drifted, the test would still be green while the read scanned the
+// ledger.
+const usageGroupByClientKeyQuery = `SELECT COALESCE(clientKey, ''), ` + usageGroupStats + `, ` + usageClientKeyCachedTokens +
+	` FROM usageHistory WHERE timestamp >= ? GROUP BY COALESCE(clientKey, '')`
+
+// GetUsageGroupByClientKeySince aggregates usageHistory per client key since
+// the cutoff.
+//
+// This is a different axis from the provider/model groups: those describe
+// where the spend went, this describes who caused it.
+func (r *Repo) GetUsageGroupByClientKeySince(since string) ([]UsageClientKeyRow, error) {
+	rows, err := r.db.Query( //nolint:noctx,rowserrcheck
+		usageGroupByClientKeyQuery, since)
+	if err != nil {
+		return nil, fmt.Errorf("query usage group by client key: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var res []UsageClientKeyRow
+	for rows.Next() {
+		var row UsageClientKeyRow
+		if err := rows.Scan(
+			&row.ClientKey, &row.Requests, &row.Errors,
+			&row.PromptTokens, &row.CompletionTokens, &row.Cost, &row.LastUsed,
+			&row.CachedTokens,
+		); err != nil {
+			return nil, fmt.Errorf("scan usage group by client key: %w", err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usage group by client key: %w", err)
+	}
+	return res, nil
+}
+
+// FoldUsageGroupByProvider collapses model-level group rows into the
+// provider-level rows GetUsageGroupByProviderSince would have queried.
+//
+// It exists so the dashboard can answer both tables from one scan of the
+// window. The two reads were separate GROUP BY passes over the same rows, and
+// on a 305k-row ledger they measured 22ms and 37ms — the fold below costs 33µs
+// and the sums are identical, because a provider's total is by definition the
+// sum of its models' totals. A model row that carries the provider's own name
+// (the "no model" bucket) is just another addend.
+//
+// The order of the result follows first appearance in rows, so callers that
+// sort afterwards are unaffected; callers that do not must not depend on it.
+func FoldUsageGroupByProvider(rows []UsageGroupRow) []UsageGroupRow {
+	index := make(map[string]int, len(rows))
+	out := make([]UsageGroupRow, 0, len(rows))
+	for _, row := range rows {
+		i, seen := index[row.Provider]
+		if !seen {
+			index[row.Provider] = len(out)
+			out = append(out, UsageGroupRow{Provider: row.Provider})
+			i = len(out) - 1
+		}
+		agg := &out[i]
+		agg.Requests += row.Requests
+		agg.Errors += row.Errors
+		agg.PromptTokens += row.PromptTokens
+		agg.CompletionTokens += row.CompletionTokens
+		agg.Cost += row.Cost
+		if row.LastUsed > agg.LastUsed {
+			agg.LastUsed = row.LastUsed
+		}
+	}
+	return out
+}
+
+// TopUsageGroupByTokens returns the provider/model row that consumed the most
+// tokens, folding the prompt and completion columns the caller already has.
+//
+// GetUsageTopModelSince answers the same question with its own GROUP BY, which
+// was a third pass over the window for one row. Given the model-level rows the
+// dashboard already read, the answer is a single linear scan with no query at
+// all. Ties break on provider then model, matching the ORDER BY the SQL used.
+func TopUsageGroupByTokens(rows []UsageGroupRow) (provider, model string, tokens int64, ok bool) {
+	for _, row := range rows {
+		total := int64(row.PromptTokens) + int64(row.CompletionTokens)
+		if !ok || total > tokens || (total == tokens && (row.Provider < provider ||
+			(row.Provider == provider && row.Model < model))) {
+			provider, model, tokens, ok = row.Provider, row.Model, total, true
+		}
+	}
+	return provider, model, tokens, ok
+}
+
 // GetUsageTopModelSince returns the model that consumed the most tokens since
 // the cutoff, with the provider it ran on. The aggregate runs in SQL: reading
 // the window's rows into the process to fold them there cost a transfer of
@@ -678,6 +822,7 @@ type RequestDetailListRow struct {
 	Cost         float64
 	Combo        string
 	Protocol     string
+	LoopWarning  string
 }
 
 // requestDetailListSelect pulls the renderable values straight out of the
@@ -695,6 +840,7 @@ const requestDetailListSelect = `
 	       COALESCE(json_extract(data, '$.cost'), 0.0),
 	       COALESCE(json_extract(data, '$.combo'), ''),
 	       COALESCE(json_extract(data, '$.protocol'), ''),
+	       COALESCE(json_extract(data, '$.loopWarning'), COALESCE(json_extract(data, '$.anomalies[0].message'), '')),
 	       json_valid(data)
 	FROM requestDetails
 	%s
@@ -741,6 +887,7 @@ func (r *Repo) GetRequestDetailsPaged(ctx context.Context, limit, offset int, si
 		if err := rows.Scan(&row.ID, &row.Timestamp, &row.Provider, &row.Model,
 			&row.ConnectionID, &row.Status, &row.LatencyTTFT, &row.LatencyTotal, &row.TokensJSON,
 			&row.Account, &row.Cost, &row.Combo, &row.Protocol,
+			&row.LoopWarning,
 			&dataValid); err != nil {
 			return nil, total, fmt.Errorf("scan requestDetails: %w", err)
 		}

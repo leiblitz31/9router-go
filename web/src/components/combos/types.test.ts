@@ -1,11 +1,28 @@
 import { describe, expect, it } from 'bun:test'
 import {
+  budgetWindowMsToMinutes,
+  clearJudgeModel,
   COMBO_SORT_OPTIONS,
   COMBO_STRATEGIES,
+  effectiveComboStrategy,
   isComboSorted,
+  MAX_BUDGET_CALLS,
+  MAX_BUDGET_WINDOW_MINUTES,
+  MAX_FIRST_TOKEN_TIMEOUT_MS,
+  MAX_FIRST_TOKEN_TIMEOUT_SECONDS,
+  graceMsToSeconds,
+  graceSecondsToMs,
+  updateComboBudgetCalls,
+  updateComboBudgetWindow,
+  updateFirstTokenGrace,
+  secondsToTimeoutMs,
+  timeoutMsToSeconds,
   resolveComboStrategy,
   sortComboMembers,
-  sortMembersByProvider
+  sortMembersByProvider,
+  updateComboStrategy,
+  updateFirstTokenTimeout,
+  type ComboStrategyInfo
 } from './types'
 import type { ModelMetaMap } from './types'
 
@@ -26,6 +43,7 @@ describe('resolveComboStrategy', () => {
       'sticky',
       'capacity',
       'fusion',
+      'tokenmaxxing',
       'nonsense-from-a-hand-edited-backup'
     ]
 
@@ -42,7 +60,7 @@ describe('resolveComboStrategy', () => {
   })
 
   it('passes a real per-combo strategy through unchanged', () => {
-    for (const value of ['round-robin', 'sticky', 'capacity', 'fusion']) {
+    for (const value of ['round-robin', 'sticky', 'capacity', 'fusion', 'tokenmaxxing']) {
       expect(resolveComboStrategy(value)).toBe(value)
     }
   })
@@ -58,6 +76,52 @@ describe('resolveComboStrategy', () => {
     for (const strategy of COMBO_STRATEGIES) {
       expect(strategy.value.length).toBeGreaterThan(0)
       expect(strategy.label.length).toBeGreaterThan(0)
+    }
+  })
+})
+
+describe('per-combo response timeout', () => {
+  it('sets and disables only the timeout without mutating existing settings', () => {
+    const current: Record<string, ComboStrategyInfo> = {
+      primary: { fallbackStrategy: 'smart', judgeModel: 'judge', routerModel: 'router', sessionSticky: false },
+      other: { firstTokenTimeoutMs: 750 }
+    }
+    const enabled = updateFirstTokenTimeout(current, 'primary', 2500)
+    expect(enabled.primary).toEqual({ ...current.primary, firstTokenTimeoutMs: 2500 })
+    expect(enabled.other).toBe(current.other)
+    expect(current.primary.firstTokenTimeoutMs).toBeUndefined()
+
+    const disabled = updateFirstTokenTimeout(enabled, 'primary', 0)
+    expect(disabled.primary).toEqual({ ...current.primary, firstTokenTimeoutMs: 0 })
+    expect(enabled.primary.firstTokenTimeoutMs).toBe(2500)
+  })
+
+  it('keeps inherited strategy when adding or disabling a timeout', () => {
+    const enabled = updateFirstTokenTimeout({}, 'inherited', 1000)
+    const disabled = updateFirstTokenTimeout(enabled, 'inherited', 0)
+    for (const settings of [enabled, disabled]) {
+      expect(settings.inherited.fallbackStrategy).toBeUndefined()
+      expect(effectiveComboStrategy(settings.inherited.fallbackStrategy, 'round-robin')).toBe('round-robin')
+    }
+  })
+
+  it('preserves timeout when switching to inherited strategy or clearing a judge', () => {
+    const current = { primary: { fallbackStrategy: 'fusion', judgeModel: 'judge', firstTokenTimeoutMs: 1200 } }
+    const inherited = updateComboStrategy(current, 'primary', 'inherit')
+    expect(inherited.primary).toEqual({ judgeModel: 'judge', firstTokenTimeoutMs: 1200 })
+    expect(clearJudgeModel(inherited, 'primary').primary).toEqual({ firstTokenTimeoutMs: 1200 })
+  })
+
+  it('accepts the backend maximum timeout', () => {
+    expect(updateFirstTokenTimeout({}, 'primary', MAX_FIRST_TOKEN_TIMEOUT_MS)).toEqual({
+      primary: { firstTokenTimeoutMs: MAX_FIRST_TOKEN_TIMEOUT_MS }
+    })
+  })
+
+  it('rejects values outside the backend integer millisecond range', () => {
+    const current = { primary: { firstTokenTimeoutMs: 1000 } }
+    for (const invalid of [-1, 0.5, NaN, Infinity, MAX_FIRST_TOKEN_TIMEOUT_MS + 1, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(updateFirstTokenTimeout(current, 'primary', invalid)).toBe(current)
     }
   })
 })
@@ -300,5 +364,88 @@ describe('COMBO_SORT_OPTIONS', () => {
       expect(opt.label.length).toBeGreaterThan(0)
       expect(opt.hint.length).toBeGreaterThan(0)
     }
+  })
+})
+
+describe('response timeout seconds conversion', () => {
+  it('converts dashboard seconds to stored milliseconds', () => {
+    expect(secondsToTimeoutMs('30')).toBe(30000)
+    expect(secondsToTimeoutMs(1.5)).toBe(1500)
+    expect(secondsToTimeoutMs('0.001')).toBe(1)
+    expect(secondsToTimeoutMs('')).toBe(0)
+    expect(secondsToTimeoutMs(null)).toBe(0)
+  })
+  it('rejects negative, non-numeric and oversized values', () => {
+    for (const bad of [-1, 'abc', NaN, Infinity, MAX_FIRST_TOKEN_TIMEOUT_SECONDS + 1]) {
+      expect(secondsToTimeoutMs(bad)).toBeNull()
+    }
+    expect(secondsToTimeoutMs(MAX_FIRST_TOKEN_TIMEOUT_SECONDS)).toBe(MAX_FIRST_TOKEN_TIMEOUT_SECONDS * 1000)
+  })
+  it('shows stored milliseconds as seconds', () => {
+    expect(timeoutMsToSeconds(2500)).toBe(2.5)
+    expect(timeoutMsToSeconds(undefined)).toBe(0)
+  })
+})
+
+describe('timeout grace period', () => {
+  it('treats blank as default (undefined) but 0 as an explicit immediate re-include', () => {
+    expect(graceSecondsToMs('')).toBeUndefined()
+    expect(graceSecondsToMs(null)).toBeUndefined()
+    expect(graceSecondsToMs('0')).toBe(0)
+    expect(graceSecondsToMs('90.5')).toBe(90500)
+    expect(graceSecondsToMs(-1)).toBeNull()
+    expect(graceSecondsToMs('x')).toBeNull()
+    expect(graceMsToSeconds(undefined)).toBe('')
+    expect(graceMsToSeconds(0)).toBe(0)
+    expect(graceMsToSeconds(90500)).toBe(90.5)
+  })
+  it('sets and clears only the grace key', () => {
+    const current = { primary: { firstTokenTimeoutMs: 2000, judgeModel: 'judge' } }
+    const set = updateFirstTokenGrace(current, 'primary', 60000)
+    expect(set.primary).toEqual({ firstTokenTimeoutMs: 2000, judgeModel: 'judge', firstTokenGraceMs: 60000 })
+    expect(current.primary).not.toHaveProperty('firstTokenGraceMs')
+    const cleared = updateFirstTokenGrace(set, 'primary', undefined)
+    expect(cleared.primary).toEqual(current.primary)
+    expect(updateFirstTokenGrace(current, 'primary', -5)).toBe(current)
+  })
+})
+
+describe('combo call budget', () => {
+  it('sets the ceiling and the window without touching sibling keys', () => {
+    const current: Record<string, ComboStrategyInfo> = {
+      primary: { fallbackStrategy: 'cascade', judgeModel: 'judge' },
+      other: { budgetCalls: 5 }
+    }
+    const set = updateComboBudgetCalls(current, 'primary', 100)
+    expect(set.primary).toEqual({ fallbackStrategy: 'cascade', judgeModel: 'judge', budgetCalls: 100 })
+    expect(set.other).toBe(current.other)
+    expect(current.primary.budgetCalls).toBeUndefined()
+
+    const windowed = updateComboBudgetWindow(set, 'primary', 300000)
+    expect(windowed.primary).toEqual({ fallbackStrategy: 'cascade', judgeModel: 'judge', budgetCalls: 100, budgetWindowMs: 300000 })
+  })
+  it('clearing the ceiling removes the key, and the last key removes the combo', () => {
+    const current = { primary: { budgetCalls: 10, budgetWindowMs: 60000 } }
+    const cleared = updateComboBudgetCalls(current, 'primary', 0)
+    expect(cleared.primary).toEqual({ budgetWindowMs: 60000 })
+    const gone = updateComboBudgetWindow(cleared, 'primary', 0)
+    expect(gone.primary).toBeUndefined()
+    expect(current.primary).toEqual({ budgetCalls: 10, budgetWindowMs: 60000 })
+  })
+  it('refuses out-of-range and non-integer input', () => {
+    const current = { primary: { budgetCalls: 10 } }
+    expect(updateComboBudgetCalls(current, 'primary', -1)).toBe(current)
+    expect(updateComboBudgetCalls(current, 'primary', 1.5)).toBe(current)
+    expect(updateComboBudgetCalls(current, 'primary', MAX_BUDGET_CALLS + 1)).toBe(current)
+    expect(updateComboBudgetWindow(current, 'primary', 0)).not.toBe(current)
+    expect(updateComboBudgetWindow(current, 'primary', -1)).toBe(current)
+    expect(updateComboBudgetWindow(current, 'primary', 1.5)).toBe(current)
+    expect(updateComboBudgetWindow(current, 'primary', MAX_BUDGET_WINDOW_MINUTES * 60000 + 60000)).toBe(current)
+  })
+  it('reports an absent window as the backend default', () => {
+    expect(budgetWindowMsToMinutes(undefined)).toBe(60)
+    expect(budgetWindowMsToMinutes(0)).toBe(60)
+    expect(budgetWindowMsToMinutes(300000)).toBe(5)
+    expect(budgetWindowMsToMinutes(90000)).toBe(2)
   })
 })

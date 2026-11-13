@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -390,4 +391,147 @@ func quoteJSON(s string) string {
 		panic(err)
 	}
 	return string(encoded)
+}
+
+// qwenWebChatsCall returns the captured session probe (the chat history
+// list), skipping the umid fetch that may precede it when the shared
+// token cache is cold.
+func qwenWebChatsCall(t *testing.T, calls *[]capturedProbe) capturedProbe {
+	t.Helper()
+	for _, p := range *calls {
+		if strings.Contains(p.url, "/api/v2/chats/") {
+			return p
+		}
+	}
+	t.Fatalf("no session probe among %d calls", len(*calls))
+	return capturedProbe{}
+}
+
+// qwenWebRespond answers the umid fetch with a WUM body and the session
+// probe with chatsStatus and chatsBody (or chatsErr).
+func qwenWebRespond(chatsStatus int, chatsBody string, chatsErr error) func(int, capturedProbe) (int, []byte, error) {
+	return func(_ int, p capturedProbe) (int, []byte, error) {
+		if strings.Contains(p.url, "wu.json") {
+			return http.StatusOK, []byte(`umx.wu('T2gAfakeumid')`), nil
+		}
+		return chatsStatus, []byte(chatsBody), chatsErr
+	}
+}
+
+// qwenWebHealthyBody is a session-list answer for a live token.
+const qwenWebHealthyBody = `{"success":true,"data":[{"id":"chat-1"}]}`
+
+// TestValidateQwenWebGuestNeedsNoToken: qw-web is a NoAuth provider, so
+// an empty credential is a working configuration (guest mode), not an
+// error — and it is answered without spending a probe.
+func TestValidateQwenWebGuestNeedsNoToken(t *testing.T) {
+	calls := withProbeStub(t, qwenWebRespond(http.StatusOK, qwenWebHealthyBody, nil))
+
+	for _, body := range []string{
+		`{"provider":"qw-web","apiKey":""}`,
+		`{"provider":"qw-web","apiKey":"guest"}`,
+	} {
+		rec, out := postValidate(t, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		}
+		if out["valid"] != true {
+			t.Errorf("valid = %v, want true for a guest credential (error: %v)", out["valid"], out["error"])
+		}
+		if out["supported"] != true {
+			t.Errorf("supported = %v, want true", out["supported"])
+		}
+	}
+	if len(*calls) != 0 {
+		t.Errorf("guest validation probed upstream %d times, want none", len(*calls))
+	}
+}
+
+// TestValidateQwenWebProbesTheSession proves a pasted token is judged by
+// the session endpoint with the executor's own header set — the Baxia
+// tokens included — and the token as Bearer.
+func TestValidateQwenWebProbesTheSession(t *testing.T) {
+	calls := withProbeStub(t, qwenWebRespond(http.StatusOK, qwenWebHealthyBody, nil))
+
+	rec, out := postValidate(t, `{"provider":"qw-web","apiKey":"dummy-jwt"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if out["valid"] != true {
+		t.Fatalf("valid = %v, want true (error: %v)", out["valid"], out["error"])
+	}
+	probe := qwenWebChatsCall(t, calls)
+	if got := probe.headers.Get("Authorization"); got != "Bearer dummy-jwt" {
+		t.Errorf("Authorization = %q, want the pasted token as Bearer", got)
+	}
+	if got := probe.headers.Get("Bx-Ua"); got == "" {
+		t.Errorf("probe carried no bx-ua header — it must send the executor's Baxia set")
+	}
+}
+
+// TestValidateQwenWebReportsADeadToken: a 401 from the session endpoint
+// is the clean invalid verdict, in the wording the operator acts on.
+func TestValidateQwenWebReportsADeadToken(t *testing.T) {
+	withProbeStub(t, qwenWebRespond(http.StatusUnauthorized, `{}`, nil))
+
+	_, out := postValidate(t, `{"provider":"qw-web","apiKey":"dead-jwt"}`)
+	if out["valid"] != false {
+		t.Fatalf("valid = %v, want false for a rejected token", out["valid"])
+	}
+	if msg := errorMessage(t, out); !strings.Contains(msg, "token invalid or expired") {
+		t.Errorf("error = %q, want it to name the dead token", msg)
+	}
+}
+
+// TestValidateQwenWebReportsAnEnvelopeDeadToken: the refusal shape
+// measured live — HTTP 200 with a success:false "unauthorized" envelope —
+// is the same clean invalid verdict, not a pass. A validator that read
+// only the status would wave every dead token through.
+func TestValidateQwenWebReportsAnEnvelopeDeadToken(t *testing.T) {
+	withProbeStub(t, qwenWebRespond(http.StatusOK,
+		`{"success":false,"data":{"code":"unauthorized","details":"Your session has expired, or the token is no longer valid. Please sign in again to proceed."}}`, nil))
+
+	_, out := postValidate(t, `{"provider":"qw-web","apiKey":"dead-jwt"}`)
+	if out["valid"] != false {
+		t.Fatalf("valid = %v, want false for an envelope-rejected token", out["valid"])
+	}
+	if msg := errorMessage(t, out); !strings.Contains(msg, "token invalid or expired") {
+		t.Errorf("error = %q, want it to name the dead token", msg)
+	}
+}
+
+// TestValidateQwenWebTokenFromStoredCookie: the cookie half alone can
+// carry the account — its `token` cookie is the session root — so a
+// connection saved with only providerSpecificData.qwenCookie is probed
+// as that account, not waved through as a guest.
+func TestValidateQwenWebTokenFromStoredCookie(t *testing.T) {
+	calls := withProbeStub(t, qwenWebRespond(http.StatusOK, qwenWebHealthyBody, nil))
+
+	_, out := postValidate(t, `{"provider":"qw-web","apiKey":"",`+
+		`"providerSpecificData":{"qwenCookie":"token=cookie-jwt; cna=x"}}`)
+	if out["valid"] != true {
+		t.Fatalf("valid = %v, want true (error: %v)", out["valid"], out["error"])
+	}
+	probe := qwenWebChatsCall(t, calls)
+	if got := probe.headers.Get("Authorization"); got != "Bearer cookie-jwt" {
+		t.Errorf("Authorization = %q, want the cookie's token as Bearer", got)
+	}
+}
+
+// TestValidateQwenWebNetworkErrorStaysSupported: a transport failure is
+// not a verdict on the credential — the provider stays supported and the
+// error is the message, mirroring the other web-provider probes.
+func TestValidateQwenWebNetworkErrorStaysSupported(t *testing.T) {
+	withProbeStub(t, qwenWebRespond(0, ``, errors.New("dial tcp: connection refused")))
+
+	_, out := postValidate(t, `{"provider":"qw-web","apiKey":"some-jwt"}`)
+	if out["valid"] != false {
+		t.Fatalf("valid = %v, want false when the probe cannot run", out["valid"])
+	}
+	if out["supported"] != true {
+		t.Errorf("supported = %v, want true", out["supported"])
+	}
+	if msg := errorMessage(t, out); !strings.Contains(msg, "connection refused") {
+		t.Errorf("error = %q, want the transport error", msg)
+	}
 }

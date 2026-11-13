@@ -9,20 +9,20 @@ import (
 	"9router/proxy/internal/db"
 )
 
-// TestHandleModels_CompatibleNodeDisabledModels pins the claim that the
-// disabledModels gate already covers a custom (compatible) provider node, not
-// just registry providers.
+// TestHandleModels_CompatibleNodeDisabledModels pins two claims about a custom
+// (compatible) provider node whose connection predates the dashboard copying
+// the node prefix into providerSpecificData.
 //
-// The dashboard writes the disabled list under the node's storage alias, which
-// for a compatible node is the node id itself — GetProviderAlias returns the id
-// unchanged because a node id is not in RegistryAliases. Upstream #1100 changed
-// the publication spelling for prefix-less node connections from the node id
-// to the node's public prefix (the node id is not a routable alias), so the
-// gate now has to match across both spellings: disabledModelIndex mirrors a
-// node's set under its prefix, and the publish path checks staticAlias as
-// well. This test exists so that claim is verified rather than assumed: if a
-// future change makes alias resolution diverge for nodes, the gate silently
-// stops hiding their models.
+// First, /v1/models must publish the node's public prefix, not the internal
+// node row id: the prefix is the alias the resolver and the dashboard agree
+// on, and clients cannot route `openai-compatible-chat-<uuid>/...`.
+//
+// Second, the disabledModels gate must still cover the node. The dashboard
+// writes that list under the node's storage alias, which for a compatible node
+// is the node id itself - GetProviderAlias returns the id unchanged because a
+// node id is not in RegistryAliases. The two-key check in appendConnectionModels
+// therefore has to keep consulting staticAlias even after outputAlias becomes
+// the public prefix.
 func TestHandleModels_CompatibleNodeDisabledModels(t *testing.T) {
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
@@ -83,14 +83,19 @@ func TestHandleModels_CompatibleNodeDisabledModels(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	// Since #1100, a node whose connection carries no prefix publishes under
-	// the node's public prefix — the spelling clients can actually route —
-	// while the disabled list above stays keyed by the node id, which is what
-	// the dashboard's storageAlias writes. The gate must bridge the two.
+	// The node row owns the public alias even when the connection has no
+	// providerSpecificData.prefix. Publishing the internal node id would give
+	// clients an id the resolver never accepts.
 	if !strings.Contains(body, `"id":"`+prefix+`/keep-me"`) {
 		t.Errorf("%s/keep-me must stay listed, got: %s", prefix, body)
 	}
-	if strings.Contains(body, "hide-me") {
+	if strings.Contains(body, `"id":"`+nodeID+`/keep-me"`) {
+		t.Errorf("%s/keep-me must not leak the internal node id, got: %s", nodeID, body)
+	}
+	// The disabled list is keyed by node id, so the gate must still consult
+	// staticAlias after outputAlias becomes the public prefix.
+	if strings.Contains(body, `"id":"`+prefix+`/hide-me"`) ||
+		strings.Contains(body, `"id":"`+nodeID+`/hide-me"`) {
 		t.Errorf("hide-me must be excluded after being disabled, got: %s", body)
 	}
 }
