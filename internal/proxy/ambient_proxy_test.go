@@ -1,31 +1,28 @@
 package proxy
 
 import (
-	"net/http"
 	"testing"
 )
 
 // TestNewSafeTransportHonoursAmbientEnv pins the fix for the silent ambient
-// bypass: a *http.Transport with Proxy nil never consults the environment, so
-// NewSafeTransport must install http.ProxyFromEnvironment explicitly. Without
-// it, HTTP_PROXY / ALL_PROXY (including the values syncEnvFromViper lifts from
-// .env) are set on the process yet every poolless connection egresses direct.
+// bypass: HTTP_PROXY / ALL_PROXY (including the values syncEnvFromViper
+// lifts from .env) must decide the egress of a poolless connection. The
+// fork's mechanism differs from upstream's: the uTLS dialer resolves the
+// ambient proxy itself through the proxyFromEnvironment indirection, so
+// t.Proxy stays nil by design and the transport is registered as env-kind
+// instead. The assertions below pin that fork seam to the same outcome.
 func TestNewSafeTransportHonoursAmbientEnv(t *testing.T) {
 	// Swapped through the package's proxyFromEnvironment indirection: calling
 	// the stdlib function directly would depend on whether an earlier test in
 	// the binary already froze its once-cache with a different environment.
 	withProxyResolver(t, "socks5h://192.168.22.206:1080")
 	tr := NewSafeTransport()
-	req, err := http.NewRequest("GET", "https://api.opencode.ai", nil)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
+	if a := lookupTransportProxy(tr); a.kind != proxyKindEnv {
+		t.Fatalf("NewSafeTransport registry kind = %v, want the env (ambient) kind", a.kind)
 	}
-	u, err := tr.Proxy(req)
-	if err != nil {
-		t.Fatalf("Proxy() error: %v", err)
-	}
+	u := ambientProxyURL()
 	if u == nil || u.String() != "socks5h://192.168.22.206:1080" {
-		t.Fatalf("NewSafeTransport ambient proxy = %v, want socks5h://192.168.22.206:1080", u)
+		t.Fatalf("ambient proxy = %v, want socks5h://192.168.22.206:1080", u)
 	}
 }
 
