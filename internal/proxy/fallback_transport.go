@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -66,7 +67,17 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		if req.GetBody != nil {
 			directReq.Body, _ = req.GetBody()
 		}
-		return direct.RoundTrip(directReq)
+		directResp, directErr := direct.RoundTrip(directReq)
+		// When the primary leg failed outright (an error, not a response)
+		// and the direct fallback cannot even dial — the SSRF guard refuses
+		// it — the primary proxy failure is the actionable error. Reporting
+		// the guard verdict instead would bury the real failure (a stalled
+		// or refused proxy) behind it. A 403 response from the primary keeps
+		// the old behavior: the direct error surfaces.
+		if directErr != nil && err != nil && errors.Is(directErr, ErrSSRFBlocked) {
+			return nil, err
+		}
+		return directResp, directErr
 	}
 	return resp, err
 }

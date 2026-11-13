@@ -267,8 +267,10 @@ func proxyURLForTransport(tr *http.Transport) string {
 		if a.kind == proxyKindExplicit {
 			return a.url
 		}
-		// kind == proxyKindEnv: resolve exactly like http.ProxyFromEnvironment.
-		proxyFor = http.ProxyFromEnvironment
+		// kind == proxyKindEnv: resolve exactly like http.ProxyFromEnvironment,
+		// through the package indirection so tests can supply an ambient
+		// proxy without depending on the stdlib's once-cached environment.
+		proxyFor = proxyFromEnvironment
 	}
 	if proxyFor == nil {
 		return ""

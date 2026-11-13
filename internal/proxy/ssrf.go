@@ -327,9 +327,10 @@ func resolveProxyIPs(ctx context.Context, name string) []net.IP {
 // supply a proxy without mutating the process environment: the stdlib caches
 // the environment on first use for the life of the process, which would make an
 // env-driven test depend on whether an earlier call had already frozen it.
-// The transports themselves keep using the stdlib function directly — see
-// proxyFuncIsAssigned, which tells an assigned proxy from an ambient one by that
-// function's identity.
+// The uTLS dialer (resolveProxy) and the registry introspection
+// (proxyURLForTransport) consult this indirection; t.Proxy itself is never
+// assigned on those transports — see proxyFuncIsAssigned, which tells an
+// assigned proxy from an ambient one by that function's identity.
 var proxyFromEnvironment = http.ProxyFromEnvironment
 
 // ambientProxyURL reports the proxy the environment installs for outbound

@@ -251,9 +251,12 @@ func (d *utlsDialer) resolveProxy(targetHost string) string {
 		return ""
 	}
 	// http.ProxyFromEnvironment only inspects req.URL, so a synthetic request
-	// reproduces its HTTPS_PROXY/NO_PROXY behavior exactly.
+	// reproduces its HTTPS_PROXY/NO_PROXY behavior exactly. It is consulted
+	// through the package's proxyFromEnvironment indirection (which defaults
+	// to the stdlib function) so a test can supply an ambient proxy without
+	// depending on the stdlib's once-cached environment view.
 	req := &http.Request{URL: &url.URL{Scheme: "https", Host: targetHost}}
-	if u, err := http.ProxyFromEnvironment(req); err == nil && u != nil {
+	if u, err := proxyFromEnvironment(req); err == nil && u != nil {
 		return u.String()
 	}
 	return ""
