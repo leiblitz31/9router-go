@@ -219,11 +219,6 @@
         isSaving = false
         return
       }
-      const context = tokenAmount(contextLimit, 'Context limit')
-      if (context === null) {
-        isSaving = false
-        return
-      }
       // Per-period cost budget. A blank is an explicit "no cost limit" (0),
       // matching how the other unset columns read as unlimited; a value the
       // parser cannot read is refused rather than stored as 0.
@@ -578,24 +573,6 @@
           {/if}
         </div>
 
-        <div>
-          <label for="pol-context" class="block font-semibold text-text-muted mb-1">
-            Context limit per request
-          </label>
-          <input
-            id="pol-context"
-            type="text"
-            inputmode="text"
-            placeholder="200K"
-            bind:value={contextLimit}
-            class="w-full bg-surface border border-border rounded-lg px-3 py-2 font-code text-xs text-text-main focus:outline-none focus:border-brand-500"
-          />
-          <p class="text-text-subtle mt-1">
-            The largest context one request may use. Accepts a number or a scale (200K, 1M). A
-            conversation longer than this is trimmed to fit, and the answer's budget is capped to
-            what is left. Leave empty for the model's own window.
-          </p>
-        </div>
       </section>
 
       <!-- Expiry -->
