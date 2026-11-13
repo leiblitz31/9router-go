@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -193,18 +192,14 @@ func opencodeProxyFrom(reference *http.Client) string {
 		rt = fb.Base
 	}
 	transport, ok := rt.(*http.Transport)
-	if !ok || transport.Proxy == nil {
+	if !ok {
 		return ""
 	}
-	target, err := url.Parse("https://opencode.ai")
-	if err != nil {
-		return ""
-	}
-	proxyURL, err := transport.Proxy(&http.Request{URL: target})
-	if err != nil || proxyURL == nil {
-		return ""
-	}
-	return strings.TrimRight(proxyURL.String(), "/")
+	// The fork's safe transports keep t.Proxy nil and record the egress in
+	// the transport registry (the uTLS dialer tunnels manually), so the
+	// proxy is read through the registry seam; plain transports with
+	// t.Proxy assigned resolve through the same helper.
+	return strings.TrimRight(proxy.TransportProxyURL(transport), "/")
 }
 
 func getOpencodeStealthClient(reference *http.Client) (*opencodeStealthClient, error) {

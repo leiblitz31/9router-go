@@ -254,6 +254,19 @@ func proxyURLFor(client *http.Client) string {
 	return u.String()
 }
 
+// TransportProxyURL is proxyURLFor for a caller that already holds the
+// transport — the OpenCode stealth lane unwraps its reference client
+// (including a *FallbackTransport's Base) and resolves the egress from the
+// transport itself. It reads the same registry first, so a uTLS transport
+// whose t.Proxy is nil by design still reports its assigned or ambient
+// proxy.
+func TransportProxyURL(tr *http.Transport) string {
+	if tr == nil {
+		return ""
+	}
+	return proxyURLFor(&http.Client{Transport: tr})
+}
+
 // resolutionNote reports the DoH address and resolver this process last used
 // for the host of rawURL, or ("", "") when the request never went through a
 // DoH pool. It answers "where did this request actually go" for errors that
