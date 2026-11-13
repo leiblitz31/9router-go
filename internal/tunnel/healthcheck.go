@@ -32,10 +32,14 @@ const (
 // reads as unreachable until that entry expires.
 var publicDNSServers = []string{"1.1.1.1:53", "1.0.0.1:53", "8.8.8.8:53"}
 
-// resolveDNS reports whether hostname resolves, trying the public resolvers
-// first and the OS resolver last. A hostname only some resolvers know (a
-// *.ts.net name, say) still resolves through the fallback.
-func resolveDNS(ctx context.Context, hostname string) bool {
+// resolveDNS reports whether hostname answers a public DNS query, trying the
+// public resolvers first and the OS resolver last. A hostname only some
+// resolvers know (a *.ts.net name, say) still resolves through the fallback.
+//
+// A var so a test can answer it without a resolver: the suite must not depend on
+// the host's DNS, and a resolver that answers every name with a private address
+// turns an "unresolvable" case into a different finding (AGENTS.md §5.C.3).
+var resolveDNS = func(ctx context.Context, hostname string) bool {
 	for _, server := range publicDNSServers {
 		if probeResolver(ctx, server, hostname) {
 			return true

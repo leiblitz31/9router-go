@@ -35,3 +35,18 @@ Verified: `go build ./...`, then `go test` over `./internal/proxy/`,
 `./internal/proxy/executor/`, `./internal/handlers/media/`,
 `./internal/handlers/chat/` and `./internal/providers/` — all pass with no
 egress.
+
+### Two more tests were host-dependent, found by the full `go test ./...`
+
+- `TestX5LargeFile` asserted an absolute 200 ms ceiling on a 64 KB TOML patch.
+  TOML's strict `Unmarshal` — the only layer that rejects a duplicate key, which
+  `Patch` must run — is quadratic in the keys of one table and costs 360-500 ms
+  on the 64 KB sample alone, so the ceiling measured the box rather than the
+  patcher (`configpatch_scale_test.go` makes the same argument for the 256 KB
+  case). The TOML row now asserts a ratio against that measured floor
+  (`x5Ratio`); jsonc and yaml keep the absolute budget, which they meet with
+  room to spare.
+- `TestDiagnoseHostnameRejectsUnresolvable` asked a real resolver to fail on
+  `.invalid`; a resolver that answers every name (this sandbox maps them into
+  198.18.0.0/15) turned it into a different finding. `resolveDNS` is now a var
+  and the test stubs it.

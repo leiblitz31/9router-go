@@ -1053,7 +1053,14 @@ func TestIsCloudflareIP(t *testing.T) {
 // TestDiagnoseHostnameRejectsUnresolvable pins that a name with no DNS record
 // is reported as such rather than surfacing later as a health-check timeout.
 func TestDiagnoseHostnameRejectsUnresolvable(t *testing.T) {
-	// .invalid is reserved by RFC 2606 and never resolves.
+	// .invalid is reserved by RFC 2606 and never resolves. The lookup is stubbed
+	// all the same: a host resolver that answers every name (this one maps them
+	// into benchmark space) would otherwise decide the finding instead of the
+	// code under test.
+	prev := resolveDNS
+	resolveDNS = func(context.Context, string) bool { return false }
+	t.Cleanup(func() { resolveDNS = prev })
+
 	got := diagnoseHostname(context.Background(), "https://no-such-host.invalid")
 	if got == "" {
 		t.Fatal("diagnoseHostname accepted a hostname that cannot resolve")
