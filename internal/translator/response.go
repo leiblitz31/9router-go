@@ -180,19 +180,22 @@ func ParseClaudeUsage(body []byte) *OpenAIUsage {
 		return nil
 	}
 	var u struct {
-		InputTokens              int `json:"input_tokens"`
-		OutputTokens             int `json:"output_tokens"`
-		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		InputTokens              int                  `json:"input_tokens"`
+		OutputTokens             int                  `json:"output_tokens"`
+		CacheCreationInputTokens int                  `json:"cache_creation_input_tokens"`
+		CacheCreation            *claudeCacheCreation `json:"cache_creation"`
 	}
 	if err := json.Unmarshal(raw.Usage, &u); err != nil {
 		return nil
 	}
-	return NormalizeClaudeUsage(&OpenAIUsage{
+	usage := NormalizeClaudeUsage(&OpenAIUsage{
 		PromptTokens:             u.InputTokens,
 		CompletionTokens:         u.OutputTokens,
 		CachedTokens:             CachedTokensFromJSON(raw.Usage),
 		CacheCreationInputTokens: u.CacheCreationInputTokens,
 	})
+	u.CacheCreation.apply(usage)
+	return usage
 }
 
 // ParseResponseUsage extracts usage from an OpenAI or Claude response body.
@@ -213,6 +216,53 @@ func ParseResponseUsage(body []byte) *OpenAIUsage {
 	usage.CachedTokens = CachedTokensFromJSON(raw.Usage)
 	usage.PromptCacheIncluded = true
 	return &usage
+}
+
+// AccumulateClaudeStreamUsage parses usage from Claude SSE chunks (message_start, message_delta).
+// It returns a NEW OpenAIUsage on a recognised event (a copy of curr with the
+// event's fields applied), and curr unchanged otherwise. The new pointer is what
+// lets callers tell "this chunk changed the usage" apart from a no-op by identity.
+func AccumulateClaudeStreamUsage(curr *OpenAIUsage, chunk []byte) *OpenAIUsage {
+	var raw struct {
+		Type    string `json:"type"`
+		Message *struct {
+			Usage *struct {
+				InputTokens              int                  `json:"input_tokens"`
+				CacheCreationInputTokens int                  `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int                  `json:"cache_read_input_tokens"`
+				CacheCreation            *claudeCacheCreation `json:"cache_creation"`
+			} `json:"usage"`
+		} `json:"message"`
+		Usage *struct {
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(chunk, &raw) != nil {
+		return curr
+	}
+	if raw.Type != "message_start" && raw.Type != "message_delta" {
+		return curr
+	}
+	next := OpenAIUsage{PromptCacheIncluded: true}
+	if curr != nil {
+		next = *curr
+		next.PromptCacheIncluded = true
+	}
+	switch raw.Type {
+	case "message_start":
+		if raw.Message != nil && raw.Message.Usage != nil {
+			u := raw.Message.Usage
+			next.CachedTokens = u.CacheReadInputTokens
+			next.CacheCreationInputTokens = u.CacheCreationInputTokens
+			next.PromptTokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+			u.CacheCreation.apply(&next)
+		}
+	case "message_delta":
+		if raw.Usage != nil {
+			next.CompletionTokens = raw.Usage.OutputTokens
+		}
+	}
+	return &next
 }
 
 // ParseOllamaUsage extracts usage from an Ollama native response body, whose
@@ -277,6 +327,229 @@ func stopTextBlock(state *StreamState, results *[]map[string]any) {
 	state.TextBlockStarted = false
 }
 
+// claudeStopReason maps an OpenAI finish_reason to its Anthropic stop_reason.
+func claudeStopReason(finish string) string {
+	switch finish {
+	case "length":
+		return "max_tokens"
+	case "tool_calls":
+		return "tool_use"
+	case "content_filter":
+		return "refusal"
+	default:
+		return "end_turn"
+	}
+}
+
+// claudeFinalUsage renders the client-facing usage block for the terminal
+// message_delta. Anthropic and OpenAI disagree on the prompt count: OpenAI's
+// prompt_tokens is cache-INCLUSIVE while Anthropic's input_tokens counts only
+// uncached input, with cache reads reported separately. Emitting the inclusive
+// count AND cache_read_input_tokens made Claude Code (which sums them) read
+// the context meter high, so the inclusive count is split here. When the
+// upstream never reported prompt tokens at all (a chat upstream that ignores
+// stream_options.include_usage), the seeded body-size estimate stands in so
+// the client's meter still moves and auto-compact can fire.
+func claudeFinalUsage(state *StreamState) map[string]any {
+	input, output, cached, cacheCreation := 0, 0, 0, 0
+	if state.Usage != nil {
+		output = state.Usage.CompletionTokens
+		cached = state.Usage.GetCachedTokens()
+		cacheCreation = state.Usage.CacheCreationInputTokens
+		input = state.Usage.PromptTokens - cached
+		if input < 0 {
+			input = 0
+		}
+	}
+	if input == 0 && state.PromptEstimate > 0 {
+		input = state.PromptEstimate
+	}
+	finalUsage := map[string]any{
+		"input_tokens":  input,
+		"output_tokens": output,
+	}
+	if cached > 0 {
+		finalUsage["cache_read_input_tokens"] = cached
+	}
+	if cacheCreation > 0 {
+		finalUsage["cache_creation_input_tokens"] = cacheCreation
+	}
+	return finalUsage
+}
+
+// claudeTerminalEvents builds the terminal message_delta + message_stop pair.
+func claudeTerminalEvents(state *StreamState) []map[string]any {
+	return []map[string]any{
+		{
+			"type": "message_delta",
+			"delta": map[string]any{
+				"stop_reason":   claudeStopReason(state.FinishReason),
+				"stop_sequence": nil,
+			},
+			"usage": claudeFinalUsage(state),
+		},
+		{"type": "message_stop"},
+	}
+}
+
+// flushDeferredTerminal emits the terminal pair for a session that saw its
+// finish_reason but whose usage chunk never arrived before the stream ended.
+// It returns nil when there is nothing deferred.
+func flushDeferredTerminal(sessionKey string) []byte {
+	if sessionKey == "" {
+		return nil
+	}
+	statesMu.Lock()
+	defer statesMu.Unlock()
+	state, ok := states[sessionKey]
+	if !ok || state == nil || state.TerminalSent || state.FinishReason == "" {
+		return nil
+	}
+	state.TerminalSent = true
+	var buf bytes.Buffer
+	for _, res := range claudeTerminalEvents(state) {
+		buf.WriteString(formatSSE(res))
+	}
+	return buf.Bytes()
+}
+
+// flushDSML appends any DeepSeek DSML tool calls accumulated in the stream's
+// content buffer as Claude tool_use blocks, and streams the cleaned prose as a
+// text block. Called once per stream: at the finish chunk and, if the finish
+// never arrived, from EnsureStreamClosed. Idempotent via DSMLBuffered.
+func flushDSML(state *StreamState, results *[]map[string]any) {
+	if !state.DSMLBuffered {
+		// Stream ended while DSMLBuffer held a deferred split-tag probe
+		// (trailing "<", "<|", "<|DSML", ...) that never completed into a
+		// DSML tag: emit the held-back bytes as plain text instead of
+		// dropping them at stream termination.
+		if state.DSMLBuffer != "" {
+			streamText(state, results, state.DSMLBuffer)
+			state.DSMLBuffer = ""
+		}
+		return
+	}
+	cleaned, calls := ExtractDSMLToolCalls(state.DSMLBuffer, nil)
+
+	if cleaned != "" {
+		if !state.TextBlockStarted {
+			state.TextBlockIndex = state.NextBlockIndex
+			state.NextBlockIndex++
+			state.TextBlockStarted = true
+			state.TextBlockClosed = false
+			*results = append(*results, map[string]any{
+				"type":          "content_block_start",
+				"index":         state.TextBlockIndex,
+				"content_block": map[string]any{"type": "text", "text": ""},
+			})
+		}
+		*results = append(*results, map[string]any{
+			"type":  "content_block_delta",
+			"index": state.TextBlockIndex,
+			"delta": map[string]any{"type": "text_delta", "text": cleaned},
+		})
+		state.TextBlockClosed = true
+		*results = append(*results, map[string]any{
+			"type":  "content_block_stop",
+			"index": state.TextBlockIndex,
+		})
+		state.TextBlockStarted = false
+	}
+
+	for _, call := range calls {
+		toolBlockIndex := state.NextBlockIndex
+		state.NextBlockIndex++
+		id := call.ID
+		if id == "" {
+			id = fmt.Sprintf("dsml-%d", toolBlockIndex)
+		}
+		stopThinkingBlock(state, results)
+		stopTextBlock(state, results)
+		*results = append(*results, map[string]any{
+			"type":  "content_block_start",
+			"index": toolBlockIndex,
+			"content_block": map[string]any{
+				"type":  "tool_use",
+				"id":    id,
+				"name":  call.Name,
+				"input": map[string]any{},
+			},
+		})
+		if call.Arguments != "" {
+			*results = append(*results, map[string]any{
+				"type":  "content_block_delta",
+				"index": toolBlockIndex,
+				"delta": map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": call.Arguments,
+				},
+			})
+		}
+		*results = append(*results, map[string]any{
+			"type":  "content_block_stop",
+			"index": toolBlockIndex,
+		})
+	}
+	state.DSMLBuffered = false
+}
+
+// streamText appends text_delta events for text, creating a text content block
+// on first use and stopping any in-progress thinking block first.
+func streamText(state *StreamState, results *[]map[string]any, text string) {
+	if text == "" {
+		return
+	}
+	stopThinkingBlock(state, results)
+	if !state.TextBlockStarted {
+		state.TextBlockIndex = state.NextBlockIndex
+		state.NextBlockIndex++
+		state.TextBlockStarted = true
+		state.TextBlockClosed = false
+		*results = append(*results, map[string]any{
+			"type":          "content_block_start",
+			"index":         state.TextBlockIndex,
+			"content_block": map[string]any{"type": "text", "text": ""},
+		})
+	}
+	*results = append(*results, map[string]any{
+		"type":  "content_block_delta",
+		"index": state.TextBlockIndex,
+		"delta": map[string]any{"type": "text_delta", "text": text},
+	})
+}
+
+// dsmlStreamSplit splits buf into (safe-to-stream text, tail to hold back).
+// It holds back a trailing '<' that could begin a DSML tag in the next chunk
+// (split-tag boundary), since the tag is not decidable until the following
+// bytes arrive. Everything before the held-back tail cannot be the start of a
+// DSML tag and is safe to stream immediately.
+func dsmlStreamSplit(buf string) (stream, hold string) {
+	lt := strings.LastIndexByte(buf, '<')
+	if lt < 0 {
+		return buf, ""
+	}
+	tail := buf[lt:]
+	if dsmlTagPrefix(tail) {
+		return buf[:lt], tail
+	}
+	return buf, ""
+}
+
+// IsClaudeMessageBody reports whether the body is already an Anthropic
+// Messages response (`type:"message"`, `role:"assistant"`). A Chat Completions
+// body never carries that pair — its discriminator is `object:"chat.completion"`
+// — so the check cannot sweep an OpenAI reply in.
+func IsClaudeMessageBody(body []byte) bool {
+	var probe struct {
+		Type string `json:"type"`
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(body), &probe) != nil {
+		return false
+	}
+	return probe.Type == "message" && probe.Role == "assistant"
+}
+
 // TranslateOpenAIToClaude translates an OpenAI non-streaming response into a Claude non-streaming response.
 func TranslateOpenAIToClaude(openaiResp []byte) ([]byte, *OpenAIUsage, error) {
 	trimmed := bytes.TrimSpace(openaiResp)
@@ -287,6 +560,15 @@ func TranslateOpenAIToClaude(openaiResp []byte) ([]byte, *OpenAIUsage, error) {
 	var resp OpenAIResponse
 	if err := json.Unmarshal(openaiResp, &resp); err != nil {
 		return nil, nil, fmt.Errorf("failed to parse OpenAI response: %w", err)
+	}
+
+	// An upstream that answers the Messages wire (an anthropic-compatible node,
+	// minimax-code, a claude member inside a /v1/messages combo) reaches this
+	// translate=true lane with a body that is already the shape the client
+	// asked for. Relay it unchanged — "no choices" here turned a good answer
+	// into a 502 and pushed the combo to the next member.
+	if IsClaudeMessageBody(openaiResp) {
+		return openaiResp, ParseClaudeUsage(openaiResp), nil
 	}
 
 	if len(resp.Choices) == 0 {
@@ -324,12 +606,23 @@ func TranslateOpenAIToClaude(openaiResp []byte) ([]byte, *OpenAIUsage, error) {
 		})
 	}
 
-	// Text content
-	if msg.Content != "" {
-		contentBlocks = append(contentBlocks, map[string]any{
-			"type": "text",
-			"text": msg.Content,
-		})
+	// DSML tool calls parsed from inline content (DeepSeek-family upstreams
+	// emit <|DSML| invoke ...> blocks instead of structured tool_calls).
+	var dsmlToolCalls []DSMLToolRequest
+
+	// Text content — strip DeepSeek DSML tool invocation blocks out of it so
+	// clients never see raw markup, and promote any invokes to tool_use blocks.
+	textContent := msg.Content
+	if textContent != "" {
+		cleaned, dsmlCalls := extractDSMLFromContent(textContent, nil)
+		if cleaned != "" {
+			contentBlocks = append(contentBlocks, map[string]any{
+				"type": "text",
+				"text": cleaned,
+			})
+		}
+		msg.Content = cleaned
+		dsmlToolCalls = append(dsmlToolCalls, dsmlCalls...)
 	}
 
 	// Tool calls — don't fallback to ID when Function.Name is empty (see decolua/9router#2077, #3685)
@@ -345,14 +638,31 @@ func TranslateOpenAIToClaude(openaiResp []byte) ([]byte, *OpenAIUsage, error) {
 		var input jsontext.Value
 		if tc.Function != nil && tc.Function.Arguments != "" {
 			sanitized := sanitizeToolArgs(toolName, tc.Function.Arguments)
-			input = jsontext.Value(sanitized)
+			input = SafeToolCallInput(sanitized)
 		} else {
 			input = jsontext.Value("{}")
 		}
 		contentBlocks = append(contentBlocks, map[string]any{
 			"type":  "tool_use",
-			"id":    tc.ID,
+			"id":    SanitizeClaudeToolID(tc.ID),
 			"name":  toolName,
+			"input": input,
+		})
+	}
+
+	// DSML tool calls parsed from inline content (DeepSeek-family upstreams emit
+	// <|DSML| invoke ...> blocks instead of structured tool_calls).
+	for _, call := range dsmlToolCalls {
+		var input jsontext.Value
+		if call.Arguments != "" {
+			input = SafeToolCallInput(call.Arguments)
+		} else {
+			input = jsontext.Value("{}")
+		}
+		contentBlocks = append(contentBlocks, map[string]any{
+			"type":  "tool_use",
+			"id":    call.ID,
+			"name":  call.Name,
 			"input": input,
 		})
 	}
@@ -394,8 +704,16 @@ func TranslateOpenAIToClaude(openaiResp []byte) ([]byte, *OpenAIUsage, error) {
 		CompletionTokensDetails:  details,
 		PromptCacheIncluded:      true,
 	}
+	// Anthropic's input_tokens counts only uncached input; OpenAI's
+	// prompt_tokens already includes the cached subset. Splitting them here
+	// keeps Claude Code (which sums input + cache_read + cache_creation)
+	// from double-counting the cached tokens.
+	uncachedInput := inputTokens - cachedTokens
+	if uncachedInput < 0 {
+		uncachedInput = 0
+	}
 	claudeUsageMap := map[string]any{
-		"input_tokens":  inputTokens,
+		"input_tokens":  uncachedInput,
 		"output_tokens": outputTokens,
 	}
 	if cachedTokens > 0 {
@@ -426,6 +744,11 @@ func TranslateOpenAIToClaude(openaiResp []byte) ([]byte, *OpenAIUsage, error) {
 // TranslateOpenAIToClaudeStream converts a single OpenAI SSE chunk JSON payload to Claude SSE format.
 // It keys the per-stream translation state by chunk.ID; callers with concurrent
 // streams should prefer TranslateOpenAIToClaudeStreamSession to scope state per request.
+//
+// Without a session key the deferred terminal cannot be flushed at [DONE] (a
+// [DONE] payload carries no chunk ID to look the state up by), so a stream
+// whose finish deferred the terminal closes only via EnsureStreamClosed —
+// which also needs the key. Production callers must use the Session variant.
 func TranslateOpenAIToClaudeStream(openaiChunk []byte) ([]byte, error) {
 	return TranslateOpenAIToClaudeStreamSession("", openaiChunk)
 }
@@ -441,6 +764,9 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 		return nil, nil
 	}
 	if string(trimmed) == "[DONE]" {
+		if tail := flushDeferredTerminal(sessionKey); len(tail) > 0 {
+			return append(tail, []byte("data: [DONE]\n\n")...), nil
+		}
 		return []byte("data: [DONE]\n\n"), nil
 	}
 
@@ -458,6 +784,9 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 	}
 
 	if isDone {
+		if tail := flushDeferredTerminal(sessionKey); len(tail) > 0 {
+			return append(tail, []byte("data: [DONE]\n\n")...), nil
+		}
 		return []byte("data: [DONE]\n\n"), nil
 	}
 
@@ -521,6 +850,8 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 	}
 	statesMu.Unlock()
 
+	var results []map[string]any
+
 	if chunk.Usage != nil {
 		if state.Usage == nil {
 			state.Usage = &OpenAIUsage{}
@@ -540,13 +871,19 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 		if chunk.Usage.CompletionTokensDetails != nil {
 			state.Usage.CompletionTokensDetails = chunk.Usage.CompletionTokensDetails
 		}
+		// Deferred terminal: the finish chunk already went by without usage,
+		// and this trailing chunk is where stream_options.include_usage
+		// delivers it. Close the message now with the real numbers.
+		if state.FinishReason != "" && !state.TerminalSent {
+			state.TerminalSent = true
+			results = append(results, claudeTerminalEvents(state)...)
+		}
 	}
-
-	var results []map[string]any
 
 	// 1. Message Start
 	if !state.MessageStartSent {
 		state.MessageStartSent = true
+		state.PromptEstimate = promptEstimateFor(sessionKey)
 		results = append(results, map[string]any{
 			"type": "message_start",
 			"message": map[string]any{
@@ -606,31 +943,40 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 		})
 	}
 
-	// 3. Content
+	// 3. Content — buffer once a DeepSeek DSML marker appears so raw markup is
+	// never streamed to the client; cleaned text and DSML tool calls are emitted
+	// at finish instead.
+	//
+	// To avoid O(N^2) buffer scans on non-DSML streams, text is streamed as it
+	// arrives. Only a trailing '<' that might begin a DSML tag (split across
+	// chunk boundaries) is held back until the next chunk decides. Once a DSML
+	// open tag is confirmed, the remainder is buffered and cleaned at finish.
+	// Text already streamed is never re-emitted, so there is no duplicated
+	// prose.
 	if delta.Content != "" {
-		stopThinkingBlock(state, &results)
-		if !state.TextBlockStarted {
-			state.TextBlockIndex = state.NextBlockIndex
-			state.NextBlockIndex++
-			state.TextBlockStarted = true
-			state.TextBlockClosed = false
-			results = append(results, map[string]any{
-				"type":  "content_block_start",
-				"index": state.TextBlockIndex,
-				"content_block": map[string]any{
-					"type": "text",
-					"text": "",
-				},
-			})
+		if state.DSMLBuffered {
+			// Already in DSML mode: hold everything for finish-time cleanup.
+			state.DSMLBuffer += delta.Content
+		} else {
+			combined := state.DSMLBuffer + delta.Content
+			if loc := dsmlAnyOpen.FindStringIndex(combined); loc != nil {
+				// A DSML open tag starts at loc[0]. Stream the prose before it,
+				// then hold the tag and everything after for finish-time cleanup.
+				if loc[0] > 0 {
+					streamText(state, &results, combined[:loc[0]])
+				}
+				state.DSMLBuffer = combined[loc[0]:]
+				state.DSMLBuffered = true
+			} else {
+				// No DSML tag yet. Stream everything except a trailing '<' that
+				// could begin a DSML tag in the next chunk (split boundary).
+				stream, hold := dsmlStreamSplit(combined)
+				if stream != "" {
+					streamText(state, &results, stream)
+				}
+				state.DSMLBuffer = hold
+			}
 		}
-		results = append(results, map[string]any{
-			"type":  "content_block_delta",
-			"index": state.TextBlockIndex,
-			"delta": map[string]any{
-				"type": "text_delta",
-				"text": delta.Content,
-			},
-		})
 	}
 
 	// 4. Tool calls
@@ -657,7 +1003,7 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 				toolBlockIndex := state.NextBlockIndex
 				state.NextBlockIndex++
 				state.ToolCalls[idx] = ToolCallState{
-					ID:         tc.ID,
+					ID:         SanitizeClaudeToolID(tc.ID),
 					Name:       toolName,
 					BlockIndex: toolBlockIndex,
 				}
@@ -666,7 +1012,7 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 					"index": toolBlockIndex,
 					"content_block": map[string]any{
 						"type":  "tool_use",
-						"id":    tc.ID,
+						"id":    SanitizeClaudeToolID(tc.ID),
 						"name":  toolName,
 						"input": map[string]any{},
 					},
@@ -682,6 +1028,7 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 	if choice.FinishReason != nil {
 		stopThinkingBlock(state, &results)
 		stopTextBlock(state, &results)
+		flushDSML(state, &results)
 		for idx, toolInfo := range state.ToolCalls {
 			buffered := state.ToolArgBuffers[idx]
 			sanitized := sanitizeToolArgs(toolInfo.Name, buffered)
@@ -698,44 +1045,19 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 				"index": toolInfo.BlockIndex,
 			})
 		}
-		finishReason := *choice.FinishReason
-		state.FinishReason = finishReason
-		claudeStop := "end_turn"
-		switch finishReason {
-		case "stop":
-			claudeStop = "end_turn"
-		case "length":
-			claudeStop = "max_tokens"
-		case "tool_calls":
-			claudeStop = "tool_use"
-		case "content_filter":
-			claudeStop = "refusal"
-		}
-		finalUsage := map[string]any{
-			"input_tokens":  0,
-			"output_tokens": 0,
-		}
+		state.FinishReason = *choice.FinishReason
 		if state.Usage != nil {
-			finalUsage["input_tokens"] = state.Usage.PromptTokens
-			finalUsage["output_tokens"] = state.Usage.CompletionTokens
-			if cached := state.Usage.GetCachedTokens(); cached > 0 {
-				finalUsage["cache_read_input_tokens"] = cached
-			}
-			if state.Usage.CacheCreationInputTokens > 0 {
-				finalUsage["cache_creation_input_tokens"] = state.Usage.CacheCreationInputTokens
-			}
+			// Usage arrived on the finish chunk itself: close the message now.
+			state.TerminalSent = true
+			results = append(results, claudeTerminalEvents(state)...)
 		}
-		results = append(results, map[string]any{
-			"type": "message_delta",
-			"delta": map[string]any{
-				"stop_reason":   claudeStop,
-				"stop_sequence": nil,
-			},
-			"usage": finalUsage,
-		})
-		results = append(results, map[string]any{
-			"type": "message_stop",
-		})
+		// Usage not known yet: the terminal is deferred. With
+		// stream_options.include_usage an OpenAI stream carries usage on a
+		// trailing zero-choice chunk AFTER the finish chunk, so emitting the
+		// message_delta here would report zeros and the client's context
+		// meter would never move. The usage chunk closes it (see the usage
+		// block above); a stream that ends without one is closed by the
+		// [DONE] flush or EnsureStreamClosed.
 		// NOTE: the state is intentionally left in the map here so callers can
 		// still read accumulated usage via GetStreamUsage(sessionKey) after the
 		// finish chunk. Cleanup is the caller's job via ClearStreamState (defer).
@@ -749,7 +1071,9 @@ func TranslateOpenAIToClaudeStreamSession(sessionKey string, openaiChunk []byte)
 }
 
 // EnsureStreamClosed generates closing events (message_delta, message_stop) if a stream
-// was interrupted or ended without an explicit finish_reason from upstream.
+// was interrupted or ended without an explicit terminal from upstream. That
+// covers both a finish_reason that never arrived and the deferred terminal of
+// a finish whose usage chunk never came.
 func EnsureStreamClosed(sessionKey string) []byte {
 	if sessionKey == "" {
 		return nil
@@ -760,15 +1084,19 @@ func EnsureStreamClosed(sessionKey string) []byte {
 	if !exists || state == nil {
 		return nil
 	}
-	if state.FinishReason != "" {
+	if state.TerminalSent {
 		return nil // Already cleanly closed
 	}
 
-	state.FinishReason = "stop"
+	if state.FinishReason == "" {
+		state.FinishReason = "stop"
+	}
+	state.TerminalSent = true
 	var results []map[string]any
 
 	if !state.MessageStartSent {
 		state.MessageStartSent = true
+		state.PromptEstimate = promptEstimateFor(sessionKey)
 		results = append(results, map[string]any{
 			"type": "message_start",
 			"message": map[string]any{
@@ -788,6 +1116,7 @@ func EnsureStreamClosed(sessionKey string) []byte {
 	}
 
 	stopThinkingBlock(state, &results)
+	flushDSML(state, &results)
 	stopTextBlock(state, &results)
 
 	for idx, toolInfo := range state.ToolCalls {
@@ -807,25 +1136,7 @@ func EnsureStreamClosed(sessionKey string) []byte {
 		})
 	}
 
-	finalUsage := map[string]any{
-		"input_tokens":  0,
-		"output_tokens": 0,
-	}
-	if state.Usage != nil {
-		finalUsage["input_tokens"] = state.Usage.PromptTokens
-		finalUsage["output_tokens"] = state.Usage.CompletionTokens
-	}
-	results = append(results, map[string]any{
-		"type": "message_delta",
-		"delta": map[string]any{
-			"stop_reason":   "end_turn",
-			"stop_sequence": nil,
-		},
-		"usage": finalUsage,
-	})
-	results = append(results, map[string]any{
-		"type": "message_stop",
-	})
+	results = append(results, claudeTerminalEvents(state)...)
 
 	var buf bytes.Buffer
 	for _, res := range results {

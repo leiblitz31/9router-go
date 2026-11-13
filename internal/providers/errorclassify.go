@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // ErrorRule classifies an upstream error by text match or status code.
@@ -16,6 +17,10 @@ type ErrorRule struct {
 	// Provider scopes a text rule to one canonical provider id; empty applies
 	// to every provider.
 	Provider string
+	// Quota marks an error that means the account's credit/billing budget is
+	// spent. These do NOT clear on a short timer, so they get a long cooldown
+	// and are surfaced as a distinct status instead of a transient blip.
+	Quota bool
 }
 
 // BackoffConfig controls exponential backoff scaling.
@@ -34,8 +39,9 @@ const TransientCooldownMs = 30 * 1000 // 30 seconds
 
 // cooldown durations (ms) used by ERROR_RULES
 const (
-	cooldownLong  = 2 * 60 * 1000 // 2 minutes
-	cooldownShort = 5 * 1000      // 5 seconds
+	cooldownLong     = 2 * 60 * 1000  // 2 minutes
+	cooldownShort    = 5 * 1000       // 5 seconds
+	cooldownAuthDead = 60 * 60 * 1000 // 1 hour
 
 	// cooldownAccountBan parks a CodeBuddy intl credential whose account the
 	// vendor's risk control restricted (11140 "request illegal"). Independent
@@ -56,23 +62,66 @@ const (
 	// is not, so the account waits out a short window instead of absorbing
 	// every turn the same address is refused on.
 	cooldownAddressRefused = 30 * 60 * 1000
+
+	// QuotaExhaustedCooldownMs is how long an account is parked after the
+	// upstream reports its credit/quota budget is spent. Ported from the
+	// upstream classify429 helper (QUOTA_EXHAUSTED_COOLDOWN_MS): a rate limit
+	// clears in a minute, but "insufficient balance" will not fix itself in 30
+	// seconds — retrying that often just burns a guaranteed-failed upstream
+	// call and keeps the dashboard showing a false recovery.
+	QuotaExhaustedCooldownMs = 60 * 60 * 1000 // 1 hour
 )
 
 // ErrorRules is the ordered list of error classification rules, matching Next.js ERROR_RULES.
 // Checked top-to-bottom: text rules first (by order), then status rules.
 var ErrorRules = []ErrorRule{
+	// The ban rule must precede the generic 11140 rules: an account-level
+	// risk-control block (11140 "request illegal" with a restricted display
+	// message) does not clear on a short cooldown, and re-picking the banned
+	// credential every two minutes is what inflates the block. The wording is
+	// the only safe signal — 11140 also carries ordinary throttling, which
+	// stays on backoff.
+	{Provider: "codebuddy-intl", Text: "account restricted upstream", CooldownMs: cooldownAccountBan},
+	// The same canonical wording on any other provider is not a ban verdict
+	// for that provider — it reads as a plain 403 (generic two minutes)
+	// instead of the 30-minute address refusal the bare 11140 code earns.
+	{Text: "account restricted upstream", CooldownMs: cooldownLong},
+	{Text: "11158", CooldownMs: cooldownLong},
+	{Text: "model_not_in_plan", CooldownMs: cooldownLong},
+	{Text: "当前账号类型暂不支持该模型", CooldownMs: cooldownLong},
+	{Text: "14018", CooldownMs: cooldownLong},
+	{Text: "额度已用尽", CooldownMs: cooldownLong},
+	{Text: "11140", CooldownMs: cooldownAddressRefused},
+	{Text: "account has been restricted due to unusual activity", CooldownMs: cooldownAddressRefused},
+	{Text: "账号存在异常行为", CooldownMs: cooldownAddressRefused},
+	// --- Quota / credit exhaustion (checked before generic rules) ---
+	// A spent budget is not a transient throttle: give it the long cooldown
+	// instead of the 30s transient default. Without this, "insufficient
+	// balance" heals itself every 30 seconds and the dashboard keeps
+	// claiming a guaranteed-failing account is connected.
+	{Text: "insufficient balance", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "insufficient credit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "credits exhausted", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "credit exhausted", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "no remaining credits", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "quota exceeded", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "insufficient quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "monthly limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "frequency limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "payment required", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	// TokenHarbor's free tier answers 429 with "You've used this period's free
+	// allowance. Your next rolling 7-day period starts on ...". The status
+	// alone reads as a throttle, so it only ever earned a 2s→5min backoff and
+	// the spent account was re-dialled all window. The allowance is spent for
+	// days, which is what this cooldown family is for.
+	{Text: "free allowance", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+
 	// --- Text-based rules (checked first, order = priority) ---
 	// Intl gateway blocks affect the account/IP, so let the connection back
 	// off (upstream 3b137aa6): without a provider-scoped rule the messages
 	// fall through to the request-scoped 4xx path and the connection gets
 	// zero cooldown while its backoff level never moves.
 	//
-	// The ban rule must precede them: an account-level risk-control block
-	// (11140 "request illegal" with a restricted display message) does not
-	// clear on a short cooldown, and re-picking the banned credential every
-	// two minutes is what inflates the block. The wording is the only safe
-	// signal — 11140 also carries ordinary throttling, which stays on backoff.
-	{Provider: "codebuddy-intl", Text: "account restricted upstream", CooldownMs: cooldownAccountBan},
 	{Provider: "codebuddy-intl", Text: "request illegal", Backoff: true},
 	{Provider: "codebuddy-intl", Text: "conversation id missing", Backoff: true},
 	// DeepSeek web account-level refusals both arrive as 403, and they are
@@ -82,19 +131,30 @@ var ErrorRules = []ErrorRule{
 	// forever. The generic 403 rule cannot tell them apart.
 	{Provider: "deepseek-web", Text: "refused this account", CooldownMs: cooldownBannedAccount},
 	{Provider: "deepseek-web", Text: "refused this address", CooldownMs: cooldownAddressRefused},
+	// Google permanently disables Antigravity OAuth accounts for ToS
+	// violations; nothing clears until the operator wins an appeal.
+	{Provider: "antigravity", Text: "disabled in this account for violation", CooldownMs: cooldownBannedAccount},
+	// tos_violation is deliberately NOT a standalone 24h rule: a bare
+	// tos_violation (another provider's refusal, or a user prompt echoed
+	// into an error) must not park a healthy connection. The real Google
+	// ban carries the "disabled in this account" sentence above plus the
+	// cloudcode-pa domain, which is what parks the account for 24h.
+	{Text: "rate_limit_exceeded", CooldownMs: cooldownShort},
+	{Text: "creditlimitexceeded", CooldownMs: cooldownLong},
+	{Text: "insufficient_quota", CooldownMs: cooldownLong},
+	{Text: "billing_error", CooldownMs: cooldownLong},
+	{Text: "budgetlimiterror", CooldownMs: cooldownLong},
+	{Text: "gousagelimiterror", CooldownMs: cooldownLong},
+	{Text: "free_pi_token_expired", CooldownMs: cooldownAuthDead},
+
 	{Text: "no credentials", CooldownMs: cooldownLong},
 	{Text: "request not allowed", CooldownMs: cooldownShort},
-	{Text: "improperly formed request", CooldownMs: cooldownLong},
 	{Text: "rate limit", Backoff: true},
 	{Text: "too many requests", Backoff: true},
-	{Text: "quota exceeded", Backoff: true},
-	// Out-of-credits arrives as a 400 from several providers ("insufficient
-	// credits" / Anthropic's "credit balance is too low"). The combo advance
-	// happens through the request-scoped 4xx path, but without these rules
-	// the spent account reads as healthy and is retried on every pass
-	// (upstream b82f5c4a).
-	{Text: "insufficient credit", Backoff: true},
-	{Text: "credit balance is too low", Backoff: true},
+	// "credit balance is too low" stays here: it is Anthropic's wording for a
+	// spent balance but does not contain "insufficient credit", so the head
+	// quota rules above do not match it.
+	{Text: "credit balance is too low", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
 	{Text: "capacity", Backoff: true},
 	{Text: "overloaded", Backoff: true},
 	{Text: "resource_exhausted", Backoff: true},
@@ -111,138 +171,6 @@ var ErrorRules = []ErrorRule{
 	{Status: 502, Backoff: true},
 	{Status: 503, Backoff: true},
 	{Status: 504, Backoff: true},
-}
-
-// ModelFitErrorPatterns are the upstream messages that mean "this model cannot
-// hold the request", as opposed to "this account cannot serve it". Matched
-// case-insensitively against the error body.
-//
-// The distinction matters inside a combo: an account fault is worth another
-// connection, but a prompt that does not fit the model gets the same answer from
-// every connection to it, so the only useful move is a member with a bigger
-// context window (#338).
-var ModelFitErrorPatterns = []string{
-	"context_length_exceeded",
-	"maximum context length",
-	"prompt is too long",
-	"reduce the length of the messages",
-	"input is too long",
-	"too many tokens",
-	"context window",
-	"exceeds the maximum number of tokens",
-}
-
-// ModelFitStatusCodes are the statuses an upstream uses to reject an oversized
-// request. A 400 carries it almost everywhere; 413 and 422 are the other two
-// spellings seen in the wild. Gating on the status keeps a provider's prose from
-// triggering the classification on an unrelated failure.
-var ModelFitStatusCodes = map[int]bool{
-	http.StatusBadRequest:            true, // 400
-	http.StatusRequestEntityTooLarge: true, // 413
-	http.StatusUnprocessableEntity:   true, // 422
-}
-
-// IsModelFitError reports whether an upstream failure means the chosen model is
-// too small for the request rather than the connection being at fault.
-func IsModelFitError(statusCode int, body []byte) bool {
-	if !ModelFitStatusCodes[statusCode] || len(body) == 0 {
-		return false
-	}
-	text := strings.ToLower(string(body))
-	for _, pattern := range ModelFitErrorPatterns {
-		if strings.Contains(text, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// GetQuotaCooldown calculates exponential backoff cooldown for rate limits.
-// Level 0 → 2s, Level 1 → 2s, Level 2 → 4s, Level 3 → 8s, ... capped at MaxMs.
-func GetQuotaCooldown(backoffLevel int) int {
-	level := max(backoffLevel-1, 0)
-	cooldown := int(float64(BackoffConfig.BaseMs) * math.Pow(2, float64(level)))
-	return min(cooldown, BackoffConfig.MaxMs)
-}
-
-// ErrorClassification holds the result of ClassifyError.
-type ErrorClassification struct {
-	ShouldFallback  bool
-	CooldownMs      int
-	NewBackoffLevel int // only meaningful when the matched rule has Backoff=true
-}
-
-// ClassifyError classifies an upstream error by matching text and status against ErrorRules.
-// Returns the cooldown duration and new backoff level.
-// Matches Next.js checkFallbackError() in open-sse/services/accountFallback.js.
-func ClassifyError(statusCode int, errorText string, backoffLevel int) ErrorClassification {
-	return ClassifyErrorForProvider(statusCode, errorText, backoffLevel, "")
-}
-
-// ClassifyErrorForProvider is ClassifyError with provider-scoped rules
-// applied: provider is the canonical provider id the request routed to
-// (aliases are resolved here, so `cbai` matches the codebuddy-intl rules).
-func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int, provider string) ErrorClassification {
-	if provider != "" {
-		provider = ResolveAlias(provider)
-	}
-	lowerError := ""
-	if errorText != "" {
-		lowerError = strings.ToLower(errorText)
-	}
-
-	for _, rule := range ErrorRules {
-		// Text-based match (substring, case-insensitive)
-		if rule.Text != "" && lowerError != "" && strings.Contains(lowerError, rule.Text) {
-			if rule.Provider != "" && rule.Provider != provider {
-				continue
-			}
-			if rule.Backoff {
-				newLevel := min(backoffLevel+1, BackoffConfig.MaxLevel)
-				return ErrorClassification{
-					ShouldFallback:  true,
-					CooldownMs:      GetQuotaCooldown(newLevel),
-					NewBackoffLevel: newLevel,
-				}
-			}
-			return ErrorClassification{
-				ShouldFallback:  true,
-				CooldownMs:      rule.CooldownMs,
-				NewBackoffLevel: backoffLevel,
-			}
-		}
-
-		// Status-based match
-		if rule.Status != 0 && rule.Status == statusCode {
-			if rule.Backoff {
-				newLevel := min(backoffLevel+1, BackoffConfig.MaxLevel)
-				return ErrorClassification{
-					ShouldFallback:  true,
-					CooldownMs:      GetQuotaCooldown(newLevel),
-					NewBackoffLevel: newLevel,
-				}
-			}
-			return ErrorClassification{
-				ShouldFallback:  true,
-				CooldownMs:      rule.CooldownMs,
-				NewBackoffLevel: backoffLevel,
-			}
-		}
-	}
-	// Upstream parity (open-sse/services/accountFallback.js checkFallbackError):
-	// request-scoped 4xx that match no rule say nothing about the credential,
-	// so the account must not be cooled down. Account-scoped statuses keep
-	// their rules above (401/402/403/404/429 + quota/capacity text rules).
-	if statusCode >= 400 && statusCode < 500 && statusCode != 401 && statusCode != 402 && statusCode != 403 && statusCode != 429 {
-		return ErrorClassification{ShouldFallback: false}
-	}
-
-	// Default: transient cooldown for any unmatched error
-	return ErrorClassification{
-		ShouldFallback:  true,
-		CooldownMs:      TransientCooldownMs,
-		NewBackoffLevel: backoffLevel,
-	}
 }
 
 // quotaExhaustedPatterns mirror the upstream classify429 QUOTA_EXHAUSTED_PATTERNS
@@ -341,6 +269,9 @@ var permanentFailurePatterns = []string{
 	"account suspended",
 	"account disabled",
 	"not found",
+	// Antigravity ToS bans never clear by waiting.
+	"this service has been disabled in this account",
+	"tos_violation",
 }
 
 // LooksLikePermanentFailure reports whether an error means the credential is
@@ -417,3 +348,179 @@ func LooksLikeRateLimited(errorText string) bool {
 
 // ModelFitErrorPatterns are the upstream messages that mean "this model cannot
 // hold the request", as opposed to "this account cannot serve it". Matched
+// case-insensitively against the error body.
+//
+// The distinction matters inside a combo: an account fault is worth another
+// connection, but a prompt that does not fit the model gets the same answer from
+// every connection to it, so the only useful move is a member with a bigger
+// context window (#338).
+var ModelFitErrorPatterns = []string{
+	"context_length_exceeded",
+	"maximum context length",
+	"prompt is too long",
+	"reduce the length of the messages",
+	"input is too long",
+	"too many tokens",
+	"context window",
+	"exceeds the maximum number of tokens",
+	// A text-only model rejects the media an older turn still carries. The
+	// trailing turn was text, so the request never registered as a vision
+	// request and the history went out verbatim; every connection to this
+	// model answers the same way, so like the length patterns above the only
+	// useful move is the next member. The quoted spellings both matter: the
+	// body is matched raw, so a JSON-encoded message carries the quotes as
+	// \" while a plain-text error body carries them bare.
+	`unsupported value \"image`,
+	`unsupported value "image`,
+	"not support image",
+	"image input not supported",
+	"images are not supported",
+}
+
+// ModelFitStatusCodes are the statuses an upstream uses to reject an oversized
+// request. A 400 carries it almost everywhere; 413 and 422 are the other two
+// spellings seen in the wild, and Zed sends it as a 403. 403 is otherwise the
+// account-refusal status, so admitting it here means every 403 is re-checked
+// against the body patterns before it can be called a fit failure — a plain
+// permission refusal still lands on the generic 403 rule. Gating on the status
+// keeps a provider's prose from triggering the classification on an unrelated
+// failure.
+var ModelFitStatusCodes = map[int]bool{
+	http.StatusBadRequest:            true, // 400
+	http.StatusRequestEntityTooLarge: true, // 413
+	http.StatusUnprocessableEntity:   true, // 422
+	http.StatusForbidden:             true, // 403, Zed
+}
+
+// IsModelFitError reports whether an upstream failure means the chosen model is
+// too small for the request rather than the connection being at fault.
+func IsModelFitError(statusCode int, body []byte) bool {
+	if !ModelFitStatusCodes[statusCode] || len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	for _, pattern := range ModelFitErrorPatterns {
+		if strings.Contains(text, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetQuotaCooldown calculates exponential backoff cooldown for rate limits.
+// Level 0 → 2s, Level 1 → 2s, Level 2 → 4s, Level 3 → 8s, ... capped at MaxMs.
+func GetQuotaCooldown(backoffLevel int) int {
+	level := max(backoffLevel-1, 0)
+	cooldown := int(float64(BackoffConfig.BaseMs) * math.Pow(2, float64(level)))
+	return min(cooldown, BackoffConfig.MaxMs)
+}
+
+// GetEscalatingLockoutCooldown returns the cooldown for the nth consecutive
+// account-level lockout (1-based, failureStreak >= 1):
+//
+//	streak 1 -> 24h, streak 2 -> 48h, streak 3 -> 96h (4 days),
+//	streak 4 -> 168h (7 days), streak 5+ -> 336h (14 days).
+//
+// A streak of 0 (or a reset after a successful probe / manual re-test) means no
+// lockout: returns 0.
+//
+// This replaces the flat cooldownBannedAccount for repeated account-level
+// failures: once 24 hours lapse without the operator resolving the account, the
+// next failure parks it longer instead of immediately re-dialling a dead
+// account and inviting another WAF flag.
+func GetEscalatingLockoutCooldown(failureStreak int) time.Duration {
+	switch {
+	case failureStreak <= 0:
+		return 0
+	case failureStreak == 1:
+		return 24 * time.Hour
+	case failureStreak == 2:
+		return 48 * time.Hour
+	case failureStreak == 3:
+		return 96 * time.Hour
+	case failureStreak == 4:
+		return 168 * time.Hour
+	default:
+		return 336 * time.Hour
+	}
+}
+
+// ErrorClassification holds the result of ClassifyError.
+type ErrorClassification struct {
+	ShouldFallback  bool
+	CooldownMs      int
+	NewBackoffLevel int // only meaningful when the matched rule has Backoff=true
+}
+
+// ClassifyError classifies an upstream error by matching text and status against ErrorRules.
+// Returns the cooldown duration and new backoff level.
+// Matches Next.js checkFallbackError() in open-sse/services/accountFallback.js.
+func ClassifyError(statusCode int, errorText string, backoffLevel int) ErrorClassification {
+	return ClassifyErrorForProvider(statusCode, errorText, backoffLevel, "")
+}
+
+// ClassifyErrorForProvider is ClassifyError with provider-scoped rules
+// applied: provider is the canonical provider id the request routed to
+// (aliases are resolved here, so `cbai` matches the codebuddy-intl rules).
+func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int, provider string) ErrorClassification {
+	if provider != "" {
+		provider = ResolveAlias(provider)
+	}
+	lowerError := ""
+	if errorText != "" {
+		lowerError = strings.ToLower(errorText)
+	}
+
+	for _, rule := range ErrorRules {
+		// Text-based match (substring, case-insensitive)
+		if rule.Text != "" && lowerError != "" && strings.Contains(lowerError, rule.Text) {
+			if rule.Provider != "" && rule.Provider != provider {
+				continue
+			}
+			if rule.Backoff {
+				newLevel := min(backoffLevel+1, BackoffConfig.MaxLevel)
+				return ErrorClassification{
+					ShouldFallback:  true,
+					CooldownMs:      GetQuotaCooldown(newLevel),
+					NewBackoffLevel: newLevel,
+				}
+			}
+			return ErrorClassification{
+				ShouldFallback:  true,
+				CooldownMs:      rule.CooldownMs,
+				NewBackoffLevel: backoffLevel,
+			}
+		}
+
+		// Status-based match
+		if rule.Status != 0 && rule.Status == statusCode {
+			if rule.Backoff {
+				newLevel := min(backoffLevel+1, BackoffConfig.MaxLevel)
+				return ErrorClassification{
+					ShouldFallback:  true,
+					CooldownMs:      GetQuotaCooldown(newLevel),
+					NewBackoffLevel: newLevel,
+				}
+			}
+			return ErrorClassification{
+				ShouldFallback:  true,
+				CooldownMs:      rule.CooldownMs,
+				NewBackoffLevel: backoffLevel,
+			}
+		}
+	}
+	// Upstream parity (open-sse/services/accountFallback.js checkFallbackError):
+	// request-scoped 4xx that match no rule say nothing about the credential,
+	// so the account must not be cooled down. Account-scoped statuses keep
+	// their rules above (401/402/403/404/429 + quota/capacity text rules).
+	if statusCode >= 400 && statusCode < 500 && statusCode != 401 && statusCode != 402 && statusCode != 403 && statusCode != 429 {
+		return ErrorClassification{ShouldFallback: false}
+	}
+
+	// Default: transient cooldown for any unmatched error
+	return ErrorClassification{
+		ShouldFallback:  true,
+		CooldownMs:      TransientCooldownMs,
+		NewBackoffLevel: backoffLevel,
+	}
+}

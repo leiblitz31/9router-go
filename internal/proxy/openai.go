@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"9router/proxy/internal/constants"
 	"9router/proxy/internal/providers"
 )
 
@@ -32,10 +33,23 @@ func ForwardOpenAI(ctx context.Context, client *http.Client, cfg *providers.Prov
 	// Match Node's undici global fetch (user-agent "node", accept "*/*").
 	// An operator StaticHeaders value always wins, whatever its casing.
 	if !hasHeaderFold(headers, "User-Agent") {
-		headers["User-Agent"] = "node"
+		headers["User-Agent"] = constants.DefaultClientUserAgent
 	}
 	if !hasHeaderFold(headers, "Accept") {
 		headers["Accept"] = "*/*"
+	}
+	// The operator's Custom Headers are applied last so they also win over the
+	// defaults set just above, which is the order upstream uses
+	// (open-sse/executors/base.js:132).
+	headers = providers.ApplyHeaderOverrides(headers, cfg.HeaderOverrides)
+	// A streamed answer must not be gzip-compressed on the wire. Go's transport
+	// advertises `Accept-Encoding: gzip` by default, and an edge or provider
+	// that honours it with a buffered compressor releases the whole turn at
+	// once instead of token by token — the "terputus-putus" a client sees.
+	// Identity keeps the event stream flowing; an operator StaticHeader or
+	// Custom Header still wins, so a lane that needs gzip can ask for it.
+	if isStream && !hasHeaderFold(headers, "Accept-Encoding") {
+		headers["Accept-Encoding"] = "identity"
 	}
 	resp, err := DoRequest(ctx, client, "POST", cfg.BaseURL, headers, body)
 	if err != nil {

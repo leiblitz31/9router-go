@@ -62,6 +62,8 @@
   // provider take the wrong probe path. Both submit paths read this one value.
   let connectionAuthType = $derived(isCompatible ? 'compatible' : isCookie ? 'cookie' : 'apikey')
   let isOllamaLocal = $derived(providerId === 'ollama-local')
+  let isMistral = $derived(providerId === 'mistral')
+  let formMistralUsageType = $state<'vibe' | 'api'>('vibe')
   let isXaiApiKey = $derived(providerId === 'xai' && !isCookie)
   let isAzure = $derived(providerId === 'azure')
   let isCloudflareAi = $derived(providerId === 'cloudflare-ai')
@@ -78,10 +80,12 @@
   // cookie either — same reasoning as DeepSeek's label above.
   let isQwenWeb = $derived(providerId === 'qw-web')
   let credentialLabel = $derived(
-    isDeepSeekWeb
-      ? 'User Token'
-      : isQwenWeb
-        ? 'Session Token'
+    isMistral && formMistralUsageType === 'vibe'
+      ? 'Vibe API Key'
+      : isDeepSeekWeb
+        ? 'User Token'
+        : isQwenWeb
+          ? 'Session Token'
         : isCookie
           ? 'Cookie Value'
           : providerId === 'qoder'
@@ -89,23 +93,25 @@
             : 'API Key'
   )
   let credentialPlaceholder = $derived(
-    isDeepSeekWeb
-      ? 'the userToken from chat.deepseek.com localStorage'
-      : isQwenWeb
-        ? 'the token from chat.qwen.ai localStorage'
-        : isCookie
-        ? providerId === 'grok-web'
-          ? 'sso=xxxxx... or just the raw value'
-          : providerId === 'gemini-web'
-            ? '__Secure-1PSID=...; __Secure-1PSIDTS=...'
-            : 'eyJhbGciOi...'
-        : isXaiApiKey
-          ? 'xai-...'
-          : providerId === 'qoder'
-            ? 'pt-...'
-            : usesAwsCredentialForm
-              ? 'AWS secret access key'
-              : ''
+    isMistral && formMistralUsageType === 'vibe'
+      ? 'API Key from chat.mistral.ai/code/extensions'
+      : isDeepSeekWeb
+        ? 'the userToken from chat.deepseek.com localStorage'
+        : isQwenWeb
+          ? 'the token from chat.qwen.ai localStorage'
+          : isCookie
+            ? providerId === 'grok-web'
+              ? 'sso=xxxxx... or just the raw value'
+              : providerId === 'gemini-web'
+                ? '__Secure-1PSID=...; __Secure-1PSIDTS=...'
+                : 'eyJhbGciOi...'
+            : isXaiApiKey
+              ? 'xai-...'
+              : providerId === 'qoder'
+                ? 'pt-...'
+                : usesAwsCredentialForm
+                  ? 'AWS secret access key'
+                  : ''
   )
   let modalTitle = $derived(`Add ${providerName || providerId} ${credentialLabel}`)
 
@@ -181,7 +187,8 @@
 
   function resetForm() {
     mode = 'single'
-    formName = ''
+    formMistralUsageType = 'vibe'
+    formName = isMistral ? 'Mistral Vibe' : ''
     formApiKey = ''
     formDefaultModel = ''
     formPriority = 1
@@ -201,6 +208,9 @@
   }
 
   function buildProviderSpecificData(): Record<string, unknown> | undefined {
+    if (isMistral) {
+      return { usageLane: formMistralUsageType }
+    }
     if (isOllamaLocal && formOllamaHostUrl.trim()) {
       return { baseUrl: formOllamaHostUrl.trim() }
     }
@@ -557,6 +567,49 @@
           </div>
         {:else}
           <form onsubmit={handleSubmit} class="flex flex-col gap-4">
+            {#if isMistral}
+              <div class="flex flex-col gap-1.5">
+                <span class={labelCls}>Usage Lane / Key Type</span>
+                <div class="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    class="flex flex-col items-start p-2.5 rounded-lg border text-left transition-all {formMistralUsageType === 'vibe' ? 'border-primary bg-primary/10 ring-1 ring-primary' : 'border-accent/20 bg-surface-2 hover:bg-surface-3'}"
+                    onclick={() => {
+                      formMistralUsageType = 'vibe'
+                      if (!formName || formName === 'Mistral API') formName = 'Mistral Vibe'
+                    }}
+                  >
+                    <div class="flex items-center gap-1.5 font-medium text-xs text-text-main">
+                      <span class="size-2 rounded-full bg-purple-500"></span>
+                      Vibe API Key
+                    </div>
+                    <span class="text-[11px] text-text-muted mt-0.5">$300/mo quota (Vibe Code)</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="flex flex-col items-start p-2.5 rounded-lg border text-left transition-all {formMistralUsageType === 'api' ? 'border-primary bg-primary/10 ring-1 ring-primary' : 'border-accent/20 bg-surface-2 hover:bg-surface-3'}"
+                    onclick={() => {
+                      formMistralUsageType = 'api'
+                      if (!formName || formName === 'Mistral Vibe') formName = 'Mistral API'
+                    }}
+                  >
+                    <div class="flex items-center gap-1.5 font-medium text-xs text-text-main">
+                      <span class="size-2 rounded-full bg-blue-500"></span>
+                      Standard API Key
+                    </div>
+                    <span class="text-[11px] text-text-muted mt-0.5">Pay-as-you-go per token (PAYG)</span>
+                  </button>
+                </div>
+                <div class="text-xs text-text-muted mt-0.5">
+                  {#if formMistralUsageType === 'vibe'}
+                    💡 Get key at: <a href="https://chat.mistral.ai/code/extensions" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">chat.mistral.ai/code/extensions</a> (Advanced section)
+                  {:else}
+                    💡 Get key at: <a href="https://console.mistral.ai/api-keys" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">console.mistral.ai/api-keys</a>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
             <div>
               <label for="connName" class={labelCls}>
                 Name <span class="text-red-500">*</span>

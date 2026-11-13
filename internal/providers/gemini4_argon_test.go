@@ -52,12 +52,16 @@ func TestGemini4ArgonRegistry(t *testing.T) {
 	}
 }
 
-// TestGemini3KeepsMinimalLevel is the regression guard: Gemini 3 keeps the
-// minimal tier that Argon rejects.
+// TestGemini3KeepsMinimalLevel is the regression guard for the Gemini 3.8
+// floor: the tiered ids answer 400 "Thinking level MINIMAL is not
+// supported" to a thinkingLevel minimal — probed live via the antigravity
+// lane — so LOW is the floor here too, the same rejection Gemini 4 Argon
+// gave. The pre-merge fork test asserted minimal was kept; the probe
+// supersedes it (upstream thinkingLevels.js pattern *gemini-3.8*).
 func TestGemini3KeepsMinimalLevel(t *testing.T) {
 	levels := GetThinkingLevels("gemini", "gemini-3.8-flash")
-	if !slices.Contains(levels, "minimal") {
-		t.Errorf("gemini-3.8-flash levels = %v, want minimal included", levels)
+	if slices.Contains(levels, "minimal") {
+		t.Errorf("gemini-3.8-flash levels = %v, want minimal excluded (probed 400)", levels)
 	}
 }
 
@@ -105,10 +109,12 @@ func TestGemini4ArgonWiring(t *testing.T) {
 			t.Errorf("ClampGeminiLevel(gemini-4-argon, minimal) = %q, want low", clamped)
 		}
 
-		// Gemini 3.8 still accepts minimal
+		// Gemini 3.8 tiered variants reject minimal the same way Argon does
+		// (antigravity 400 "Thinking level MINIMAL is not supported", probed
+		// live on gemini-3.8-flash-low), so the floor is low here too.
 		clamped38 := ClampGeminiLevel("gemini", "gemini-3.8-flash", "minimal")
-		if clamped38 != "minimal" {
-			t.Errorf("ClampGeminiLevel(gemini-3.8-flash, minimal) = %q, want minimal", clamped38)
+		if clamped38 != "low" {
+			t.Errorf("ClampGeminiLevel(gemini-3.8-flash, minimal) = %q, want low", clamped38)
 		}
 	})
 

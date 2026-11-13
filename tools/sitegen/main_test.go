@@ -188,6 +188,20 @@ func TestGenerate(t *testing.T) {
 	if strings.Contains(page, "https://github.com/decolua") {
 		t.Error("absolute link was rewritten")
 	}
+	// The product's own icon, in the tab and in the bar. It used to be a
+	// terracotta "network hub" plate that disagreed with the dashboard; it is now
+	// the shared brandMarkPNG (orange plate, white "9r GO" wordmark). Embedding
+	// the one constant in both the favicon and the wordmark is what keeps the tab,
+	// the bar, and the wiki from each drawing their own mark again.
+	if !strings.Contains(page, `<link rel="icon" href="`+brandMarkPNG+`"`) {
+		t.Error("the project page's tab icon is not the product's own icon")
+	}
+	if !strings.Contains(page, `<image width="512" height="512" href="`+brandMarkPNG+`"/>`) {
+		t.Error("the project page no longer draws the product's own icon")
+	}
+	if strings.Contains(page, ">9</span>") {
+		t.Error("the wordmark is still the letter 9 in a plate instead of the product's icon")
+	}
 }
 
 // A README link to a file that is not in the repository must fail the build

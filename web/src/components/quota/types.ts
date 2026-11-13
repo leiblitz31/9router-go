@@ -101,6 +101,26 @@ function groupByProviderStable<T extends ProviderConnectionLike>(connections: T[
   return Array.from(seen.values()).flat()
 }
 
+export interface ProviderConnectionGroup<T> {
+  provider: string
+  connections: T[]
+}
+
+// Fold a sorted connection list into per-provider groups. Order within a group
+// follows the input order (the caller's sort), and providers keep first-seen
+// order, so a grouped list reads the same way as the flat one.
+export function groupConnectionsByProvider<T extends { provider: string }>(
+  connections: T[],
+): ProviderConnectionGroup<T>[] {
+  const groups = new Map<string, T[]>()
+  for (const conn of connections) {
+    const key = conn.provider || ''
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(conn)
+  }
+  return Array.from(groups, ([provider, list]) => ({ provider, connections: list }))
+}
+
 // Upstream emits Codex quota rows in this order. Unknown keys sort last but
 // keep a stable relative position, so a new window never displaces the known
 // ones.
@@ -1001,6 +1021,19 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
     }
     normalizedQuotas.sort(
       (a, b) => (CLAUDE_QUOTA_ORDER[a.name] ?? 99) - (CLAUDE_QUOTA_ORDER[b.name] ?? 99),
+    )
+    return normalizedQuotas
+  }
+
+  const pLower = provider?.toLowerCase()
+  if (pLower === 'commandcode' || pLower === 'commandcode-goat' || pLower === 'cmc' || pLower === 'cmc-goat') {
+    const COMMANDCODE_QUOTA_ORDER: Record<string, number> = {
+      '5-hour limit': 0,
+      'Weekly limit': 1,
+      'Monthly': 2,
+    }
+    normalizedQuotas.sort(
+      (a, b) => (COMMANDCODE_QUOTA_ORDER[a.name] ?? 99) - (COMMANDCODE_QUOTA_ORDER[b.name] ?? 99),
     )
     return normalizedQuotas
   }

@@ -77,9 +77,34 @@ func ForwardCodex(w http.ResponseWriter, req *Request) error {
 	if err != nil {
 		return fmt.Errorf("transform body: %w", err)
 	}
-	// The ChatGPT Codex backend rejects a max_output_tokens it did not ask
-	// for; every chat-completions client sends one, so drop it here (#48).
-	transformedBody = stripCodexUnsupportedTokenParams(transformedBody)
+	responsesLite := false
+	if req.Provider != "perplexity-agent" {
+		transformedBody, responsesLite, err = shapeCodexResponsesBody(transformedBody, codexLiteRequested(req.Ctx))
+		if err != nil {
+			return fmt.Errorf("shape Codex body: %w", err)
+		}
+	}
+
+	// Resolve conversation-stable session_id for Codex prompt caching
+	sessionID := req.SessionID
+	if sessionID == "" {
+		if req.ConnectionID != "" {
+			sessionID = req.ConnectionID
+		} else if req.ConnData != nil {
+			if cid, ok := req.ConnData["connectionId"].(string); ok && cid != "" {
+				sessionID = cid
+			}
+		}
+	}
+	if sessionID == "" {
+		sessionID = "default"
+	}
+
+	// Inject prompt_cache_key for stable Codex prompt caching if not already set
+	transformedBody = injectCodexPromptCacheKey(transformedBody, sessionID)
+
+	// The ChatGPT Codex backend rejects unsupported parameters and requires the allowlist
+	transformedBody = stripCodexUnsupportedTokenParams(transformedBody, responsesLite)
 	// Only now that the "(level)" suffix is gone can the catalog id be mapped
 	// to its wire id, so this has to follow the transform rather than precede it.
 	transformedBody = rewriteCodexUpstreamModel(transformedBody)
@@ -88,12 +113,31 @@ func ForwardCodex(w http.ResponseWriter, req *Request) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData, codexResponsesLiteBody(transformedBody))
+	resp, err := proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData, responsesLite, sessionID)
 	if err != nil {
 		return fmt.Errorf("ForwardCodex: %w", err)
 	}
 	defer resp.Body.Close()
 	return handleCodexStream(w, req, resp.Body)
+}
+
+func injectCodexPromptCacheKey(body []byte, sessionID string) []byte {
+	if sessionID == "" || sessionID == "default" {
+		return body
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	if pck, ok := envelope["prompt_cache_key"].(string); ok && pck != "" {
+		return body
+	}
+	envelope["prompt_cache_key"] = sessionID
+	out, err := marshalStable(envelope)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // applyCodexCompact routes a compaction request to the codex /compact endpoint
@@ -111,7 +155,7 @@ func applyCodexCompact(cfg *providers.ProviderConfig, body []byte) (*providers.P
 		return cfg, body
 	}
 	delete(envelope, "_compact")
-	out, err := json.Marshal(envelope)
+	out, err := marshalStable(envelope)
 	if err != nil {
 		return cfg, body
 	}
@@ -133,7 +177,7 @@ func ForwardIflow(w http.ResponseWriter, req *Request) error {
 			reqMap["stream_options"] = map[string]any{"include_usage": true}
 		}
 	}
-	reqBody, err := json.Marshal(reqMap)
+	reqBody, err := marshalStable(reqMap)
 	if err != nil {
 		return fmt.Errorf("marshal iflow body: %w", err)
 	}
@@ -180,7 +224,7 @@ func ForwardKimchi(w http.ResponseWriter, req *Request) error {
 
 	CleanKimchiBody(reqBody)
 
-	cleanedBody, err := json.Marshal(reqBody)
+	cleanedBody, err := marshalStable(reqBody)
 	if err != nil {
 		return fmt.Errorf("marshal cleaned body: %w", err)
 	}
@@ -265,16 +309,17 @@ func kiroUpstreamBody(req *Request) ([]byte, error) {
 	// plane; fold them onto the dotted upstream alias.
 	model = normalizeKiroUpstreamModelId(model)
 
-	profileArn := ""
+	profileArn, authMethod := "", ""
 	if req.ConnData != nil {
 		if s, ok := req.ConnData["profileArn"].(string); ok {
 			profileArn = strings.TrimSpace(s)
 		}
+		authMethod, _ = req.ConnData["authMethod"].(string)
 	}
 
 	out, err := translator.OpenAIToKiro(req.Body, translator.KiroTranslateOptions{
 		Model:      model,
-		ProfileArn: profileArn,
+		ProfileArn: providers.KiroEffectiveProfileARN(authMethod, profileArn),
 	})
 	if err != nil {
 		log.Error("executor", "kiro translation failed", "model", model, "error", err)
@@ -329,11 +374,15 @@ func ForwardAzure(w http.ResponseWriter, req *Request) error {
 	if req.IsStream {
 		r.Header.Set("Accept", "text/event-stream")
 	}
+	if req.IsStream && r.Header.Get("Accept-Encoding") == "" {
+		r.Header.Set("Accept-Encoding", "identity")
+	}
 
 	resp, err := req.Client.Do(r)
 	if err != nil {
 		return fmt.Errorf("upstream request failed: %w", err)
 	}
+	proxy.UnwrapIdentityGzip(r, resp)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -637,11 +686,15 @@ func forwardCommandcodeOnce(ctx context.Context, w http.ResponseWriter, req *Req
 			r.Header.Set(k, v)
 		}
 	}
+	if r.Header.Get("Accept-Encoding") == "" {
+		r.Header.Set("Accept-Encoding", "identity")
+	}
 	resp, err := req.Client.Do(r)
 	if err != nil {
 		return fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	proxy.UnwrapIdentityGzip(r, resp)
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
@@ -657,7 +710,6 @@ func forwardCommandcodeOnce(ctx context.Context, w http.ResponseWriter, req *Req
 	return handleCommandcodeStream(w, req, resp.Body, model)
 }
 
-// ForwardOpencode handles requests for opencode (free tier).
 // ForwardOpencode handles requests for opencode (free tier).
 // The free-tier gate is keyless: every request travels with the v2 CLI
 // fingerprint and "Bearer public" (stamped by proxy.BuildOpenCodeHeaders),
@@ -702,9 +754,14 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		// response (translator.ConcealFingerprintTools).
 		// #677: the first attempt already sends the full genuine tool profile,
 		// so the gate escalation re-sends the same body with a fresh session.
+		// Upstream fingerprint: the v2 gate expects the CLI <env> marker;
+		// applied before conceal so the gate escalation re-sends it verbatim.
+		transformedBody = translator.ApplyFingerprintSystemPrompt(transformedBody)
 		preConceal := transformedBody
 		firstBody, firstMap := translator.ConcealOpenCodeV2FingerprintTools(preConceal, true, isOpenCodeAutoToolChoiceModel(cleanModel))
 
+		// The lane URL is what the relay forwards to, so it is built the same way
+		// for a relayed connection as for a direct one.
 		cfg := *req.Config
 		isRelay := cfg.StaticHeaders != nil && cfg.StaticHeaders["x-relay-target"] != ""
 		targetURL := ""
@@ -745,11 +802,11 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 
 		if resp.StatusCode != http.StatusOK {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
-			return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody}
+			return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
 		}
 
 		if req.IsStream {
-			stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, 0, "opencode-responses")
+			stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, cfg.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), "opencode-responses")
 			defer stallReader.Close()
 			return handleCodexStream(w, req, stallReader)
 		}
@@ -763,6 +820,10 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	// on the lane already emits reasoning_content, so the lift is a no-op
 	// there (upstream quirks.reasoningAliasFields).
 	req.LiftReasoningAliases = true
+	// Upstream fingerprint: the v2 gate expects the CLI <env> marker in the
+	// system prompt; the reqMap pass below re-asserts it via
+	// ensureOpenCodeEnvMarker, so this is a no-op when already complete.
+	body = translator.ApplyFingerprintSystemPrompt(body)
 
 	// Upstream OpenCode free tier strictly requires stream=true.
 	// Non-streaming calls are blocked with 403 FreeTierError.
@@ -772,6 +833,11 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		if cleanModel != "" {
 			reqMap["model"] = cleanModel
 		}
+		// A reasoning model spends the same output ceiling on its thinking as on
+		// the answer, so a small client budget returns empty content with
+		// finish_reason "length" — see output_budget.go for the measurements.
+		clampOpenCodeOutputBudget(reqMap, "opencode", cleanModel)
+		includeStreamUsage(reqMap)
 		// The free backend validates reasoning_effort against the plain
 		// OpenAI enum and answers 400 "Invalid option" for "auto", which
 		// adaptive thinking (Claude Code's thinking:{type:"adaptive"})
@@ -843,7 +909,7 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
-		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody}
+		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
 	}
 
 	if req.IsStream {
@@ -863,12 +929,10 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 }
 
 // opencodeInferenceBase rewrites a zen-layout base URL to the v2 inference
-// gate's /inference/v1 prefix. Any host mirroring the zen layout follows the
+// gate's /inference/openai/v1 prefix. Any host mirroring the zen layout follows the
 // same migration, so the rewrite keys off the prefix rather than the host. A
 // base with no zen prefix — a custom endpoint, or the registry default that
-// already points at /inference/v1 — is returned untouched. This stays the
-// zen lane's mapping: only the keyless oc free lane moves to openai/v1
-// (opencodeFreeInferenceBase), never the keyed zen lane.
+// already points at /inference/openai/v1 — is returned untouched.
 func opencodeInferenceBase(base string) string {
 	base = strings.TrimRight(base, "/")
 	base = strings.TrimSuffix(base, "/chat/completions")
@@ -876,7 +940,31 @@ func opencodeInferenceBase(base string) string {
 	base = strings.TrimSuffix(base, "/responses")
 	switch {
 	case strings.HasSuffix(base, "/zen/v1"):
+		return strings.TrimSuffix(base, "/zen/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/openai/v1"):
+		return base
+	case strings.HasSuffix(base, "/inference/v1"):
+		return strings.TrimSuffix(base, "/inference/v1") + "/inference/openai/v1"
+	default:
+		return base
+	}
+}
+
+// opencodeMessagesInferenceBase keeps a zen-layout base URL on the legacy
+// /inference/v1 prefix: the v2 gate's /inference/openai/v1 surface has no
+// /messages route (404), while the legacy prefix still serves Claude
+// Messages. Mirrors opencodeInferenceBase, keyed off the prefix rather than
+// the host.
+func opencodeMessagesInferenceBase(base string) string {
+	base = strings.TrimRight(base, "/")
+	base = strings.TrimSuffix(base, "/chat/completions")
+	base = strings.TrimSuffix(base, "/messages")
+	base = strings.TrimSuffix(base, "/responses")
+	switch {
+	case strings.HasSuffix(base, "/zen/v1"):
 		return strings.TrimSuffix(base, "/zen/v1") + "/inference/v1"
+	case strings.HasSuffix(base, "/inference/openai/v1"):
+		return strings.TrimSuffix(base, "/inference/openai/v1") + "/inference/v1"
 	case strings.HasSuffix(base, "/inference/v1"):
 		return base
 	default:
@@ -1081,11 +1169,20 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 	if !isAnthropicServingProvider(provider) {
 		delete(reqMap, "context_management")
 	}
+	SanitizeClaudeThinking(reqMap)
+	enforceClaudeThinkingSampling(reqMap)
 	delete(reqMap, "stream_options")
 	delete(reqMap, "store")
 	delete(reqMap, "reasoning_effort")
+	delete(reqMap, "n")
 
-	updated, err := json.Marshal(reqMap)
+	// MiniMax exposes a Claude-compatible endpoint but rejects Anthropic's extended
+	// output_config parameter with a generic 400 "invalid params" (upstream #820).
+	if provider == "minimax" || provider == "minimax-cn" {
+		delete(reqMap, "output_config")
+	}
+
+	updated, err := marshalStable(reqMap)
 	if err != nil {
 		return body
 	}
@@ -1098,6 +1195,30 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 // #4727, mirroring decolua/9router's anthropic-compatible- prefix rule).
 func isAnthropicServingProvider(provider string) bool {
 	return provider == "claude" || strings.HasPrefix(provider, "anthropic") || strings.HasPrefix(provider, "anthropic-compatible-")
+}
+
+// enforceClaudeThinkingSampling ensures that when Claude thinking is enabled,
+// temperature is pinned to 1.0 only if a sampling parameter (temperature or top_p)
+// was present in the request. If neither was sent, temperature remains unset so newer
+// models don't reject the request with "temperature is deprecated" (OmniRoute #18639).
+func enforceClaudeThinkingSampling(reqMap map[string]any) {
+	thinking, _ := reqMap["thinking"].(map[string]any)
+	if thinking == nil {
+		return
+	}
+
+	tType, _ := thinking["type"].(string)
+	if tType != "enabled" && tType != "adaptive" {
+		return
+	}
+
+	_, hasTemp := reqMap["temperature"]
+	_, hasTopP := reqMap["top_p"]
+
+	if hasTemp || hasTopP {
+		reqMap["temperature"] = 1.0
+		delete(reqMap, "top_p")
+	}
 }
 
 func convertOpenAIToolsToClaude(tools []any) []any {
@@ -1326,7 +1447,7 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 			// that re-serialize the block through a strict Rust struct — Zed
 			// answers "missing field `is_error`" to a request Anthropic itself
 			// accepts. Emitting it always keeps one body valid on both.
-			isError, _ := msgMap["is_error"].(bool)
+			isError := translator.ToolResultIsError(msgMap)
 			intermediate = append(intermediate, map[string]any{
 				"role": "user",
 				"content": []any{
@@ -1521,44 +1642,25 @@ func deriveOpencodeSession(rawSession, clientTool, connID string) string {
 	return proxy.TranslateOpenCodeSessionID(raw, clientTool)
 }
 
-// museSparkMinOutputTokens is the output-budget floor for Muse Spark. These
-// models spend 570-1320 hidden reasoning tokens before emitting any completion
-// text, so a caller-set budget below the floor is consumed entirely by
-// reasoning: the upstream answers 200 with an empty message, or stalls the
-// stream until the gateway's watchdog reports a 502, and the caller sees a
-// failure that names neither the model nor the budget.
-//
-// 512 is upstream's measured boundary (max_tokens 64/100 → empty content,
-// 256/512/1024 → content present), not a round number picked here. Port of
-// OmniRoute MUSE_SPARK_MIN_OUTPUT_TOKENS
-// (open-sse/executors/opencodeMuseSpark.ts).
-const museSparkMinOutputTokens = 512
-
 // museSparkOutputBudgetFields are the three spellings an OpenAI-shaped request
 // may use for its output cap: Chat Completions' max_tokens, Responses'
-// max_output_tokens, and the OpenAI-compatible max_completion_tokens. A Muse
-// Spark request may arrive on either lane, so all three are clamped.
+// max_output_tokens, and the OpenAI-compatible max_completion_tokens. A request
+// may arrive on either lane, so all three are clamped.
 var museSparkOutputBudgetFields = []string{"max_tokens", "max_output_tokens", "max_completion_tokens"}
 
-// clampMuseSparkOutputBudget raises a caller-set output budget to the floor and
-// returns the fields it changed. It only ever raises: an explicit larger budget
-// and a request that set no budget at all stay byte-identical, because
-// synthesizing a cap the caller never asked for would silently shorten real
-// answers.
+// clampMuseSparkOutputBudget raises a caller-set output budget to the floor for
+// the muse-spark responses lane. The floor and the measurement behind it live
+// in output_budget.go; this wrapper only supplies the lane's scope.
+//
+// Muse Spark spends 570-1320 hidden reasoning tokens before emitting any
+// completion text, so a budget below the floor is consumed entirely by
+// reasoning: the upstream answers 200 with an empty message, or stalls the
+// stream until the gateway's watchdog reports a 502.
 func clampMuseSparkOutputBudget(m map[string]any, cleanModel string) []string {
 	if m == nil || !isOpencodeResponsesModel(cleanModel) {
 		return nil
 	}
-	var raised []string
-	for _, field := range museSparkOutputBudgetFields {
-		budget, ok := outputBudgetOf(m[field])
-		if !ok || budget >= museSparkMinOutputTokens {
-			continue
-		}
-		m[field] = museSparkMinOutputTokens
-		raised = append(raised, field)
-	}
-	return raised
+	return clampOutputBudget(m, true, providers.GetCapabilitiesForModel("opencode", cleanModel).MaxOutput)
 }
 
 // outputBudgetOf reads the numeric shape an output cap decodes to. A JSON
@@ -1688,7 +1790,10 @@ func normalizeMuseSparkResponsesBody(body []byte, model string) ([]byte, error) 
 			}
 		}
 	}
-	return json.Marshal(m)
+	// marshalStable, not json.Marshal: opencode-go's muse-spark lane is a
+	// prefix-caching upstream and a body whose members reshuffle on every
+	// call turns each request after the first into a full cache miss.
+	return marshalStable(m)
 }
 
 // ForwardOpencodeGo handles requests for opencode-go (paid tier).
@@ -1702,9 +1807,13 @@ func opencodeGoInferenceBase(base string) string {
 	base = strings.TrimSuffix(base, "/responses")
 	switch {
 	case strings.HasSuffix(base, "/zen/go/v1"):
-		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/v1"
-	case strings.HasSuffix(base, "/inference/v1"):
+		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/go/openai/v1"):
+		return strings.TrimSuffix(base, "/inference/go/openai/v1") + "/inference/openai/v1"
+	case strings.HasSuffix(base, "/inference/openai/v1"):
 		return base
+	case strings.HasSuffix(base, "/inference/v1"):
+		return strings.TrimSuffix(base, "/inference/v1") + "/inference/openai/v1"
 	default:
 		return base
 	}
@@ -1732,6 +1841,7 @@ func stripOpencodeGoResponseFormat(reqMap map[string]any, cleanModel string) {
 func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel string) error {
 	body := InjectReasoningContent(req.Body, "opencode-go")
 	body, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+	body = translator.ApplyFingerprintSystemPrompt(body)
 	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
 	w = NewToolNameRestoringWriter(w, toolNameMap)
 	// Same execute/CALL_TOOL bridge as the free chat lane: streaming only —
@@ -1750,19 +1860,18 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 		// The free-tier gate requires the CLI <env> marker in the
 		// effective system prompt (decolua/9router#5218, #5222).
 		ensureOpenCodeEnvMarker(reqMap)
+		// Same reasoning-budget floor as the free chat lane: this lane reaches
+		// the same keyless gate, so the same empty-answer failure applies.
+		clampOpenCodeOutputBudget(reqMap, "opencode-go", cleanModel)
+		includeStreamUsage(reqMap)
 		if b, err := marshalStable(reqMap); err == nil {
 			body = b
 		}
 	}
 
+	// One lane URL for both egress paths: a relay forwards to whatever this names.
 	cfg := *req.Config
-	if isRelayConfig(&cfg) {
-		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
-		cfg.StaticHeaders["x-relay-path"] = "/inference/v1/chat/completions"
-		cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
-	} else {
-		cfg.BaseURL = opencodeGoInferenceBase(cfg.BaseURL) + "/chat/completions"
-	}
+	cfg.BaseURL = opencodeGoInferenceBase(cfg.BaseURL) + "/chat/completions"
 	baseHeaders := cfg.StaticHeaders
 	hint := opencodeSessionHint(req, true)
 	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, hint, true)
@@ -1852,7 +1961,7 @@ func forwardOpencodeGoGemini(w http.ResponseWriter, req *Request, cleanModel, se
 	}
 
 	if req.IsStream {
-		return geminiStream(w, resp.Body, ctx)
+		return geminiStream(w, resp.Body, ctx, req)
 	}
 	return geminiNonStream(w, resp.Body)
 }
@@ -1898,16 +2007,11 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 			return fmt.Errorf("normalize opencode-go muse-spark body: %w", err)
 		}
 
+		// The lane URL is what a relay forwards to, so it is built without a relay
+		// branch.
 		cfg := *req.Config
-		isRelay := cfg.StaticHeaders != nil && cfg.StaticHeaders["x-relay-target"] != ""
-		if isRelay {
-			headersCopy := make(map[string]string, len(cfg.StaticHeaders))
-			for k, v := range cfg.StaticHeaders {
-				headersCopy[k] = v
-			}
-			headersCopy["x-relay-path"] = "/zen/go/v1/responses"
-			cfg.StaticHeaders = headersCopy
-		} else if !strings.HasSuffix(cfg.BaseURL, "/responses") {
+		cfg.BaseURL = strings.Replace(cfg.BaseURL, "opencode.ai/zen/go/v1", "opencode.ai/inference/go/openai/v1", 1)
+		if !strings.HasSuffix(cfg.BaseURL, "/responses") {
 			baseURL := strings.TrimRight(cfg.BaseURL, "/")
 			if strings.HasSuffix(baseURL, "/chat/completions") {
 				baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
@@ -1946,11 +2050,11 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 
 		if resp.StatusCode != http.StatusOK {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
-			return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody}
+			return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
 		}
 
 		if req.IsStream {
-			stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, 0, "opencode-go-responses")
+			stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, cfg.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), "opencode-go-responses")
 			defer stallReader.Close()
 			return handleCodexStream(w, req, stallReader)
 		}
@@ -1958,8 +2062,8 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 	}
 
 	if opencodeGoMessagesModels[reqObj.Model] || opencodeGoMessagesModels[cleanModel] {
-		// Route to /zen/go/v1/messages (Anthropic/Claude format)
-		messagesURL := "https://opencode.ai/zen/go/v1/messages"
+		// Route to /inference/go/anthropic/v1/messages (Anthropic/Claude format)
+		messagesURL := "https://opencode.ai/inference/go/anthropic/v1/messages"
 		if req.Config != nil && req.Config.BaseURL != "" && !strings.Contains(req.Config.BaseURL, "opencode.ai") {
 			base := strings.TrimRight(req.Config.BaseURL, "/")
 			if strings.HasSuffix(base, "/chat/completions") {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	json "encoding/json/v2"
 	"fmt"
+	"strings"
 
 	"9router/proxy/internal/models"
 )
@@ -166,6 +167,38 @@ func (r *Repo) GetProviderConnectionByID(id string) (*models.ProviderConnection,
 	return &conn, nil
 }
 
+// ResolveConnectionRoutingByPrefix looks up an active provider connection by primary key (id)
+// or name (case-insensitive and space/dash normalized) returning (provider, id, ok).
+// It does not select data or perform vault decryption / hydration, keeping resolution fast.
+func (r *Repo) ResolveConnectionRoutingByPrefix(prefix string) (provider string, connID string, ok bool) {
+	if r == nil || r.db == nil || prefix == "" {
+		return "", "", false
+	}
+	normPrefix := strings.ToLower(strings.ReplaceAll(prefix, " ", "-"))
+	var p, id string
+	// 1. Direct ID lookup
+	err := r.db.QueryRowContext(
+		context.Background(),
+		`SELECT provider, id FROM providerConnections WHERE id = ? AND isActive = 1 LIMIT 1`,
+		prefix,
+	).Scan(&p, &id)
+	if err == nil && id != "" {
+		return p, id, true
+	}
+	// 2. Name lookup (case-insensitive, exact or space-to-dash normalized)
+	err = r.db.QueryRowContext(
+		context.Background(),
+		`SELECT provider, id FROM providerConnections
+		 WHERE isActive = 1 AND (name = ? COLLATE NOCASE OR replace(name, ' ', '-') = ? COLLATE NOCASE)
+		 LIMIT 1`,
+		prefix, normPrefix,
+	).Scan(&p, &id)
+	if err == nil && id != "" {
+		return p, id, true
+	}
+	return "", "", false
+}
+
 // ReplaceProviderConnectionPayload rewrites an existing connection's name and
 // data in place, keeping its id and position in the rotation. This is what an
 // explicit overwrite does: the caller asked to change the key behind a name
@@ -285,4 +318,77 @@ func (r *Repo) listProviderConnections(query string, args []any) ([]*models.Prov
 		return nil, err
 	}
 	return connections, nil
+}
+
+// IsConnectionMediaActive reports whether a connection payload permits media routing.
+// When serviceKind is provided, it also checks against disabledKinds.
+func IsConnectionMediaActive(dataJSON string, serviceKind ...string) bool {
+	return models.IsConnectionMediaActive(dataJSON, serviceKind...)
+}
+
+// SetConnectionMediaEnabled updates the mediaEnabled flag in the connection's data JSON blob.
+func (r *Repo) SetConnectionMediaEnabled(id string, mediaEnabled bool) error {
+	conn, err := r.GetProviderConnectionByID(id)
+	if err != nil {
+		return err
+	}
+	if conn == nil {
+		return fmt.Errorf("connection %s not found", id)
+	}
+	dataMap := make(map[string]any)
+	if conn.Data != "" {
+		_ = json.Unmarshal([]byte(conn.Data), &dataMap)
+	}
+	dataMap["mediaEnabled"] = mediaEnabled
+	dataMap["isMediaActive"] = mediaEnabled
+	encoded, err := json.Marshal(dataMap)
+	if err != nil {
+		return fmt.Errorf("marshal connection data: %w", err)
+	}
+	now := nowUTC()
+	_, err = r.db.ExecContext(context.Background(), `UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?`, string(encoded), now, id)
+	return err
+}
+
+// SetConnectionDisabledKinds updates providerSpecificData.disabledKinds in the connection's data JSON blob.
+func (r *Repo) SetConnectionDisabledKinds(id string, disabledKinds []string) error {
+	conn, err := r.GetProviderConnectionByID(id)
+	if err != nil {
+		return err
+	}
+	if conn == nil {
+		return fmt.Errorf("connection %s not found", id)
+	}
+	dataMap := make(map[string]any)
+	if conn.Data != "" {
+		_ = json.Unmarshal([]byte(conn.Data), &dataMap)
+	}
+	psd := make(map[string]any)
+	if existingPSD, ok := dataMap["providerSpecificData"].(map[string]any); ok && existingPSD != nil {
+		psd = existingPSD
+	}
+	psd["disabledKinds"] = disabledKinds
+	dataMap["providerSpecificData"] = psd
+	encoded, err := json.Marshal(dataMap)
+	if err != nil {
+		return fmt.Errorf("marshal connection data: %w", err)
+	}
+	now := nowUTC()
+	_, err = r.db.ExecContext(context.Background(), `UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?`, string(encoded), now, id)
+	return err
+}
+
+// GetMediaConnections retrieves provider connections eligible for media requests.
+func (r *Repo) GetMediaConnections(provider string, activeOnly bool, serviceKind ...string) ([]*models.ProviderConnection, error) {
+	conns, err := r.GetProviderConnections(provider, activeOnly)
+	if err != nil {
+		return nil, err
+	}
+	var eligible []*models.ProviderConnection
+	for _, c := range conns {
+		if c != nil && c.IsMediaActive(serviceKind...) {
+			eligible = append(eligible, c)
+		}
+	}
+	return eligible, nil
 }

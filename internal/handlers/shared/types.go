@@ -2,6 +2,9 @@ package shared
 
 import (
 	"net/http"
+	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"9router/proxy/internal/proxy"
@@ -32,6 +35,10 @@ type ConnectionData struct {
 	ConnectionProxyURL     string         `json:"connectionProxyUrl,omitempty"`
 	ConnectionNoProxy      string         `json:"connectionNoProxy,omitempty"`
 	StrictProxy            bool           `json:"strictProxy,omitempty"`
+	AllowPrivateNetworking bool           `json:"allowPrivateNetworking,omitempty"`
+	MediaEnabled           *bool          `json:"mediaEnabled,omitempty"`
+	IsMediaActiveField     *bool          `json:"isMediaActive,omitempty"`
+	DisabledKinds          []string       `json:"disabledKinds,omitempty"`
 	ProviderSpecificData   map[string]any `json:"providerSpecificData,omitempty"`
 
 	// ResolvedProxyPool is the egress label for this request's pool — the name an
@@ -42,24 +49,69 @@ type ConnectionData struct {
 	ResolvedProxyPool string `json:"-"`
 }
 
+// IsMediaActive reports whether the connection data permits media routing for the service kind.
+// Defaults to true when unspecified for backward compatibility.
+func (c *ConnectionData) IsMediaActive(serviceKind ...string) bool {
+	if c == nil {
+		return false
+	}
+	if c.MediaEnabled != nil && !*c.MediaEnabled {
+		return false
+	}
+	if c.IsMediaActiveField != nil && !*c.IsMediaActiveField {
+		return false
+	}
+	kind := ""
+	if len(serviceKind) > 0 {
+		kind = strings.TrimSpace(serviceKind[0])
+	}
+	if slices.Contains(c.DisabledKinds, "media") || (kind != "" && slices.Contains(c.DisabledKinds, kind)) {
+		return false
+	}
+	if c.ProviderSpecificData != nil {
+		if v, ok := c.ProviderSpecificData["mediaEnabled"]; ok {
+			if b, ok := v.(bool); ok && !b {
+				return false
+			}
+		}
+		if v, ok := c.ProviderSpecificData["isMediaActive"]; ok {
+			if b, ok := v.(bool); ok && !b {
+				return false
+			}
+		}
+		if dk, ok := c.ProviderSpecificData["disabledKinds"].([]string); ok {
+			if slices.Contains(dk, "media") || (kind != "" && slices.Contains(dk, kind)) {
+				return false
+			}
+		} else if dkRaw, ok := c.ProviderSpecificData["disabledKinds"].([]any); ok {
+			for _, item := range dkRaw {
+				if s, ok := item.(string); ok && (s == "media" || (kind != "" && s == kind)) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 // UsageLogInfo holds request context needed to log a usage record. ConnName and
 // ConnEmail identify the account that actually served the turn: with several
 // connections behind one provider, provider+model says nothing about which
 // key or subscription paid for it.
 type UsageLogInfo struct {
-	Provider     string
-	Model        string
-	ConnectionID string
-	ConnName     string
-	ConnEmail    string
-	APIKey       string
-	APIKeyName   string
-	Endpoint     string
-	Protocol     string
+	Provider       string
+	Model          string
+	ConnectionID   string
+	ConnName       string
+	ConnEmail      string
+	APIKey         string
+	APIKeyName     string
+	Endpoint       string
+	Protocol       string
 	RequestedModel string
-	ComboName    string
-	CacheSource  string
-	StartedAt    time.Time
+	ComboName      string
+	CacheSource    string
+	StartedAt      time.Time
 	// Egress is the proxy pool or relay a request left the host through, empty
 	// for a direct one. Without it the log cannot answer "did this turn use the
 	// proxy?", which is the first question asked whenever a provider's rate limit
@@ -67,9 +119,9 @@ type UsageLogInfo struct {
 	Egress string
 
 	// RTK token compression metrics
-	OriginalInputTokens int
-	SavedTokens         int
-	SavedPercent        int
+	OriginalInputTokens   int
+	SavedTokens           int
+	SavedPercent          int
 	CompressionDurationMs int
 }
 
@@ -167,6 +219,70 @@ func (b *ResponseBuf) Reset() {
 type StreamMetrics struct {
 	TTFT        int64       // ms from request start to first chunk
 	ResponseBuf ResponseBuf // accumulated response content (capped)
+
+	// Output generation rate metrics (streaming turns). OutputTokens counts
+	// output tokens captured in the streamed response buffer; FirstToken and
+	// LastToken bracket the streamed output; MaxGapMs is the widest gap between
+	// two consecutive streamed chunks, in milliseconds. All are logged in the
+	// stream summary without touching the SSE wire protocol.
+	OutputTokens int
+	FirstToken   time.Time
+	LastToken    time.Time
+	MaxGapMs     int64
+	mu           sync.Mutex
+}
+
+// NoteOutput records one streamed chunk arriving at now, updating the first
+// token time, last token time and the max inter-token gap. Safe for concurrent
+// callers; a nil receiver is a no-op.
+func (m *StreamMetrics) NoteOutput(now time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FirstToken.IsZero() {
+		m.FirstToken = now
+	} else if gap := now.Sub(m.LastToken).Milliseconds(); gap > m.MaxGapMs {
+		m.MaxGapMs = gap
+	}
+	m.LastToken = now
+}
+
+// ElapsedMs returns the ms from the first streamed chunk to the last, or zero
+// when nothing was streamed.
+func (m *StreamMetrics) ElapsedMs() int64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.elapsedMsLocked()
+}
+
+// TokPerSec returns output tokens per second of streamed generation, or zero
+// when nothing was streamed or no time elapsed.
+func (m *StreamMetrics) TokPerSec() float64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.OutputTokens == 0 {
+		return 0
+	}
+	if elapsed := m.elapsedMsLocked(); elapsed > 0 {
+		return float64(m.OutputTokens) / (float64(elapsed) / 1000)
+	}
+	return 0
+}
+
+// elapsedMsLocked is ElapsedMs with the lock already held.
+func (m *StreamMetrics) elapsedMsLocked() int64 {
+	if m.FirstToken.IsZero() || m.LastToken.IsZero() {
+		return 0
+	}
+	return m.LastToken.Sub(m.FirstToken).Milliseconds()
 }
 
 // UpstreamError is an alias for proxy.UpstreamError — retryable errors from upstream.

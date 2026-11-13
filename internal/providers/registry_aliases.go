@@ -29,6 +29,7 @@ var RegistryAliases = map[string]string{
 	"codebuddy-intl":    "cbai",
 	"codex":             "cx",
 	"commandcode":       "cmc",
+	"commandcode-goat":  "cmc-goat",
 	"cursor":            "cu",
 	"deepgram":          "dg",
 	"deepseek":          "ds",
@@ -40,6 +41,7 @@ var RegistryAliases = map[string]string{
 	"fal-ai":            "fal",
 	"featherless":       "fl",
 	"fish-audio":        "fish",
+	"free-pi":           "fp",
 	"gemini-cli":        "gc",
 	"gemini-web":        "gweb",
 	"github":            "gh",
@@ -88,4 +90,5 @@ var RegistryAliases = map[string]string{
 	"xiaomi-mimo":         "mimo",
 	"xiaomi-tokenplan":    "xmtp",
 	"zed":                 "zd",
+	"hcnsec":              "hc",
 }

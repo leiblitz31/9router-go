@@ -3,9 +3,13 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
+
+	"9router/proxy/internal/handlerutil"
 )
 
 // usageHistoryColumns is the projection every usageHistory reader shares.
@@ -237,6 +241,150 @@ func (r *Repo) GetUsageGroupByModelSince(since string) ([]UsageGroupRow, error) 
 	return scanUsageGroupRows(rows, "model")
 }
 
+// UsageClientKeyRow is one client-API-key aggregate over a time window.
+//
+// ClientKey holds the masked key the CALLER presented (the shape
+// handlerutil.MaskAPIKey writes), not the upstream credential the
+// provider/model group describes. An operator who resells the gateway needs
+// this axis: it is the key they sold.
+type UsageClientKeyRow struct {
+	ClientKey        string
+	Requests         int
+	Errors           int
+	PromptTokens     int
+	CompletionTokens int
+	CachedTokens     int
+	Cost             float64
+	LastUsed         string
+}
+
+// usageClientKeyCachedTokens sums the cached prompt tokens of a group of rows.
+//
+// The counters live in the row's tokens JSON, so the read has to reach the
+// row. The shapes and their precedence mirror translator.CachedTokensFromJSON,
+// which is what wrote the row: the first shape that is PRESENT wins, and a
+// JSON null is not a value. A shape that is present and zero still wins, which
+// is why the test is "is it there" and not "is it non-zero".
+//
+// Every shape is guarded by json_valid because a row written by an older build
+// may hold no JSON at all, and json_extract on a non-JSON value is an error
+// rather than a zero.
+const usageClientKeyCachedTokens = `
+	COALESCE(SUM(
+		CASE WHEN json_valid(tokens) THEN
+			CASE
+				WHEN json_extract(tokens, '$.cached_tokens') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.cached_tokens'), 0)
+				WHEN json_extract(tokens, '$.cache_read_input_tokens') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.cache_read_input_tokens'), 0)
+				WHEN json_extract(tokens, '$.prompt_tokens_details.cached_tokens') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.prompt_tokens_details.cached_tokens'), 0)
+				WHEN json_extract(tokens, '$.input_tokens_details.cached_tokens') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.input_tokens_details.cached_tokens'), 0)
+				WHEN json_extract(tokens, '$.prompt_eval_cached_count') IS NOT NULL
+					THEN COALESCE(json_extract(tokens, '$.prompt_eval_cached_count'), 0)
+				ELSE 0
+			END
+		ELSE 0
+		END
+	), 0)
+`
+
+// usageGroupByClientKeyQuery is the statement GetUsageGroupByClientKeySince
+// runs.
+//
+// It is a named constant for the reason the three usageHistory reads above
+// are: the query-plan test runs EXPLAIN QUERY PLAN against it, and a copy of
+// the SQL in the test would pin the copy rather than the read — the day the
+// two drifted, the test would still be green while the read scanned the
+// ledger.
+const usageGroupByClientKeyQuery = `SELECT COALESCE(clientKey, ''), ` + usageGroupStats + `, ` + usageClientKeyCachedTokens +
+	` FROM usageHistory WHERE timestamp >= ? GROUP BY COALESCE(clientKey, '')`
+
+// GetUsageGroupByClientKeySince aggregates usageHistory per client key since
+// the cutoff.
+//
+// This is a different axis from the provider/model groups: those describe
+// where the spend went, this describes who caused it.
+func (r *Repo) GetUsageGroupByClientKeySince(since string) ([]UsageClientKeyRow, error) {
+	rows, err := r.db.Query( //nolint:noctx,rowserrcheck
+		usageGroupByClientKeyQuery, since)
+	if err != nil {
+		return nil, fmt.Errorf("query usage group by client key: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var res []UsageClientKeyRow
+	for rows.Next() {
+		var row UsageClientKeyRow
+		if err := rows.Scan(
+			&row.ClientKey, &row.Requests, &row.Errors,
+			&row.PromptTokens, &row.CompletionTokens, &row.Cost, &row.LastUsed,
+			&row.CachedTokens,
+		); err != nil {
+			return nil, fmt.Errorf("scan usage group by client key: %w", err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usage group by client key: %w", err)
+	}
+	return res, nil
+}
+
+// FoldUsageGroupByProvider collapses model-level group rows into the
+// provider-level rows GetUsageGroupByProviderSince would have queried.
+//
+// It exists so the dashboard can answer both tables from one scan of the
+// window. The two reads were separate GROUP BY passes over the same rows, and
+// on a 305k-row ledger they measured 22ms and 37ms — the fold below costs 33µs
+// and the sums are identical, because a provider's total is by definition the
+// sum of its models' totals. A model row that carries the provider's own name
+// (the "no model" bucket) is just another addend.
+//
+// The order of the result follows first appearance in rows, so callers that
+// sort afterwards are unaffected; callers that do not must not depend on it.
+func FoldUsageGroupByProvider(rows []UsageGroupRow) []UsageGroupRow {
+	index := make(map[string]int, len(rows))
+	out := make([]UsageGroupRow, 0, len(rows))
+	for _, row := range rows {
+		i, seen := index[row.Provider]
+		if !seen {
+			index[row.Provider] = len(out)
+			out = append(out, UsageGroupRow{Provider: row.Provider})
+			i = len(out) - 1
+		}
+		agg := &out[i]
+		agg.Requests += row.Requests
+		agg.Errors += row.Errors
+		agg.PromptTokens += row.PromptTokens
+		agg.CompletionTokens += row.CompletionTokens
+		agg.Cost += row.Cost
+		if row.LastUsed > agg.LastUsed {
+			agg.LastUsed = row.LastUsed
+		}
+	}
+	return out
+}
+
+// TopUsageGroupByTokens returns the provider/model row that consumed the most
+// tokens, folding the prompt and completion columns the caller already has.
+//
+// GetUsageTopModelSince answers the same question with its own GROUP BY, which
+// was a third pass over the window for one row. Given the model-level rows the
+// dashboard already read, the answer is a single linear scan with no query at
+// all. Ties break on provider then model, matching the ORDER BY the SQL used.
+func TopUsageGroupByTokens(rows []UsageGroupRow) (provider, model string, tokens int64, ok bool) {
+	for _, row := range rows {
+		total := int64(row.PromptTokens) + int64(row.CompletionTokens)
+		if !ok || total > tokens || (total == tokens && (row.Provider < provider ||
+			(row.Provider == provider && row.Model < model))) {
+			provider, model, tokens, ok = row.Provider, row.Model, total, true
+		}
+	}
+	return provider, model, tokens, ok
+}
+
 // GetUsageTopModelSince returns the model that consumed the most tokens since
 // the cutoff, with the provider it ran on. The aggregate runs in SQL: reading
 // the window's rows into the process to fold them there cost a transfer of
@@ -326,10 +474,10 @@ type RequestDetailPerfRow struct {
 // observation" rather than take the whole read down.
 const requestDetailPerfSelect = `
 	SELECT COALESCE(provider, ''), COALESCE(model, ''),
-	       CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.latency.ttft'), 0) ELSE 0 END,
-	       CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.latency.total'), 0) ELSE 0 END,
-	       CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.tokens.completion_tokens'), 0) ELSE 0 END,
-	       CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.tokens.output_tokens'), 0) ELSE 0 END
+	       CASE WHEN json_valid(data) THEN CAST(COALESCE(json_extract(data, '$.latency.ttft'), 0) AS INTEGER) ELSE 0 END,
+	       CASE WHEN json_valid(data) THEN CAST(COALESCE(json_extract(data, '$.latency.total'), 0) AS INTEGER) ELSE 0 END,
+	       CASE WHEN json_valid(data) THEN CAST(COALESCE(json_extract(data, '$.tokens.completion_tokens'), 0) AS INTEGER) ELSE 0 END,
+	       CASE WHEN json_valid(data) THEN CAST(COALESCE(json_extract(data, '$.tokens.output_tokens'), 0) AS INTEGER) ELSE 0 END
 	FROM requestDetails`
 
 // GetRequestDetailPerf returns the latency observation of every request
@@ -425,6 +573,94 @@ func (r *Repo) GetModelLatency() ([]ModelLatencyAgg, error) {
 		out = append(out, agg)
 	}
 	return out, nil
+}
+
+// GetModelTPSSince computes the aggregate generation throughput (tokens per second)
+// for each model from successful requestDetails rows recorded since cutoff.
+func (r *Repo) GetModelTPSSince(ctx context.Context, since string) (map[string]float64, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	query := `
+		SELECT COALESCE(provider, ''), COALESCE(model, ''),
+		       CASE WHEN json_valid(data) THEN CAST(COALESCE(json_extract(data, '$.latency.ttft'), 0) AS INTEGER) ELSE 0 END,
+		       CASE WHEN json_valid(data) THEN CAST(COALESCE(json_extract(data, '$.latency.total'), 0) AS INTEGER) ELSE 0 END,
+		       CASE WHEN json_valid(data) THEN CAST(COALESCE(json_extract(data, '$.tokens.completion_tokens'), 0) AS INTEGER) ELSE 0 END,
+		       CASE WHEN json_valid(data) THEN CAST(COALESCE(json_extract(data, '$.tokens.output_tokens'), 0) AS INTEGER) ELSE 0 END
+		FROM requestDetails
+		WHERE (status = 'success' OR status = 'ok')`
+	args := []any{}
+	if since != "" {
+		query += " AND timestamp >= ?"
+		args = append(args, since)
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query request details tps: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	type acc struct {
+		tokensSum int64
+		durMsSum  int64
+	}
+	byKey := make(map[string]*acc)
+
+	for rows.Next() {
+		var provider, model string
+		var ttftMs, totalMs, compTokens, outTokens int64
+		if err := rows.Scan(&provider, &model, &ttftMs, &totalMs, &compTokens, &outTokens); err != nil {
+			return nil, fmt.Errorf("scan request details tps: %w", err)
+		}
+		if totalMs <= 0 {
+			continue
+		}
+		tokens := compTokens
+		if tokens <= 0 {
+			tokens = outTokens
+		}
+		if tokens <= 0 {
+			continue
+		}
+
+		duration := totalMs
+		if ttftMs > 0 && totalMs > ttftMs && totalMs-ttftMs >= 50 {
+			duration = totalMs - ttftMs
+		}
+		if duration > 0 && float64(tokens)/float64(duration)*1000 > 300 && totalMs >= 50 {
+			duration = totalMs
+		}
+		if duration <= 0 {
+			continue
+		}
+
+		keys := []string{model}
+		if provider != "" {
+			keys = append(keys, model+" ("+provider+")")
+		}
+		for _, k := range keys {
+			a := byKey[k]
+			if a == nil {
+				a = &acc{}
+				byKey[k] = a
+			}
+			a.tokensSum += tokens
+			a.durMsSum += duration
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate request details tps: %w", err)
+	}
+
+	res := make(map[string]float64, len(byKey))
+	for k, a := range byKey {
+		if a.durMsSum > 0 && a.tokensSum > 0 {
+			tps := math.Round(float64(a.tokensSum)/(float64(a.durMsSum)/1000.0)*10) / 10
+			res[k] = tps
+		}
+	}
+	return res, nil
 }
 
 // UsageChartRow is one usageHistory row as the chart needs it: the bucket
@@ -586,6 +822,7 @@ type RequestDetailListRow struct {
 	Cost         float64
 	Combo        string
 	Protocol     string
+	LoopWarning  string
 }
 
 // requestDetailListSelect pulls the renderable values straight out of the
@@ -596,13 +833,14 @@ type RequestDetailListRow struct {
 const requestDetailListSelect = `
 	SELECT id, timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
 	       COALESCE(status, ''),
-	       COALESCE(json_extract(data, '$.latency.ttft'), 0),
-	       COALESCE(json_extract(data, '$.latency.total'), 0),
+	       CAST(COALESCE(json_extract(data, '$.latency.ttft'), 0) AS INTEGER),
+	       CAST(COALESCE(json_extract(data, '$.latency.total'), 0) AS INTEGER),
 	       COALESCE(json_extract(data, '$.tokens'), '{}'),
 	       COALESCE(json_extract(data, '$.account'), ''),
 	       COALESCE(json_extract(data, '$.cost'), 0.0),
 	       COALESCE(json_extract(data, '$.combo'), ''),
 	       COALESCE(json_extract(data, '$.protocol'), ''),
+	       COALESCE(json_extract(data, '$.loopWarning'), COALESCE(json_extract(data, '$.anomalies[0].message'), '')),
 	       json_valid(data)
 	FROM requestDetails
 	%s
@@ -649,6 +887,7 @@ func (r *Repo) GetRequestDetailsPaged(ctx context.Context, limit, offset int, si
 		if err := rows.Scan(&row.ID, &row.Timestamp, &row.Provider, &row.Model,
 			&row.ConnectionID, &row.Status, &row.LatencyTTFT, &row.LatencyTotal, &row.TokensJSON,
 			&row.Account, &row.Cost, &row.Combo, &row.Protocol,
+			&row.LoopWarning,
 			&dataValid); err != nil {
 			return nil, total, fmt.Errorf("scan requestDetails: %w", err)
 		}
@@ -680,4 +919,295 @@ func (r *Repo) GetRequestDetailByID(id string) (string, error) {
 		return "", fmt.Errorf("get request detail %s: %w", id, err)
 	}
 	return data, nil
+}
+
+// GetRequestDetailsErrorCountSince returns the count of failed requests recorded in requestDetails since cutoff.
+func (r *Repo) GetRequestDetailsErrorCountSince(ctx context.Context, since string) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requestDetails WHERE status = 'error' AND timestamp >= ?`, since).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count requestDetails errors since %s: %w", since, err)
+	}
+	return count, nil
+}
+
+// RollupUsageHistoryBeforeDate scans all usageHistory rows strictly older than cutoff,
+// aggregates their metrics grouped by calendar day (UTC date), and merges them into
+// usageDaily. This guarantees historical metrics are safely captured in daily summaries
+// before retention purge deletes the raw rows.
+func (r *Repo) RollupUsageHistoryBeforeDate(ctx context.Context, cutoff string) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, fmt.Errorf("rollup usageHistory: nil repo")
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
+		       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
+		       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(tokens, '{}')
+		  FROM usageHistory
+		 WHERE timestamp < ?
+		 ORDER BY timestamp ASC
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("query usageHistory before cutoff %s: %w", cutoff, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	type dailyAgg struct {
+		data map[string]any
+	}
+	dailyMap := make(map[string]*dailyAgg)
+	// skipDaily holds date keys that already have a live usageDaily summary.
+	// The request path writes usageDaily in real time on every live request
+	// (upsertDailyUsage), so rolling raw usageHistory rows into it again would
+	// double-count tokens and requests. Rollup backfills only dates that were
+	// missed while the gateway was offline.
+	skipDaily := make(map[string]bool)
+
+	for rows.Next() {
+		var ts, provider, model, connID, apiKey, endpoint, tokensJSON string
+		var prompt, compl int
+		var cost float64
+		if err := rows.Scan(&ts, &provider, &model, &connID, &apiKey, &endpoint, &prompt, &compl, &cost, &tokensJSON); err != nil {
+			return 0, fmt.Errorf("scan usageHistory for rollup: %w", err)
+		}
+
+		dateKey := ""
+		if len(ts) >= 10 {
+			dateKey = ts[:10]
+		} else {
+			parsed, pErr := time.Parse(time.RFC3339, ts)
+			if pErr != nil {
+				continue
+			}
+			dateKey = parsed.UTC().Format("2006-01-02")
+		}
+
+		if skipDaily[dateKey] {
+			continue
+		}
+		agg := dailyMap[dateKey]
+		if agg == nil {
+			existingJSON, err := r.GetUsageDaily(dateKey)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return 0, fmt.Errorf("get daily usage %s before rollup: %w", dateKey, err)
+			}
+			if existingJSON != "" {
+				skipDaily[dateKey] = true
+				continue
+			}
+			agg = &dailyAgg{data: make(map[string]any)}
+			dailyMap[dateKey] = agg
+		}
+
+		cached := extractCachedTokens(tokensJSON)
+		mergeDailyUsageItem(agg.data, provider, model, endpoint, connID, apiKey, prompt, compl, cached, cost)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate usageHistory for rollup: %w", err)
+	}
+
+	for dateKey, agg := range dailyMap {
+		b, err := json.Marshal(agg.data)
+		if err != nil {
+			return 0, fmt.Errorf("marshal rollup daily %s: %w", dateKey, err)
+		}
+		if err := r.UpsertUsageDaily(dateKey, string(b)); err != nil {
+			return 0, fmt.Errorf("save rollup daily %s: %w", dateKey, err)
+		}
+	}
+
+	return len(dailyMap), nil
+}
+
+// extractCachedTokens reads cached prompt tokens from the raw tokens JSON payload,
+// matching translator.CachedTokensFromJSON precedence without introducing a package cycle.
+func extractCachedTokens(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	var usage struct {
+		CachedTokens          *float64 `json:"cached_tokens"`
+		CacheReadInputTokens  *float64 `json:"cache_read_input_tokens"`
+		PromptEvalCachedCount *float64 `json:"prompt_eval_cached_count"`
+		PromptTokensDetails   *struct {
+			CachedTokens *float64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		InputTokensDetails *struct {
+			CachedTokens *float64 `json:"cached_tokens"`
+		} `json:"input_tokens_details"`
+	}
+	if json.Unmarshal([]byte(raw), &usage) != nil {
+		return 0
+	}
+	var promptCached *float64
+	if usage.PromptTokensDetails != nil {
+		promptCached = usage.PromptTokensDetails.CachedTokens
+	}
+	var inputCached *float64
+	if usage.InputTokensDetails != nil {
+		inputCached = usage.InputTokensDetails.CachedTokens
+	}
+	for _, candidate := range []*float64{
+		usage.CachedTokens,
+		usage.CacheReadInputTokens,
+		promptCached,
+		inputCached,
+		usage.PromptEvalCachedCount,
+	} {
+		if candidate != nil && *candidate >= 0 {
+			return int(*candidate)
+		}
+	}
+	return 0
+}
+
+func getMapIntVal(m map[string]any, key string) int {
+	if v, ok := m[key]; ok {
+		if n, ok := v.(float64); ok {
+			return int(n)
+		}
+		if n, ok := v.(int); ok {
+			return n
+		}
+	}
+	return 0
+}
+
+func getMapFloatVal(m map[string]any, key string) float64 {
+	if v, ok := m[key]; ok {
+		if n, ok := v.(float64); ok {
+			return n
+		}
+		if n, ok := v.(int); ok {
+			return float64(n)
+		}
+	}
+	return 0
+}
+
+func getNestedMap(m map[string]any, key string) map[string]any {
+	if v, ok := m[key]; ok {
+		if sub, ok := v.(map[string]any); ok {
+			return sub
+		}
+	}
+	return make(map[string]any)
+}
+
+func mergeDailyUsageItem(data map[string]any, provider, model, endpoint, connectionID, apiKey string, promptTokens, completionTokens, cachedTokens int, cost float64) {
+	data["requests"] = getMapIntVal(data, "requests") + 1
+	data["promptTokens"] = getMapIntVal(data, "promptTokens") + promptTokens
+	data["completionTokens"] = getMapIntVal(data, "completionTokens") + completionTokens
+	data["cachedTokens"] = getMapIntVal(data, "cachedTokens") + cachedTokens
+	data["cost"] = getMapFloatVal(data, "cost") + cost
+
+	data["totalPromptTokens"] = getMapIntVal(data, "totalPromptTokens") + promptTokens
+	data["totalCompletionTokens"] = getMapIntVal(data, "totalCompletionTokens") + completionTokens
+	data["totalRequests"] = getMapIntVal(data, "totalRequests") + 1
+
+	// byProvider
+	byProvider := getNestedMap(data, "byProvider")
+	pp := getNestedMap(byProvider, provider)
+	pp["requests"] = getMapIntVal(pp, "requests") + 1
+	pp["promptTokens"] = getMapIntVal(pp, "promptTokens") + promptTokens
+	pp["completionTokens"] = getMapIntVal(pp, "completionTokens") + completionTokens
+	pp["cachedTokens"] = getMapIntVal(pp, "cachedTokens") + cachedTokens
+	pp["cost"] = getMapFloatVal(pp, "cost") + cost
+	byProvider[provider] = pp
+	data["byProvider"] = byProvider
+
+	// byModel
+	modelKey := model + "|" + provider
+	byModel := getNestedMap(data, "byModel")
+	mm := getNestedMap(byModel, modelKey)
+	mm["requests"] = getMapIntVal(mm, "requests") + 1
+	mm["promptTokens"] = getMapIntVal(mm, "promptTokens") + promptTokens
+	mm["completionTokens"] = getMapIntVal(mm, "completionTokens") + completionTokens
+	mm["cachedTokens"] = getMapIntVal(mm, "cachedTokens") + cachedTokens
+	mm["cost"] = getMapFloatVal(mm, "cost") + cost
+	if mm["rawModel"] == nil {
+		mm["rawModel"] = model
+	}
+	if mm["provider"] == nil {
+		mm["provider"] = provider
+	}
+	byModel[modelKey] = mm
+	data["byModel"] = byModel
+
+	// byApiKey
+	apiKeyVal := handlerutil.MaskAPIKey(apiKey)
+	if apiKeyVal == "" {
+		apiKeyVal = "local-no-key"
+	}
+	akKey := apiKeyVal + "|" + model + "|" + provider
+	byApiKey := getNestedMap(data, "byApiKey")
+	ak := getNestedMap(byApiKey, akKey)
+	ak["requests"] = getMapIntVal(ak, "requests") + 1
+	ak["promptTokens"] = getMapIntVal(ak, "promptTokens") + promptTokens
+	ak["completionTokens"] = getMapIntVal(ak, "completionTokens") + completionTokens
+	ak["cachedTokens"] = getMapIntVal(ak, "cachedTokens") + cachedTokens
+	ak["cost"] = getMapFloatVal(ak, "cost") + cost
+	ak["rawModel"] = model
+	ak["provider"] = provider
+	ak["apiKey"] = apiKeyVal
+	byApiKey[akKey] = ak
+	data["byApiKey"] = byApiKey
+
+	// byEndpoint
+	epKey := endpoint + "|" + model + "|" + provider
+	byEndpoint := getNestedMap(data, "byEndpoint")
+	ep := getNestedMap(byEndpoint, epKey)
+	ep["requests"] = getMapIntVal(ep, "requests") + 1
+	ep["promptTokens"] = getMapIntVal(ep, "promptTokens") + promptTokens
+	ep["completionTokens"] = getMapIntVal(ep, "completionTokens") + completionTokens
+	ep["cachedTokens"] = getMapIntVal(ep, "cachedTokens") + cachedTokens
+	ep["cost"] = getMapFloatVal(ep, "cost") + cost
+	if ep["endpoint"] == nil {
+		ep["endpoint"] = endpoint
+	}
+	if ep["rawModel"] == nil {
+		ep["rawModel"] = model
+	}
+	if ep["provider"] == nil {
+		ep["provider"] = provider
+	}
+	byEndpoint[epKey] = ep
+	data["byEndpoint"] = byEndpoint
+
+	// byAccount
+	if connectionID != "" {
+		byAccount := getNestedMap(data, "byAccount")
+		acc := getNestedMap(byAccount, connectionID)
+		acc["requests"] = getMapIntVal(acc, "requests") + 1
+		acc["promptTokens"] = getMapIntVal(acc, "promptTokens") + promptTokens
+		acc["completionTokens"] = getMapIntVal(acc, "completionTokens") + completionTokens
+		acc["cachedTokens"] = getMapIntVal(acc, "cachedTokens") + cachedTokens
+		acc["cost"] = getMapFloatVal(acc, "cost") + cost
+		if acc["rawModel"] == nil {
+			acc["rawModel"] = model
+		}
+		if acc["provider"] == nil {
+			acc["provider"] = provider
+		}
+		byAccount[connectionID] = acc
+		data["byAccount"] = byAccount
+	}
+
+	// providers (legacy nested format)
+	providers := getNestedMap(data, "providers")
+	pd := getNestedMap(providers, provider)
+	pd["promptTokens"] = getMapIntVal(pd, "promptTokens") + promptTokens
+	pd["completionTokens"] = getMapIntVal(pd, "completionTokens") + completionTokens
+	pd["requests"] = getMapIntVal(pd, "requests") + 1
+
+	models := getNestedMap(pd, "models")
+	md := getNestedMap(models, model)
+	md["promptTokens"] = getMapIntVal(md, "promptTokens") + promptTokens
+	md["completionTokens"] = getMapIntVal(md, "completionTokens") + completionTokens
+	md["requests"] = getMapIntVal(md, "requests") + 1
+	models[model] = md
+	pd["models"] = models
+	providers[provider] = pd
+	data["providers"] = providers
 }

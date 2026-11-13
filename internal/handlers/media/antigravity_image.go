@@ -21,6 +21,9 @@ import (
 // handleAntigravityImage handles image generation requests for Antigravity,
 // executing via CloudCode's v1internal:generateContent and translating the response to OpenAI image format.
 func (h *MediaHandler) handleAntigravityImage(w http.ResponseWriter, r *http.Request, body []byte, modelInfo *chat.ModelInfo) error {
+	if handlerutil.GetServiceKind(r.Context()) == "" {
+		r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "image"))
+	}
 	var reqBody struct {
 		Prompt string   `json:"prompt"`
 		Size   string   `json:"size"`
@@ -89,6 +92,11 @@ func (h *MediaHandler) tryAntigravityImageConn(w http.ResponseWriter, r *http.Re
 		return fmt.Errorf("no API key found for antigravity connection %s", conn.ID)
 	}
 
+	client, clientErr := h.ChatH.GetClientForConnection(connData)
+	if clientErr != nil {
+		return clientErr
+	}
+
 	// Refresh token if expired
 	refreshedKey, pid, err := h.ChatH.RefreshOAuthTokenIfExpired(conn.ID, apiKey)
 	if err == nil && refreshedKey != "" {
@@ -120,7 +128,7 @@ func (h *MediaHandler) tryAntigravityImageConn(w http.ResponseWriter, r *http.Re
 	}
 
 	if projectID == "" {
-		if p, _, _ := chat.FetchAntigravityProjectID(r.Context(), h.Client, apiKey); p != "" {
+		if p, _, _ := chat.FetchAntigravityProjectID(r.Context(), client, apiKey, connData); p != "" {
 			projectID = p
 			h.ChatH.StoreAntigravityProjectID(conn.ID, p)
 		}
@@ -146,7 +154,11 @@ func (h *MediaHandler) tryAntigravityImageConn(w http.ResponseWriter, r *http.Re
 		base64Input = imageReq.Images[0]
 	}
 
-	wrappedReq, err := translator.WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, aspectRatio)
+	sessID := handlerutil.ExtractSessionID(r)
+	if sessID == "" && conn != nil {
+		sessID = conn.ID
+	}
+	wrappedReq, err := translator.WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, aspectRatio, sessID)
 	if err != nil {
 		return fmt.Errorf("wrap antigravity image request: %w", err)
 	}
@@ -168,10 +180,6 @@ func (h *MediaHandler) tryAntigravityImageConn(w http.ResponseWriter, r *http.Re
 	httpReq.Header.Set("X-Client-Name", "antigravity")
 	httpReq.Header.Set("X-Client-Version", providers.AntigravityIDEVersion)
 
-	client, clientErr := h.ChatH.GetClientForConnection(connData)
-	if clientErr != nil {
-		return clientErr
-	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("antigravity request failed: %w", err)

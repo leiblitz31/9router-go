@@ -36,7 +36,16 @@ export interface ProviderConnection {
   lastErrorSource?: 'chat' | null
   displayName?: string | null
   assignedModel?: string | null
-  providerSpecificData?: { assignedModel?: string | null; [key: string]: unknown }
+  mediaEnabled?: boolean
+  isMediaActive?: boolean
+  disabledKinds?: string[]
+  providerSpecificData?: {
+    assignedModel?: string | null
+    disabledKinds?: string[]
+    mediaEnabled?: boolean
+    isMediaActive?: boolean
+    [key: string]: unknown
+  }
 }
 
 export interface Combo {
@@ -102,16 +111,21 @@ export interface ModelCaps {
  * A model the gateway has confirmed is gone upstream.
  *
  * `status` is "gone" when a live request drew an HTTP 410 naming the model,
- * and "retired" when a catalogue sync found it absent from a complete list.
+ * "retired" when a catalogue sync found it absent from a complete list, and
+ * "cooldown" when a live failure marked it temporarily unavailable for a
+ * fixed window (5 minutes). A cooldown is transient: it never overwrites a
+ * permanent "gone" or "retired" record, and it lapses on its own.
  */
 export interface ModelDeprecation {
   provider: string
   model: string
-  status: 'gone' | 'retired' | ''
+  status: 'gone' | 'retired' | 'cooldown' | ''
   message?: string
   /** The upstream's own replacement, when it named one. */
   successor?: string
   detectedAt?: string
+  /** RFC3339 UTC. Only set for status "cooldown"; the badge lapses after it. */
+  cooldownUntil?: string
 }
 
 /** Deprecations keyed "<provider>/<model>" — the same key a combo entry uses. */
@@ -129,7 +143,7 @@ export interface APIKey {
   machineId: string | null
   isActive: number
   createdAt: string
-  /** Masked secret, e.g. `sk-6…008f`. Always present. */
+  /** Masked secret, same length as the key itself, e.g. `sk-6••008f`. Always present. */
   keyDisplay?: string
   /** Rate limits. 0 means unlimited. */
   rateLimitRpm?: number
@@ -137,6 +151,8 @@ export interface APIKey {
   rateLimitConcurrency?: number
   /** Lifetime prompt+completion token budget. 0 means unlimited. */
   tokenQuota?: number
+  /** Context window one request from this key may use, in tokens. 0 means the model's own window. */
+  contextLimit?: number
   /** Spend recorded against tokenQuota since the budget was last reset (#365). */
   usedTokens?: number
   /** How long a request waits for a free concurrency slot, in ms. 0 uses the server default. */
@@ -149,6 +165,16 @@ export interface APIKey {
   metadata?: string
   /** Plan template this key inherits from. Empty means no plan. */
   planId?: string
+  /** Per-period cost budget, in integer USD micros (1e-6 of a dollar). 0 means no cost limit. */
+  limitMicros?: number
+  /** Per-period token budget. 0 means no token limit. */
+  limitTokens?: number
+  /** Window the budget resets on. Empty means monthly — the engine's default. */
+  budgetPeriod?: PlanPeriod
+  /** Warn at this percentage of the period budget, 0-100. 0 means no warning. */
+  alertPct?: number
+  /** True when exhausted requests are refused with 402; false when they only carry a warning header. */
+  hardCutoff?: boolean
 }
 
 export interface APIKeyPolicy {
@@ -157,6 +183,8 @@ export interface APIKeyPolicy {
   rateLimitConcurrency?: number
   /** Lifetime token budget. 0 means unlimited. */
   tokenQuota?: number
+  /** Context window one request from this key may use, in tokens. 0 means the model's own window. */
+  contextLimit?: number
   /** Concurrency queue timeout in ms. 0 uses the server default. */
   queueTimeoutMs?: number
   expiresAt?: string
@@ -165,8 +193,55 @@ export interface APIKeyPolicy {
   name?: string
   /** Plan template to inherit. An empty string detaches the key. */
   planId?: string
+  /**
+   * Per-period cost budget, in integer USD micros (1e-6 of a dollar). Always send
+   * a number: the server treats an omitted field as "keep stored value" and an
+   * explicit 0 as "disable", so 0 is how the operator clears a cost limit.
+   */
+  limitMicros?: number
+  /** Per-period token budget. 0 means no token limit. */
+  limitTokens?: number
+  /** Window the budget resets on: "daily" | "weekly" | "monthly" | "total". Always sent; empty means monthly. */
+  budgetPeriod?: string
+  /** Warn at this percentage of the period budget, 0-100. 0 means no warning. */
+  alertPct?: number
+  /** True when exhausted requests are refused with 402; false when they only carry a warning header. */
+  hardCutoff?: boolean
 }
 
+/**
+ * A key's period budget as the budget engine sees it: the ceiling, what has
+ * already been spent against it in the open window, and where the two stand
+ * relative to each other.
+ */
+export interface ApiKeyBudget {
+  id: string
+  /** Cost ceiling for the open window, integer USD micros. 0 means no cost limit. */
+  limitMicros: number
+  /** Token ceiling for the open window. 0 means no token limit. */
+  limitTokens: number
+  /** Window the numbers reset on. */
+  period: PlanPeriod
+  /** Warning threshold, 0-100. 0 means no warning. */
+  alertPct: number
+  /** True when exhausted requests are refused with 402; false when they only carry a warning header. */
+  hardCutoff: boolean
+  /** A budget is armed when at least one axis has a nonzero ceiling. */
+  armed: boolean
+  /** Spend recorded in the open window, integer USD micros. */
+  spentMicros: number
+  /** Spend recorded in the open window, tokens. */
+  spentTokens: number
+  /** What is left on each axis before the window resets. */
+  remainingMicros: number
+  remainingTokens: number
+  /** RFC3339 UTC. Empty for the "total" period, which never resets. */
+  resetAt: string
+  /** "ok", "approaching" (past alertPct) or "exhausted". */
+  status: 'ok' | 'approaching' | 'exhausted'
+  /** Present when spend cannot be measured — e.g. a key whose secret was hashed away. */
+  note?: string
+}
 /** A reusable policy template (F-3). Keys inherit its limits as defaults. */
 export interface Plan {
   id: string
@@ -235,6 +310,10 @@ export interface Settings {
   appLogoUrl?: string
   requireApiKey?: boolean
   tunnelDashboardAccess?: boolean
+  tunnelWatchdogEnabled?: boolean
+  tailscaleWatchdogEnabled?: boolean
+  hideUnusedTunnel?: boolean
+  tunnelWorkerUrl?: string
   rtkEnabled?: boolean
   rtkMode?: 'simple' | 'advance' | string
   rtkIntensity?: 'minimal' | 'standard' | 'aggressive' | string
@@ -256,11 +335,15 @@ export interface Settings {
   adhdEnabled?: boolean
   adhdLevel?: string
   headroomEnabled?: boolean
+  headroomAutostart?: boolean
+  headroomEngine?: 'builtin' | 'external'
   headroomUrl?: string
   headroomTimeoutMs?: number
   headroomKompress?: boolean
   semanticCacheEnabled?: boolean
   semanticCacheTTL?: number
+  // Prompt-cache window 9router pins on Claude head anchors: "5m" (default) or "1h".
+  claudeCacheTtl?: '5m' | '1h'
   semanticCacheMaxEntries?: number
   autoUpdate?: boolean
   /** Dashboard security & SSO (profile page, Next parity). */
@@ -334,6 +417,18 @@ export interface TunnelStatusResponse {
     tunnelUrl?: string
     publicUrl?: string
     running?: boolean
+    state?: string
+    mode?: string
+    shortId?: string
+    customDomain?: string
+    token?: string
+    cfApiToken?: string
+    previousUrl?: string
+    rotatedAt?: string
+    workerUrl?: string
+    reachable?: boolean
+    everReachable?: boolean
+    connectingLabel?: string
   }
   tailscale?: {
     enabled?: boolean
@@ -341,6 +436,14 @@ export interface TunnelStatusResponse {
     tunnelUrl?: string
     running?: boolean
     loggedIn?: boolean
+    installed?: boolean
+    reachable?: boolean
+    everReachable?: boolean
+    authUrl?: string
+    authMode?: string
+    authKey?: string
+    statusText?: string
+    repairTunnelOrigin?: boolean
   }
   download?: {
     downloading?: boolean
@@ -458,6 +561,40 @@ export interface HermesResetResponse {
   error?: string
 }
 
+// --- CLI Tools Configuration (Claude Code, Codex, OpenCode, Droid, Crush, Kilo, Cline, Pi, OMP) ---
+export interface CliToolSettingsResponse {
+  tool: string
+  installed: boolean
+  has9Router?: boolean
+  files?: Array<{ path: string; format: string; purpose: string }>
+  plan?: Array<{ path: string; purpose: string; removeFile?: boolean; edits?: Array<{ keyPath: string[] }> }>
+  currentConfig?: {
+    baseUrl?: string
+    apiKey?: string
+    hasApiKey?: boolean
+    model?: string
+    tiers?: Record<string, string>
+    autoCompactWindow?: string | number
+  }
+  message?: string
+}
+
+export interface CliToolSettingsApplyPayload {
+  baseUrl: string
+  apiKey?: string
+  model?: string
+  tiers?: Record<string, string>
+  autoCompactWindow?: string
+}
+
+export interface CliToolSettingsApplyResponse {
+  success: boolean
+  tool: string
+  changed: boolean
+  backups?: string[]
+  message?: string
+}
+
 export interface HeadroomStatusResponse {
   installed?: boolean
   running?: boolean
@@ -469,6 +606,7 @@ export interface HeadroomStatusResponse {
   version?: string | null
   extras?: { code?: boolean; ml?: boolean }
   url?: string
+  engine?: 'builtin' | 'external'
   error?: string
 }
 
@@ -683,6 +821,7 @@ export interface UsageLifetime {
   longestStreak: number
   topModel: UsageTopModel | null
   cacheHitRate: number | null
+  successRate: number | null
 }
 export interface UsageNodeHealth {
   name?: string
@@ -706,6 +845,42 @@ export interface UsageDashboardResponse {
   nodes: UsageNodeHealth[]
   models: UsageNodeHealth[]
   lifetime: UsageLifetime | null
+}
+
+/** One client API key's spend inside the window. */
+export interface UsageByAPIKeyItem {
+  /** The apiKeys row the spend belongs to; empty when the key was deleted. */
+  id: string
+  name: string
+  /** The masked key, in the form the usage ledger stores. */
+  key: string
+  /** The masked key in the API keys page's own form. */
+  keyDisplay: string
+  /** Whether the key is still enabled. */
+  active: boolean
+  requests: number
+  errors: number
+  promptTokens: number
+  completionTokens: number
+  cachedTokens: number
+  cost: number
+  /** When the key last made a request inside the window. */
+  lastUsed: string
+}
+
+export interface UsageByAPIKeyTotals {
+  requests: number
+  errors: number
+  promptTokens: number
+  completionTokens: number
+  cachedTokens: number
+  cost: number
+}
+
+export interface UsageByAPIKeyResponse {
+  period: string
+  keys: UsageByAPIKeyItem[]
+  totals: UsageByAPIKeyTotals
 }
 
 // Codex reset credits. `selectionToken` is the field the dashboard selects
@@ -734,6 +909,32 @@ export interface CodexResetCreditConsumeResponse {
   idempotencyKey?: string
   error?: string
   code?: string
+}
+
+// GLM Reset Cards (Z.ai international). Mirrors the Go GLMResetCard and
+// GLMResetCardsResponse types.
+export interface GLMResetCard {
+  recordId: string
+  type: 'FIVE_HOUR' | 'WEEK'
+  expiresAt: string // RFC3339 UTC
+}
+
+export interface GLMResetCardsResponse {
+  availableCount: number
+  cards: GLMResetCard[]
+  error?: string
+}
+
+export interface GLMResetCardRedeemResponse {
+  reset: boolean
+  alreadyUsed?: boolean
+  uncertain?: boolean
+  code: string
+  message: string
+  recordId: string
+  type: string
+  requestId: string
+  error?: string
 }
 
 export interface FreebuffSessionSwitchResponse {
@@ -1523,7 +1724,15 @@ export const api = {
 
   // API Keys
   getApiKeys: () => request<APIKey[]>('/api/keys'),
-  createApiKey: (payload: { name?: string; machineId?: string; key?: string }) =>
+  createApiKey: (payload: {
+    name?: string
+    machineId?: string
+    key?: string
+    /** Lifetime token budget. 0 means unlimited. */
+    tokenQuota?: number
+    /** Context window one request from this key may use, in tokens. 0 means the model's own window. */
+    contextLimit?: number
+  }) =>
     request<{ success: boolean; id: string; key: string }>('/api/keys', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -1567,6 +1776,12 @@ export const api = {
     }),
   getApiKeyModels: (id: string) =>
     request<{ id: string; models: string[] }>(`/api/keys/${encodeURIComponent(id)}/models`),
+  /**
+   * The key's period budget as the engine sees it — ceiling, open-window spend
+   * and status. The spend is read-only context for the policy modal; it is not
+   * part of what a save writes.
+   */
+  getKeyBudget: (id: string) => request<ApiKeyBudget>(`/api/keys/${encodeURIComponent(id)}/budget`),
   setApiKeyModels: (id: string, models: string[]) =>
     request<{ id: string; models: string[] }>(`/api/keys/${encodeURIComponent(id)}/models`, {
       method: 'PUT',
@@ -1942,6 +2157,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider, code, codeVerifier, redirectUri, name }),
     }),
+  // MiniMax Code lease auth: borrow the desktop app's sign-in over its local
+  // broker instead of a browser login. No refresh token is stored.
+  minimaxLeaseStatus: (providerId: string, dataDir?: string) =>
+    request<{
+      found: boolean;
+      dataDir?: string;
+      status?: string;
+      generation?: number;
+      expiresAtMs?: number;
+      error?: string;
+      message?: string;
+    }>(
+      `/api/oauth/${encodeURIComponent(providerId)}/lease-status${dataDir ? `?data_dir=${encodeURIComponent(dataDir)}` : ''}`
+    ),
+  minimaxLeaseConnect: (providerId: string, dataDir?: string) =>
+    request<{ success: boolean; connection?: { id: string; provider: string }; reused?: boolean }>(
+      `/api/oauth/${encodeURIComponent(providerId)}/lease-connect`,
+      { method: 'POST', body: JSON.stringify({ dataDir }) },
+    ),
   importOAuthToken: (provider: string, accessToken: string, refreshToken?: string, name?: string) =>
     request<{ id: string; connection: string; error?: string }>(`/api/oauth/${encodeURIComponent(provider)}/import`, {
       method: 'POST',
@@ -2009,10 +2243,57 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ provider, ...opts }) }
     ),
   devicePoll: (provider: string, deviceCode: string, session?: Record<string, unknown>) =>
-    request<{ status: string; connectionId?: string; error?: string }>('/api/oauth/device/poll', {
+    request<{ status: string; connectionId?: string; error?: string; interval?: number }>('/api/oauth/device/poll', {
       method: 'POST',
       body: JSON.stringify({ provider, device_code: deviceCode, session }),
     }),
+  // Free-pi sign-in is a GitHub device flow behind a consent gate, so it gets
+  // its own three calls rather than the generic deviceStart/devicePoll pair:
+  // initiate refuses to contact upstream until the caller asserts that this
+  // user accepted this consent version.
+  freePiConsent: () =>
+    request<{ provider: string; version: string; text: string }>('/api/oauth/free-pi/consent'),
+  freePiInitiate: (consentVersion: string) =>
+    request<{
+      sessionId: string
+      userCode: string
+      verificationUri: string
+      verificationUriComplete?: string
+      interval: number
+      expiresIn: number
+      consentVersion: string
+    }>('/api/oauth/free-pi/initiate', {
+      method: 'POST',
+      body: JSON.stringify({ consentAccepted: true, consentVersion }),
+    }),
+  freePiPoll: (sessionId: string) =>
+    request<{ status: string; connectionId?: string; retryAfter?: number; message?: string }>(
+      '/api/oauth/free-pi/poll',
+      { method: 'POST', body: JSON.stringify({ sessionId }) }
+    ),
+  // The dashboard equivalent of free-pi-cli's /close-other-session.
+  freePiResetSession: (connectionId: string) =>
+    request<{ released: boolean }>('/api/oauth/free-pi/session/reset', {
+      method: 'POST',
+      body: JSON.stringify({ connectionId }),
+    }),
+  // The banner creative. Serving it does not report an impression: that only
+  // happens after the component paints it, via freePiImpression.
+  freePiAd: (connectionId: string) =>
+    request<{
+      ad: {
+        adId: string
+        clickUrl?: string
+        source?: string
+        creative: { title?: string; body?: string; cta?: string; imageUrl?: string }
+      } | null
+    }>(`/api/free-pi/ad?connectionId=${encodeURIComponent(connectionId)}`),
+  freePiImpression: (connectionId: string, adId: string) =>
+    request<{ recorded: boolean }>('/api/free-pi/ad/impression', {
+      method: 'POST',
+      body: JSON.stringify({ connectionId, adId }),
+    }),
+
   kiroImport: (refreshToken: string) =>
     request<{ success: boolean; id?: string; error?: string }>('/api/oauth/kiro/import', {
       method: 'POST',
@@ -2124,7 +2405,15 @@ export const api = {
   },
 
   // Usage & Telemetry
-  getUsageStats: (period = 'today') => request<any>(`/api/usage/stats?period=${encodeURIComponent(period)}`),
+  /**
+   * Usage aggregates for a window. `views` names the breakdowns to build:
+   * `none` is totals only (plus byProvider, which the totals are summed from),
+   * and omitting it returns every breakdown — the shape this call always had.
+   */
+  getUsageStats: (period = 'today', views?: string) =>
+    request<any>(
+      `/api/usage/stats?period=${encodeURIComponent(period)}${views ? `&views=${encodeURIComponent(views)}` : ''}`
+    ),
   /** One chart point: bucket label (HH:MM or MMM D), totals, and the per-model-family token split. */
   getUsageChart: (period = '7d') =>
     request<{ label: string; tokens: number; cost: number; byModel: Record<string, number> }[]>(
@@ -2132,6 +2421,15 @@ export const api = {
     ),
   /** Details-section dashboard payload: heatmap days, lifetime cards, node health. */
   getUsageDashboard: () => request<UsageDashboardResponse>('/api/usage/dashboard'),
+  /**
+   * Spend per client API key — the keys created inside the gateway.
+   *
+   * This is not the Overview's "Usage by API Key" table: that one groups the
+   * upstream credential the router spent, this one groups the key the caller
+   * presented. An operator who resells the gateway needs this one.
+   */
+  getUsageByAPIKey: (period = '7d') =>
+    request<UsageByAPIKeyResponse>(`/api/usage/api-keys?period=${encodeURIComponent(period)}`),
   /** Paged request rows; period windows the server query (?period=<preset|n>d|n>h). */
   getRequestDetails: (limit = 50, offset = 0, period = '') =>
     request<any>(
@@ -2204,18 +2502,70 @@ export const api = {
         body: JSON.stringify({ selectionToken, idempotencyKey }),
       }
     ),
+  // Claude reset credits (cedar_ember grants). Only for provider == "claude".
+  listClaudeResetCredits: (connectionId: string) =>
+    request<CodexResetCreditListResponse>(
+      `/api/usage/${encodeURIComponent(connectionId)}/claude-reset-credits`
+    ),
+  consumeClaudeResetCredit: (connectionId: string, selectionToken: string, idempotencyKey?: string) =>
+    request<CodexResetCreditConsumeResponse>(
+      `/api/usage/${encodeURIComponent(connectionId)}/claude-reset-credits/consume`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectionToken, idempotencyKey }),
+      }
+    ),
+  // GLM Reset Cards (Z.ai international). Only for provider == "glm".
+  getGlmResetCards: (connectionId: string) =>
+    request<GLMResetCardsResponse>(
+      `/api/usage/${encodeURIComponent(connectionId)}/glm-reset-cards`
+    ),
+  redeemGlmResetCard: (connectionId: string, payload: { recordId: string; type: 'FIVE_HOUR' | 'WEEK' }) =>
+    request<GLMResetCardRedeemResponse>(
+      `/api/usage/${encodeURIComponent(connectionId)}/glm-reset-cards`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    ),
   // Tunnel & Tailscale
   getTunnelStatus: () =>
     request<TunnelStatusResponse>('/api/tunnel/status').catch(() => ({
       tunnel: { enabled: false, running: false, tunnelUrl: '', publicUrl: '' },
       tailscale: { enabled: false, running: false, tunnelUrl: '', loggedIn: false },
     })),
-  enableTunnel: () =>
-    request<{ success?: boolean; tunnelUrl?: string; publicUrl?: string; error?: string }>('/api/tunnel/enable', {
+  enableTunnel: (payload?: {
+    mode?: string
+    shortId?: string
+    customDomain?: string
+    token?: string
+    cfApiToken?: string
+    cfAccountId?: string
+    cfZone?: string
+    workerUrl?: string
+  }) =>
+    request<{
+      success?: boolean
+      tunnelUrl?: string
+      publicUrl?: string
+      error?: string
+      mode?: string
+      shortId?: string
+      customDomain?: string
+      token?: string
+      cfApiToken?: string
+    }>('/api/tunnel/enable', {
       method: 'POST',
+      body: JSON.stringify(payload ?? {}),
     }),
   disableTunnel: () =>
     request<{ success?: boolean; error?: string }>('/api/tunnel/disable', {
+      method: 'POST',
+    }),
+  repairTunnelOrigin: () =>
+    request<{ success?: boolean; hostname?: string; port?: number; error?: string }>('/api/tunnel/repair-origin', {
       method: 'POST',
     }),
   checkTailscale: () =>
@@ -2223,9 +2573,18 @@ export const api = {
       installed: false,
       loggedIn: false,
     })),
-  enableTailscale: () =>
-    request<{ success?: boolean; tunnelUrl?: string; needsLogin?: boolean; authUrl?: string; funnelNotEnabled?: boolean; error?: string }>('/api/tunnel/tailscale-enable', {
+  enableTailscale: (payload?: { authKey?: string; authMode?: string }) =>
+    request<{
+      success?: boolean
+      tunnelUrl?: string
+      needsLogin?: boolean
+      authUrl?: string
+      funnelNotEnabled?: boolean
+      error?: string
+      repairTunnelOrigin?: boolean
+    }>('/api/tunnel/tailscale-enable', {
       method: 'POST',
+      body: JSON.stringify(payload ?? {}),
     }),
   disableTailscale: () =>
     request<{ success?: boolean; error?: string }>('/api/tunnel/tailscale-disable', {
@@ -2348,6 +2707,24 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(profile ? { profile } : {}),
     }),
+  // CLI Tools (Claude, Codex, OpenCode, Droid, Crush, Kilo, Cline, Pi, OMP)
+  getCliToolSettings: (tool: string) =>
+    request<CliToolSettingsResponse>(`/api/cli-tools/${encodeURIComponent(tool)}-settings`),
+  applyCliToolSettings: (tool: string, payload: CliToolSettingsApplyPayload) =>
+    request<CliToolSettingsApplyResponse>(`/api/cli-tools/${encodeURIComponent(tool)}-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  resetCliToolSettings: (tool: string, baseUrl?: string) => {
+    const q = baseUrl ? `?baseUrl=${encodeURIComponent(baseUrl)}` : ''
+    return request<CliToolSettingsApplyResponse>(
+      `/api/cli-tools/${encodeURIComponent(tool)}-settings${q}`,
+      {
+        method: 'DELETE',
+      }
+    )
+  },
   // Auth
   checkRequireLogin: async (): Promise<RequireLoginResponse> => {
     try {
@@ -2558,5 +2935,18 @@ export const api = {
     request<{ ok: boolean; preset: JailbreakDoc }>(`/api/jailbreak/presets/${encodeURIComponent(id)}/duplicate`, {
       method: 'POST',
       body: JSON.stringify({ id: newId || '' }),
+    }),
+  exportProviderKeys: (providerId: string) =>
+    request<{ connections: Array<{ id: string; name: string; authType: string; key: string }> }>(
+      `/api/providers/${encodeURIComponent(providerId)}/export-keys`,
+    ),
+  testComboModels: (id: string, opts?: { models?: string[]; kind?: string }) =>
+    request<{
+      comboId: string
+      summary: { total: number; alive: number; dead: number }
+      results: Array<{ model: string; ok: boolean; latencyMs: number; error?: string; status?: number }>
+    }>(`/api/combos/${encodeURIComponent(id)}/test-models`, {
+      method: 'POST',
+      body: JSON.stringify(opts || {}),
     }),
 }

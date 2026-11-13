@@ -50,7 +50,7 @@ func NormalizeDeepSeekThinkingToolChoice(body []byte) []byte {
 		return body
 	}
 	reqMap["tool_choice"] = "auto"
-	out, err := json.Marshal(reqMap)
+	out, err := marshalStable(reqMap)
 	if err != nil {
 		return body
 	}

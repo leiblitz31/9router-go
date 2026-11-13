@@ -212,17 +212,7 @@ func TestMergeKiroConsecutiveUsers_AndUUID(t *testing.T) {
 	}
 }
 
-func TestEffortToBudget_AndExtractThoughtSig(t *testing.T) {
-	if got := effortToBudget("high"); got != 32000 {
-		t.Errorf("effortToBudget(high) = %d, want 32000", got)
-	}
-	if got := effortToBudget("medium"); got != 16000 {
-		t.Errorf("effortToBudget(medium) = %d, want 16000", got)
-	}
-	if got := effortToBudget("low"); got != 8000 {
-		t.Errorf("effortToBudget(low) = %d, want 8000", got)
-	}
-
+func TestExtractThoughtSig(t *testing.T) {
 	if sig := extractThoughtSig("tool_call_1__ts__valid_sig"); sig != "valid_sig" {
 		t.Errorf("extractThoughtSig = %q, want valid_sig", sig)
 	}
@@ -266,5 +256,88 @@ func TestFixAntigravityContents(t *testing.T) {
 	}
 	if req.Contents[1].Parts[0].ThoughtSignature != DefaultThinkingSignature {
 		t.Errorf("expected signature backfilled, got %q", req.Contents[1].Parts[0].ThoughtSignature)
+	}
+}
+
+func TestNormalizeToolSchemasForProvider_StripsLookaround(t *testing.T) {
+	tools := []any{
+		map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name": "query_collection",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"collection": map[string]any{
+							"type":    "string",
+							"pattern": "^(?![0-9])(?=.*[a-z]).*$",
+						},
+						"limit": map[string]any{
+							"type":    "integer",
+							"pattern": "^[0-9]+$",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// 1. OpenAI strips lookaround regex
+	toolsOpenAI, removed := NormalizeToolSchemasForProvider("openai", tools)
+	if removed != 1 {
+		t.Fatalf("expected 1 lookaround pattern removed, got %d", removed)
+	}
+	raw, _ := json.Marshal(toolsOpenAI)
+	if bytes.Contains(raw, []byte("(?![0-9])")) {
+		t.Errorf("expected lookaround to be stripped, got %s", string(raw))
+	}
+	if !bytes.Contains(raw, []byte("^[0-9]+$")) {
+		t.Errorf("expected valid regex pattern to be kept, got %s", string(raw))
+	}
+}
+
+func TestNormalizeToolSchemasForProvider_StripsAgentIsolation(t *testing.T) {
+	agentTool := []any{
+		map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name": "Agent",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt":      map[string]any{"type": "string"},
+						"description": map[string]any{"type": "string"},
+						"isolation": map[string]any{
+							"type": "string",
+							"enum": []any{"worktree", "remote"},
+						},
+					},
+					"required": []any{"prompt", "description"},
+				},
+			},
+		},
+	}
+
+	// Anthropic keeps tools untouched
+	toolsAnthropic, removedAnthropic := NormalizeToolSchemasForProvider("anthropic", agentTool)
+	if removedAnthropic != 0 {
+		t.Fatalf("expected 0 removed for anthropic, got %d", removedAnthropic)
+	}
+	rawAnthropic, _ := json.Marshal(toolsAnthropic)
+	if !bytes.Contains(rawAnthropic, []byte("isolation")) {
+		t.Errorf("anthropic should keep isolation property: %s", string(rawAnthropic))
+	}
+
+	// Codex / OpenAI strips isolation to prevent worktree probe recursion
+	toolsCodex, removedCodex := NormalizeToolSchemasForProvider("codex", agentTool)
+	if removedCodex != 1 {
+		t.Fatalf("expected 1 removed for codex, got %d", removedCodex)
+	}
+	rawCodex, _ := json.Marshal(toolsCodex)
+	if bytes.Contains(rawCodex, []byte("isolation")) {
+		t.Errorf("codex should strip isolation property: %s", string(rawCodex))
+	}
+	if !bytes.Contains(rawCodex, []byte("prompt")) || !bytes.Contains(rawCodex, []byte("description")) {
+		t.Errorf("codex should keep prompt and description: %s", string(rawCodex))
 	}
 }

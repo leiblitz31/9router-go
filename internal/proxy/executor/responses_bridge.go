@@ -41,6 +41,8 @@ func UpstreamSpeaksResponses(provider, model string, cfg *providers.ProviderConf
 		return true
 	}
 	switch provider {
+	case "github", "ghe-copilot":
+		return IsCopilotResponsesModel(provider, model)
 	case "opencode", "opencode-go":
 		formats, declared := providers.GetModelFormats(provider, model)
 		if !declared {
@@ -61,6 +63,13 @@ func UpstreamSpeaksResponses(provider, model string, cfg *providers.ProviderConf
 		// model pins the Responses one, so a /v1/responses client is relayed
 		// without a round trip through Chat Completions.
 		return true
+	case "commandcode-goat", "cmc-goat":
+		// The documented Provider API publishes supported_endpoints per model;
+		// the Responses lane is served by every OpenAI/open model that lists
+		// it, so a /v1/responses client is relayed untouched. Claude ids do
+		// not list it and keep the translation bridge.
+		formats, declared := providers.GetModelFormats(provider, model)
+		return declared && formats.SupportsFormat(providers.FormatOpenAIResponses)
 	default:
 		return false
 	}
@@ -156,6 +165,20 @@ func (b *ResponsesBridge) FeedFrames(frames []byte) {
 	}
 }
 
+// OpenAIUsage returns the usage block accumulated from upstream Chat Completions chunks,
+// preserving cached tokens and reasoning tokens for usage accounting.
+func (b *ResponsesBridge) OpenAIUsage() *translator.OpenAIUsage {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state == nil {
+		return nil
+	}
+	return b.state.RawUsage
+}
+
 // Close flushes whatever the upstream left open. A truncated stream must not
 // swallow response.completed: without a terminal event the client waits forever
 // for a turn that already ended.
@@ -244,6 +267,9 @@ func StreamChatToResponses(ctx context.Context, w http.ResponseWriter, upstream 
 	if bridge.Err() != nil {
 		return fmt.Errorf("write to client: %w", bridge.Err())
 	}
+	if u := bridge.OpenAIUsage(); u != nil {
+		translator.SetUsage(ctx, u)
+	}
 	return err
 }
 
@@ -252,11 +278,9 @@ func StreamChatToResponses(ctx context.Context, w http.ResponseWriter, upstream 
 // step, and flush per event so the client sees them as they arrive.
 func responsesWriter(o sseStreamOpts, hw *proxy.HeartbeatWriter, flusher http.Flusher, startTime time.Time) func([]byte) error {
 	return func(frame []byte) error {
-		if o.TTFT != nil && *o.TTFT == 0 {
-			*o.TTFT = time.Since(startTime).Milliseconds()
-		}
+		markTTFT(&Request{TTFT: o.TTFT, StartTime: startTime}, startTime)
 		if o.Buf != nil {
-			o.Buf.Write(frame)
+			_, _ = o.Buf.Write(frame)
 		}
 		if _, err := hw.Write(frame); err != nil {
 			return err
@@ -268,11 +292,32 @@ func responsesWriter(o sseStreamOpts, hw *proxy.HeartbeatWriter, flusher http.Fl
 	}
 }
 
-// passthroughResponses relays an upstream Responses body untouched to a client
-// that already speaks Responses. Translating it would be a round trip through
+// stripClientMetadata removes the client_metadata an upstream echoes back in a
+// Responses API response body, so client-supplied data never rides the passthrough
+// relay back to the caller. A body that does not parse as an object, or that
+// carries no client_metadata, is returned untouched.
+func stripClientMetadata(body []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	if _, ok := m["client_metadata"]; !ok {
+		return body
+	}
+	delete(m, "client_metadata")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// passthroughResponses relays an upstream Responses body to a client that
+// already speaks Responses. Translating it would be a round trip through
 // Chat Completions that loses exactly the fields the native endpoint needs —
 // previous_response_id, reasoning item ids, store — so the body is copied
-// byte for byte instead.
+// byte for byte except for client_metadata, which the upstream echoes back and
+// the caller never needs to see again.
 func passthroughResponses(w http.ResponseWriter, req *Request, upstream io.Reader) error {
 	// Relaying "byte for byte" means byte for byte *except* the tool names this
 	// request had to have fitted for the upstream's 64-char limit. Forwarding
@@ -300,6 +345,7 @@ func passthroughResponses(w http.ResponseWriter, req *Request, upstream io.Reade
 	if len(req.ToolNameMap) > 0 {
 		body = translator.RestoreToolNames(body, req.ToolNameMap)
 	}
+	body = stripClientMetadata(body)
 	if req.ResponseBuf != nil {
 		req.ResponseBuf.Write(body)
 	}

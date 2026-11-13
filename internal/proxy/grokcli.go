@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	json "encoding/json/v2"
 	"fmt"
 	"net/http"
@@ -71,7 +73,7 @@ const codexResponsesLiteHeader = "x-openai-internal-codex-responses-lite"
 // responsesLite is the caller's answer rather than a decision made here: the
 // executor owns which shape a body ended up in, and the package boundary keeps
 // this one from importing that back.
-func ForwardCodex(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool, psd map[string]any, responsesLite bool) (*http.Response, error) {
+func ForwardCodex(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool, psd map[string]any, responsesLite bool, sessionID string) (*http.Response, error) {
 	headers := map[string]string{
 		"originator": "codex_cli_rs",
 	}
@@ -80,7 +82,28 @@ func ForwardCodex(ctx context.Context, client *http.Client, cfg *providers.Provi
 	} else {
 		cfg = providers.WithoutStaticHeader(cfg, codexResponsesLiteHeader)
 	}
-	if accountID, ok := psd["chatgptAccountId"].(string); ok && accountID != "" {
+
+	// Session pinning for prompt caching continuity
+	sess := sessionID
+	if sess == "" {
+		if cid, ok := psd["connectionId"].(string); ok && cid != "" {
+			sess = cid
+		} else {
+			sess = "default"
+		}
+	}
+	headers["session_id"] = sess
+
+	// Workspace / account header: prefer workspaceId, then chatgptAccountId, then accountId
+	accountID := ""
+	if ws, ok := psd["workspaceId"].(string); ok && ws != "" {
+		accountID = ws
+	} else if act, ok := psd["chatgptAccountId"].(string); ok && act != "" {
+		accountID = act
+	} else if acc, ok := psd["accountId"].(string); ok && acc != "" {
+		accountID = acc
+	}
+	if accountID != "" {
 		headers["chatgpt-account-id"] = accountID
 	}
 	setAuth(headers, cfg, apiKey)
@@ -130,20 +153,25 @@ func ForwardKiro(ctx context.Context, client *http.Client, cfg *providers.Provid
 		last := idx == len(endpoints)-1
 		invocationID := fmt.Sprintf("%d-%d", time.Now().UnixMilli(), time.Now().UnixNano())
 		headers := map[string]string{
-			"X-Amz-Target":                    "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
 			"Amz-Sdk-Request":                 "attempt=1; max=3",
 			"Amz-Sdk-Invocation-Id":           invocationID,
 			"Accept":                          "application/vnd.amazon.eventstream",
-			"User-Agent":                      "AWS-SDK-JS/3.0.0 kiro-ide/1.0.0",
-			"X-Amz-User-Agent":                "aws-sdk-js/3.0.0 kiro-ide/1.0.0",
 			"x-amzn-kiro-agent-mode":          "spec",
 			"x-amzn-codewhisperer-machine-id": "kiro-desktop",
 		}
+		if strings.Contains(endpoint, "://codewhisperer.") {
+			headers["X-Amz-Target"] = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
+		}
+		ua, amzUA := kiroServiceUserAgent(psd, apiKey)
+		headers["User-Agent"] = ua
+		headers["X-Amz-User-Agent"] = amzUA
 		if apiKey != "" {
 			headers["x-amz-sso-bearer"] = apiKey
 		}
-		if profileArn, ok := psd["profileArn"].(string); ok && profileArn != "" {
-			headers["x-amzn-codewhisperer-profile-arn"] = profileArn
+		authMethod, _ := psd["authMethod"].(string)
+		rawProfileArn, _ := psd["profileArn"].(string)
+		if effectiveArn := providers.KiroEffectiveProfileARN(authMethod, strings.TrimSpace(rawProfileArn)); effectiveArn != "" {
+			headers["x-amzn-codewhisperer-profile-arn"] = effectiveArn
 		}
 		if tokenType := kiroTokenType(psd); tokenType != "" {
 			headers["TokenType"] = tokenType
@@ -171,6 +199,43 @@ func ForwardKiro(ctx context.Context, client *http.Client, cfg *providers.Provid
 	return nil, lastErr
 }
 
+const (
+	KiroRuntimeSDKVersion = "1.0.0"
+	KiroIDEVersion        = "1.4.121"
+	KiroAgentOS           = "windows"
+	KiroAgentOSVersion    = "10.0.26200"
+	KiroNodeVersion       = "22.21.1"
+)
+
+func resolveKiroMachineID(psd map[string]any, accessToken string) string {
+	seed := ""
+	if psd != nil {
+		if s, _ := psd["clientId"].(string); strings.TrimSpace(s) != "" {
+			seed = strings.TrimSpace(s)
+		} else if s, _ := psd["profileArn"].(string); strings.TrimSpace(s) != "" {
+			seed = strings.TrimSpace(s)
+		}
+	}
+	if seed == "" && strings.TrimSpace(accessToken) != "" {
+		seed = strings.TrimSpace(accessToken)
+	}
+	if seed == "" {
+		seed = "kiro-anonymous"
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
+}
+
+func kiroServiceUserAgent(psd map[string]any, accessToken string) (string, string) {
+	machineID := resolveKiroMachineID(psd, accessToken)
+	ua := fmt.Sprintf(
+		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E KiroIDE-%s-%s",
+		KiroRuntimeSDKVersion, KiroAgentOS, KiroAgentOSVersion, KiroNodeVersion, KiroRuntimeSDKVersion, KiroIDEVersion, machineID,
+	)
+	amzUA := fmt.Sprintf("aws-sdk-js/%s KiroIDE-%s-%s", KiroRuntimeSDKVersion, KiroIDEVersion, machineID)
+	return ua, amzUA
+}
+
 // kiroTokenType mirrors upstream buildHeaders: API-key connections announce
 // TokenType=API_KEY, enterprise IdP tokens EXTERNAL_IDP, everything else sends
 // no TokenType at all.
@@ -194,9 +259,16 @@ func kiroEndpointFallbackStatus(status int) bool {
 		status == http.StatusNotFound
 }
 
+// kiroServiceRegions limits regionalization to regions that AWS service host serves.
+var kiroServiceRegions = map[string]map[string]bool{
+	"q":             {"us-east-1": true, "eu-central-1": true},
+	"runtime":       {"us-east-1": true, "eu-central-1": true},
+	"codewhisperer": {"us-east-1": true},
+}
+
 // kiroEndpoints returns the ordered gateway list: Amazon surfaces first (q.*
 // before the legacy codewhisperer host), then the Kiro IDE gateway, with the
-// AWS hosts regionalized to the account's own region.
+// AWS hosts regionalized to the account's own region if served.
 func kiroEndpoints(cfg *providers.ProviderConfig, psd map[string]any) []string {
 	region, _ := psd["region"].(string)
 	region = strings.TrimSpace(region)
@@ -204,7 +276,7 @@ func kiroEndpoints(cfg *providers.ProviderConfig, psd map[string]any) []string {
 		region = "us-east-1"
 	}
 	regionalize := func(endpoint string) string {
-		if region == "us-east-1" || !strings.Contains(endpoint, "amazonaws.com") {
+		if !strings.Contains(endpoint, "amazonaws.com") {
 			return endpoint
 		}
 		parts := strings.SplitN(endpoint, "://", 2)
@@ -216,14 +288,23 @@ func kiroEndpoints(cfg *providers.ProviderConfig, psd map[string]any) []string {
 		if len(service) != 2 {
 			return endpoint
 		}
-		localized := service[0] + "." + region + ".amazonaws.com"
+		svcName := service[0]
+		covered, ok := kiroServiceRegions[svcName]
+		if !ok || !covered[region] {
+			return endpoint
+		}
+		localized := svcName + "." + region + ".amazonaws.com"
 		if len(host) == 2 {
 			return parts[0] + "://" + localized + "/" + host[1]
 		}
 		return parts[0] + "://" + localized
 	}
 
-	q := "https://q." + region + ".amazonaws.com/generateAssistantResponse"
+	qRegion := "us-east-1"
+	if kiroServiceRegions["q"][region] {
+		qRegion = region
+	}
+	q := "https://q." + qRegion + ".amazonaws.com/generateAssistantResponse"
 	codewhisperer := regionalize("https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse")
 	kiroGateway := "https://runtime.us-east-1.kiro.dev/generateAssistantResponse"
 
@@ -315,8 +396,8 @@ func ForwardCommandcode(ctx context.Context, client *http.Client, cfg *providers
 	headers := map[string]string{
 		"Content-Type":           "application/json",
 		"Authorization":          "Bearer " + apiKey,
-		"x-command-code-version": "0.25.7",
-		"x-cli-environment":      "cli",
+		"x-command-code-version": "1.88.0",
+		"x-cli-environment":      "production",
 		"Accept":                 "text/event-stream",
 	}
 	return DoRequest(ctx, client, "POST", cfg.BaseURL, headers, body)

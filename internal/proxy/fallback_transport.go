@@ -2,20 +2,29 @@ package proxy
 
 import (
 	"bytes"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
+	"sync"
 )
 
 // FallbackTransport intercepts outbound HTTP requests and automatically retries
 // via a direct connection (Proxy: nil) if the environment proxy or local sandbox proxy
 // refuses the connection (CONNECT tunnel failed, 403 Forbidden, blocked-by-allowlist).
 //
-// defaultDirectTransport is the true-direct fallback: it must bypass the
-// environment proxy entirely (NewSafeTransportDirect), because retrying a
-// failed env-proxy tunnel through the same env proxy would fail identically.
-var defaultDirectTransport = NewSafeTransportDirect()
+// Built lazily: constructing a safe transport at package-init time would fire
+// http.ProxyFromEnvironment's once-cache before main() ran viper's .env sync,
+// freezing an empty proxy view for the whole process.
+var (
+	defaultDirectTransportOnce sync.Once
+	defaultDirectTransport     http.RoundTripper
+)
+
+func defaultDirect() http.RoundTripper {
+	defaultDirectTransportOnce.Do(func() {
+		defaultDirectTransport = NewDirectSafeTransport()
+	})
+	return defaultDirectTransport
+}
 
 type FallbackTransport struct {
 	Base   http.RoundTripper
@@ -30,7 +39,7 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	direct := t.Direct
 	if direct == nil {
-		direct = defaultDirectTransport
+		direct = defaultDirect()
 	}
 
 	// Buffer body if present and not replayable
@@ -57,17 +66,7 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		if req.GetBody != nil {
 			directReq.Body, _ = req.GetBody()
 		}
-		directResp, directErr := direct.RoundTrip(directReq)
-		if err != nil && directErr != nil && errors.Is(directErr, ErrSSRFBlocked) {
-			// The direct fallback can never succeed where the target
-			// resolves to a private/reserved address (e.g. a sandbox whose
-			// DNS maps every external host to a sentinel range): the guard
-			// refuses the dial by design. Reporting the SSRF refusal would
-			// bury the primary proxy failure that actually needs attention,
-			// so surface the primary error and note the refused fallback.
-			return nil, fmt.Errorf("FallbackTransport: primary proxy error (direct fallback refused by SSRF protection): %w", err)
-		}
-		return directResp, directErr
+		return direct.RoundTrip(directReq)
 	}
 	return resp, err
 }
@@ -79,6 +78,6 @@ func NewFallbackTransport(base http.RoundTripper) http.RoundTripper {
 	}
 	return &FallbackTransport{
 		Base:   base,
-		Direct: defaultDirectTransport,
+		Direct: defaultDirect(),
 	}
 }

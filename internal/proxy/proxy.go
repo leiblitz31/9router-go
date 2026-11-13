@@ -69,7 +69,10 @@ func (e *UpstreamError) Error() string {
 var ErrStrictProxyRequired = errors.New("proxy required but failed (strictProxy=true)")
 
 var directProxyClient = &http.Client{
-	Transport: NewSafeTransport(),
+	// Truly direct: this client exists to replay a failed proxied attempt from
+	// the host's own address, so it must never route through the ambient proxy
+	// NewSafeTransport would install.
+	Transport: NewDirectSafeTransport(),
 }
 
 // insecureClientCache memoises one InsecureSkipVerify client per proxy URL,
@@ -181,6 +184,12 @@ func newJSONRequest(ctx context.Context, method, url string, headers map[string]
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	// A streaming lane asks for an event stream. Pin identity so an edge or
+	// provider cannot answer with a buffered gzip stream that arrives as one
+	// burst instead of token by token. An explicit encoding always wins.
+	if req.Header.Get("Accept-Encoding") == "" && strings.Contains(strings.ToLower(req.Header.Get("Accept")), "text/event-stream") {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
 	return req, nil
 }
 
@@ -211,6 +220,27 @@ func replayInsecureTLS(ctx context.Context, proxyURL, method, url string, header
 	return send(InsecureClientFor(proxyURL), retryReq)
 }
 
+// ProxyURLFor reports the proxy a client dials, or "" when it dials directly.
+// It unwraps FallbackTransport (the poolless client's wrapper) before reading
+// the transport registry. Other packages use it where upstream reads
+// t.Proxy: the uTLS transports keep t.Proxy nil by design (the dialer
+// tunnels manually so the fingerprinted handshake survives), so t.Proxy
+// cannot answer what they dial.
+func ProxyURLFor(client *http.Client) string {
+	if client == nil {
+		return ""
+	}
+	rt := client.Transport
+	if fb, ok := rt.(*FallbackTransport); ok {
+		rt = fb.Base
+	}
+	tr, ok := rt.(*http.Transport)
+	if !ok {
+		return ""
+	}
+	return proxyURLForTransport(tr)
+}
+
 // proxyURLFor reports the proxy a client dials, or "" when it dials directly.
 // The egress choice is read from the transport registry for transports built
 // by NewSafeTransport* (see utls_dialer.go); t.Proxy itself stays nil there
@@ -222,6 +252,14 @@ func proxyURLFor(client *http.Client) string {
 	}
 	tr, ok := client.Transport.(*http.Transport)
 	if !ok {
+		return ""
+	}
+	return proxyURLForTransport(tr)
+}
+
+// proxyURLForTransport is the transport-level core of proxyURLFor.
+func proxyURLForTransport(tr *http.Transport) string {
+	if tr == nil {
 		return ""
 	}
 	proxyFor := tr.Proxy
@@ -371,9 +409,28 @@ func transportDialsViaProxy(rt http.RoundTripper) bool {
 // disabled, for the corporate proxies and antivirus middleboxes that re-sign
 // TLS, unless STRICT_SSL forbids it.
 func DoRequest(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
-	return retryTransientUpstream(ctx, func() (*http.Response, error) {
-		return doRequestOnce(ctx, client, method, url, headers, body)
+	return retryTransientUpstream(ctx, func(c context.Context) (*http.Response, error) {
+		return doRequestOnce(c, client, method, url, headers, body)
 	})
+}
+
+// SendOnce sends one JSON request through client and returns whatever answer
+// arrives, whatever its status. Unlike DoRequest it never replays: no
+// transient-status retry, no direct replay after an apparent proxy failure (a
+// text/plain 403 from the endpoint itself looks like one), and no insecure-TLS
+// retry. It is for requests the router must not repeat on its own initiative,
+// such as a custom JSON business endpoint whose operation may already have
+// run. The caller owns resp.Body and decides which statuses are errors.
+func SendOnce(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
+	req, err := newJSONRequest(ctx, method, url, headers, body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	resp, err := send(client, req)
+	if err != nil {
+		return nil, fmt.Errorf("upstream request: %w", err)
+	}
+	return resp, nil
 }
 
 // doRequestOnce performs a single attempt.
@@ -432,6 +489,7 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 	if err != nil {
 		return nil, fmt.Errorf("upstream request: %w", err)
 	}
+	UnwrapIdentityGzip(req, resp)
 	if resp.StatusCode != http.StatusOK {
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 		resp.Body.Close()

@@ -41,6 +41,19 @@ func TestKnownProviders_AuthSchemes(t *testing.T) {
 	}
 }
 
+func TestKnownProviders_AnthropicModelsFetcher(t *testing.T) {
+	cfg := ProviderRegistry["anthropic"]
+	if cfg.ModelsFetcher == nil {
+		t.Fatal("anthropic ModelsFetcher is nil")
+	}
+	if cfg.ModelsFetcher.URL != "https://api.anthropic.com/v1/models?limit=1000" {
+		t.Errorf("unexpected ModelsFetcher URL: %q", cfg.ModelsFetcher.URL)
+	}
+	if cfg.ModelsFetcher.Type != "anthropic" {
+		t.Errorf("unexpected ModelsFetcher type: %q", cfg.ModelsFetcher.Type)
+	}
+}
+
 func TestKnownProviders_PerplexityWebIsParked(t *testing.T) {
 	// Upstream 38a0c449 parks perplexity-web with serviceKinds: [] — no
 	// executor sits behind it, so it must stay out of the pickers while the
@@ -100,8 +113,8 @@ func TestKnownProviders_RequireClaudeToolType(t *testing.T) {
 
 func TestKnownProviders_StaticHeaders(t *testing.T) {
 	cfg := KnownProviders["opencode"]
-	if cfg.StaticHeaders["x-opencode-client"] != "desktop" {
-		t.Errorf("opencode expected static header x-opencode-client=desktop, got %q", cfg.StaticHeaders["x-opencode-client"])
+	if cfg.StaticHeaders["x-opencode-client"] != "cli" {
+		t.Errorf("opencode expected static header x-opencode-client=cli, got %q", cfg.StaticHeaders["x-opencode-client"])
 	}
 }
 
@@ -220,7 +233,9 @@ func TestGetProviderModelKind(t *testing.T) {
 		{provider: "nvidia", model: "fastpitch", want: "tts"},
 		{provider: "nvidia", model: "tacotron2", want: "tts"},
 		{provider: "nvidia", model: "nvidia/nv-embedqa-e5-v5", want: "embedding"},
+		{provider: "nvidia", model: "nv-embedqa-e5-v5", want: "embedding"},
 		{provider: "nvidia", model: "nvidia/parakeet-ctc-1.1b-asr", want: "stt"},
+		{provider: "nvidia", model: "parakeet-ctc-1.1b-asr", want: "stt"},
 		{provider: "nvidia", model: "minimaxai/minimax-m3", want: ""},
 		{provider: "antigravity", model: "gemini-3.1-flash-image", want: "image"},
 		{provider: "antigravity", model: "gemini-3.8-flash-high", want: ""},
@@ -338,6 +353,89 @@ func TestNewProvidersRegistry_v060(t *testing.T) {
 		models := GetProviderModels(alias)
 		if len(models) == 0 {
 			t.Errorf("GetProviderModels(%q) returned empty list", alias)
+		}
+	}
+}
+
+func TestNewProvidersRegistry_v061(t *testing.T) {
+	// atmorouter
+	if _, ok := KnownProviders["atmorouter"]; !ok {
+		t.Error("expected atmorouter provider registered")
+	}
+	cfg := KnownProviders["atmorouter"]
+	if cfg.BaseURL != "https://atmorouter.dev/v1/chat/completions" {
+		t.Errorf("atmorouter expected BaseURL https://atmorouter.dev/v1/chat/completions, got %s", cfg.BaseURL)
+	}
+	if cfg.AuthScheme != "bearer" || cfg.AuthHeader != "Authorization" {
+		t.Errorf("atmorouter expected bearer/Authorization, got %s/%s", cfg.AuthScheme, cfg.AuthHeader)
+	}
+
+	// runcrate
+	if _, ok := KnownProviders["runcrate"]; !ok {
+		t.Error("expected runcrate provider registered")
+	}
+	cfg = KnownProviders["runcrate"]
+	if cfg.BaseURL != "https://api.runcrate.ai/v1/chat/completions" {
+		t.Errorf("runcrate expected BaseURL https://api.runcrate.ai/v1/chat/completions, got %s", cfg.BaseURL)
+	}
+	if cfg.AuthScheme != "bearer" || cfg.AuthHeader != "Authorization" {
+		t.Errorf("runcrate expected bearer/Authorization, got %s/%s", cfg.AuthScheme, cfg.AuthHeader)
+	}
+
+	// Aliases
+	if a := ResolveAlias("atmo"); a != "atmorouter" {
+		t.Errorf("expected atmo alias to resolve to atmorouter, got %s", a)
+	}
+	if a := ResolveAlias("rc"); a != "runcrate" {
+		t.Errorf("expected rc alias to resolve to runcrate, got %s", a)
+	}
+
+	// Verify model seeds
+	expectedModel := map[string]string{
+		"atmorouter": "cc/claude-sonnet-4-6",
+		"runcrate":   "deepseek-ai/DeepSeek-V4.1-Flash",
+	}
+	for provider, wantModel := range expectedModel {
+		models := GetProviderModels(provider)
+		if len(models) == 0 {
+			t.Errorf("GetProviderModels(%q) returned empty list", provider)
+		}
+		hasModel := false
+		for _, m := range models {
+			if m == wantModel {
+				hasModel = true
+				break
+			}
+		}
+		if !hasModel {
+			t.Errorf("GetProviderModels(%q) missing %s, got %v", provider, wantModel, models)
+		}
+	}
+	// Verify aliases reach the same catalog
+	for _, alias := range []string{"atmo", "rc"} {
+		models := GetProviderModels(alias)
+		if len(models) == 0 {
+			t.Errorf("GetProviderModels(%q) returned empty list", alias)
+		}
+	}
+}
+
+func TestNewProvidersRegistry_v062(t *testing.T) {
+	// Gemini 3.8 Flash TTS and 3.8 Flash Lite TTS models must be registered under
+	// the gemini provider catalog and carry the tts service kind.
+	for _, model := range []string{"gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"} {
+		found := false
+		for _, m := range GetProviderModels("gemini") {
+			if m == model {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("GetProviderModels(gemini) missing %s", model)
+		}
+		if got := GetProviderModelKind("gemini", model); got != "tts" {
+			t.Errorf("GetProviderModelKind(gemini, %q) = %q, want tts", model, got)
 		}
 	}
 }

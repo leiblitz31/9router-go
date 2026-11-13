@@ -1,6 +1,7 @@
 package media
 
 import (
+	"context"
 	json "encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"9router/proxy/internal/clientconfig"
+	"9router/proxy/internal/db"
+	"9router/proxy/internal/dbtest"
+	chathandlers "9router/proxy/internal/handlers/chat"
 )
 
 // The nine adapters were merged into internal/clientconfig but nothing served
@@ -15,7 +21,7 @@ import (
 // call. The handler resolves the client out of the path, which means the
 // adapter table stays the single description of a client.
 func TestCLIToolGetResolvesEveryAdapter(t *testing.T) {
-	h := NewCLIToolHandler()
+	h := NewCLIToolHandler(nil)
 	for _, id := range []string{"claude", "codex", "opencode", "droid", "crush", "kilo", "cline", "omp"} {
 		t.Run(id, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/cli-tools/"+id+"-settings", nil)
@@ -42,7 +48,7 @@ func TestCLIToolGetResolvesEveryAdapter(t *testing.T) {
 
 // An alias the adapters accept must work here too: users type both spellings.
 func TestCLIToolGetAcceptsAliases(t *testing.T) {
-	h := NewCLIToolHandler()
+	h := NewCLIToolHandler(nil)
 	for alias, want := range map[string]string{
 		"claude-code": "claude",
 		"kilocode":    "kilo",
@@ -66,7 +72,7 @@ func TestCLIToolGetAcceptsAliases(t *testing.T) {
 // A typo must answer 404 with the accepted names, not silently configure
 // nothing and report success.
 func TestCLIToolGetRefusesUnknownTool(t *testing.T) {
-	h := NewCLIToolHandler()
+	h := NewCLIToolHandler(nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/cli-tools/not-a-client-settings", nil)
 	req.URL.Path = "/api/cli-tools/not-a-client-settings"
 	rec := httptest.NewRecorder()
@@ -83,7 +89,7 @@ func TestCLIToolGetRefusesUnknownTool(t *testing.T) {
 // home so no developer config is touched (schema matrix §9).
 func TestCLIToolPostWritesTheClientFile(t *testing.T) {
 	home := t.TempDir()
-	h := NewCLIToolHandler()
+	h := NewCLIToolHandler(nil)
 
 	body := `{"baseUrl":"http://localhost:20128","apiKey":"sk-test","model":"cc/claude-sonnet-5"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/cli-tools/claude-settings", strings.NewReader(body))
@@ -116,7 +122,7 @@ func TestCLIToolPostWritesTheClientFile(t *testing.T) {
 
 // A POST without a base URL is refused before anything reaches the disk.
 func TestCLIToolPostRequiresBaseURL(t *testing.T) {
-	h := NewCLIToolHandler()
+	h := NewCLIToolHandler(nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/cli-tools/codex-settings", strings.NewReader(`{"apiKey":"x"}`))
 	req.URL.Path = "/api/cli-tools/codex-settings"
 	rec := httptest.NewRecorder()
@@ -129,7 +135,7 @@ func TestCLIToolPostRequiresBaseURL(t *testing.T) {
 // The GET response must not carry the credential: it is served to a reader that
 // only asked what would be written.
 func TestCLIToolGetDoesNotLeakTheAPIKey(t *testing.T) {
-	h := NewCLIToolHandler()
+	h := NewCLIToolHandler(nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/cli-tools/claude-settings?apiKey=sk-secret-value", nil)
 	req.URL.Path = "/api/cli-tools/claude-settings"
 	req.URL.RawQuery = "apiKey=sk-secret-value"
@@ -153,7 +159,7 @@ func TestCLIToolGetAnswersNotInstalledForAMissingConfigDir(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	h := NewCLIToolHandler()
+	h := NewCLIToolHandler(nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/cli-tools/droid-settings", nil)
 	req.URL.Path = "/api/cli-tools/droid-settings"
 	rec := httptest.NewRecorder()
@@ -192,7 +198,7 @@ func TestCLIToolGetInstalledFollowsTheConfigFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewCLIToolHandler()
+	h := NewCLIToolHandler(nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/cli-tools/droid-settings", nil)
 	req.URL.Path = "/api/cli-tools/droid-settings"
 	rec := httptest.NewRecorder()
@@ -202,5 +208,177 @@ func TestCLIToolGetInstalledFollowsTheConfigFile(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp["installed"] != true {
 		t.Errorf("installed = %v, want true once the config file exists", resp["installed"])
+	}
+}
+
+// The adapter tests hand ModelLimits in directly, so this is the only place
+// the matching against the real catalog runs. The entry is picked at runtime
+// to pin the matching tiers without coupling to the registry's contents.
+func TestAttachModelLimitsResolvesThroughTheCatalog(t *testing.T) {
+	database, err := db.OpenDatabase(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDatabase: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	if err := dbtest.CreateTables(database); err != nil {
+		t.Fatalf("CreateTables: %v", err)
+	}
+	h := NewCLIToolHandler(chathandlers.NewChatHandler(db.NewRepo(database)))
+
+	catalog := h.chat.BuildModelsListResult(context.Background(), chathandlers.ListModeCatalog)
+	var id string
+	var want clientconfig.ModelLimits
+	for _, m := range catalog.Models {
+		if m.ContextLength == nil || *m.ContextLength <= 0 {
+			continue
+		}
+		id = m.ID
+		want = clientconfig.ModelLimits{ContextWindow: *m.ContextLength}
+		if m.MaxCompletionTokens != nil {
+			want.MaxOutput = *m.MaxCompletionTokens
+		}
+		break
+	}
+	if id == "" {
+		t.Fatal("catalog returned no model with a published context_length")
+	}
+
+	bare := id[strings.LastIndexByte(id, '/')+1:]
+	opts := clientconfig.Options{}
+	h.attachModelLimits(context.Background(), &opts,
+		id, id+"(high)", bare, "definitely/not-a-model", "vendor/"+bare)
+
+	if got := opts.ModelLimits[id]; got != want {
+		t.Errorf("exact id %q = %+v, want %+v", id, got, want)
+	}
+	if got, ok := opts.ModelLimits[id+"(high)"]; !ok || got != want {
+		t.Errorf("suffixed id %q(high) resolved %+v (present %v), want %+v", id, got, ok, want)
+	}
+	// First-wins may attach a sibling entry's limits when two models share a
+	// bare name, so presence is the invariant here, not the value.
+	if _, ok := opts.ModelLimits[bare]; !ok {
+		t.Errorf("bare name %q did not resolve", bare)
+	}
+	// A slashed id the catalog does not carry stays unknown: the bare fallback
+	// only answers ids typed without a prefix.
+	for _, absent := range []string{"definitely/not-a-model", "vendor/" + bare} {
+		if got, ok := opts.ModelLimits[absent]; ok {
+			t.Errorf("unknown id %q resolved to %+v", absent, got)
+		}
+	}
+}
+
+func TestCLIToolGetReportsCurrentConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"model":"opus","autoCompactWindow":330000,"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:20130/v1","ANTHROPIC_DEFAULT_SONNET_MODEL":"sonnet-combo"}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewCLIToolHandler(nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/cli-tools/claude-settings", nil)
+	req.URL.Path = "/api/cli-tools/claude-settings"
+	rec := httptest.NewRecorder()
+	h.HandleCLIToolGet(rec, req)
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	curr, ok := resp["currentConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing or invalid currentConfig: %v", resp)
+	}
+	if curr["model"] != "opus" {
+		t.Errorf("model = %v, want opus", curr["model"])
+	}
+	if v, ok := curr["autoCompactWindow"].(float64); !ok || int(v) != 330000 {
+		t.Errorf("autoCompactWindow = %v, want 330000", curr["autoCompactWindow"])
+	}
+	tiers, ok := curr["tiers"].(map[string]any)
+	if !ok || tiers["sonnet"] != "sonnet-combo" {
+		t.Errorf("tiers.sonnet = %v, want sonnet-combo", tiers["sonnet"])
+	}
+}
+
+func TestCLIToolGet_NeverLeaksStoredAnthropicToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	dir := filepath.Join(home, ".claude")
+	_ = os.MkdirAll(dir, 0o755)
+	settings := `{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:20130/v1","ANTHROPIC_AUTH_TOKEN":"sk-super-secret-token"}}`
+	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0o644)
+
+	h := NewCLIToolHandler(nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/cli-tools/claude-settings", nil)
+	rec := httptest.NewRecorder()
+	h.HandleCLIToolGet(rec, req)
+
+	if strings.Contains(rec.Body.String(), "sk-super-secret-token") {
+		t.Fatalf("stored credential leaked in GET response: %s", rec.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	curr, ok := resp["currentConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing currentConfig: %v", resp)
+	}
+	if curr["hasApiKey"] != true {
+		t.Errorf("expected hasApiKey = true, got %v", curr["hasApiKey"])
+	}
+	if _, ok := curr["apiKey"]; ok {
+		t.Errorf("apiKey must not be present in currentConfig, got %v", curr["apiKey"])
+	}
+}
+
+func TestCLIToolDelete_PassesGatewayURLAndResets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	dir := filepath.Join(home, ".claude")
+	_ = os.MkdirAll(dir, 0o755)
+	settings := `{"model":"gateway-model","autoCompactWindow":200000,"env":{"ANTHROPIC_BASE_URL":"http://my-gateway.local:20130/v1","ANTHROPIC_AUTH_TOKEN":"tok"}}`
+	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0o644)
+
+	h := NewCLIToolHandler(nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/cli-tools/claude-settings?home="+home, nil)
+	req.Host = "my-gateway.local:20130"
+	rec := httptest.NewRecorder()
+	h.HandleCLIToolDelete(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+	if strings.Contains(s, `"model"`) {
+		t.Errorf("model should be removed on DELETE reset matching host:\n%s", s)
+	}
+	if strings.Contains(s, "autoCompactWindow") {
+		t.Errorf("autoCompactWindow should be removed on DELETE reset:\n%s", s)
+	}
+
+	// Foreign URL containing 20130 must survive DELETE when BaseURL is plumbed through
+	foreignSettings := `{"model":"foreign-model","env":{"ANTHROPIC_BASE_URL":"http://foreign-site.com:20130/v1"}}`
+	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte(foreignSettings), 0o644)
+	rec2 := httptest.NewRecorder()
+	h.HandleCLIToolDelete(rec2, req)
+	content2, _ := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if !strings.Contains(string(content2), `"model"`) {
+		t.Errorf("foreign model must survive DELETE whose host is gateway:\n%s", string(content2))
 	}
 }

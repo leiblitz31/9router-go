@@ -12,6 +12,16 @@ export interface ComboStrategyInfo {
   /** System One model that evaluates the route; empty means the free default. */
   routerModel?: string
   /**
+   * Milliseconds from candidate start to first usable response; 0/absent
+   * disables. Never applied to the last candidate in the chain.
+   */
+  firstTokenTimeoutMs?: number
+  /**
+   * Milliseconds a model that timed out stays out of the chain. Absent means
+   * the backend default (5 minutes); an explicit 0 re-includes it at once.
+   */
+  firstTokenGraceMs?: number
+  /**
    * Skip the rotation strategy and walk the combo's stored model list in
    * order, so the ordering arranged in the editor is the fallback chain.
    * The capability reorder still runs: a request that needs vision must
@@ -19,6 +29,18 @@ export interface ComboStrategyInfo {
    * which orders the models itself.
    */
   respectStoredOrder?: boolean
+  /**
+   * Requests this combo may serve per window. 0/absent means unlimited, so a
+   * combo written before the field existed is unaffected. Reaching the
+   * ceiling withholds the combo and serves the turn on its first member.
+   */
+  budgetCalls?: number
+  /**
+   * Milliseconds the call ceiling spans. Absent means the backend default of
+   * one hour; only meaningful alongside budgetCalls. A window longer than the
+   * process uptime is never recycled within it.
+   */
+  budgetWindowMs?: number
 }
 
 /**
@@ -34,7 +56,9 @@ export const COMBO_STRATEGIES = [
   { value: 'sticky', label: 'Sticky — stay until the limit' },
   { value: 'capacity', label: 'Capacity — prefer free tiers' },
   { value: 'smart', label: 'Smart Router — System One' },
-  { value: 'fusion', label: 'Fusion — panel + judge' }
+  { value: 'fusion', label: 'Fusion — panel + judge' },
+  { value: 'tokenmaxxing', label: 'Tokenmaxxing — quota-aware' },
+  { value: 'cascade', label: 'Cascade — cheapest first' }
 ] as const
 
 /**
@@ -174,6 +198,162 @@ export function updateComboStrategy(
   return updated
 }
 
+/** Largest whole-millisecond timeout representable by the backend duration. */
+export const MAX_FIRST_TOKEN_TIMEOUT_MS = 9223372036854
+/**
+ * Largest per-window request ceiling the backend accepts. The server caps a
+ * budget at one million calls per window, so a larger field is refused rather
+ * than stored.
+ */
+export const MAX_BUDGET_CALLS = 1000000
+/** Backend default budget window: one hour, in milliseconds. */
+export const DEFAULT_BUDGET_WINDOW_MS = 3600000
+/** The same default in minutes, for the dashboard input. */
+export const DEFAULT_BUDGET_WINDOW_MINUTES = 60
+/**
+ * Largest window the backend stores, in minutes.
+ *
+ * The server caps budgetWindowMs at (2^63-1)/1000000 milliseconds
+ * (internal/db settings_parse_maps.go), which is 153722867280 minutes. This
+ * value matches it: the previous constant (92233720368) was the cap on a
+ * *different* field, firstTokenTimeoutMs, so the dashboard accepted a window
+ * the server then dropped silently — the combo appeared budgeted while its
+ * window had reverted to the one-hour default.
+ */
+export const MAX_BUDGET_WINDOW_MINUTES = 153722867280
+
+/** Tooltip/help text shared by the combo card and the edit modal. */
+export const RESPONSE_TIMEOUT_HELP =
+  "Sequential failover: wait this many seconds for a model's first usable response (connection, headers and first content), then try the next model. The last model in the chain is never cut short, so this never makes a combo fail sooner. Never cuts off a response that is already streaming. Leave empty or 0 to disable. A model that times out is skipped for the grace period (5 minutes by default) before it rejoins the chain."
+
+/** Backend default grace after a model response timeout (5 minutes). */
+export const DEFAULT_FIRST_TOKEN_GRACE_SECONDS = 300
+/** Tooltip for the per-window call ceiling input. */
+export const BUDGET_CALLS_HELP =
+  'Sequential failover spend cap: the number of requests this combo may serve per window (60 minutes by default). After the ceiling is reached the combo is withheld and the turn is served by its first member, so the request still succeeds instead of failing. Blank or 0 means unlimited. The counter lives in the gateway process, so a restart resets it.'
+/** Tooltip for the window the call ceiling spans. */
+export const BUDGET_WINDOW_HELP =
+  'How long the call budget lasts before the counter resets. Blank means the default of 60 minutes. A window only matters once a call budget is set.'
+
+/** The same ceiling in seconds, for the dashboard inputs. */
+export const MAX_FIRST_TOKEN_TIMEOUT_SECONDS = Math.floor(MAX_FIRST_TOKEN_TIMEOUT_MS / 1000)
+
+/**
+ * The dashboard edits the timeout in seconds; storage and the router keep
+ * milliseconds. Returns null for anything that is not a whole-millisecond
+ * value in range. A blank field means "disabled" (0).
+ */
+export function secondsToTimeoutMs(seconds: number | string | null | undefined): number | null {
+  if (seconds === '' || seconds == null) return 0
+  const n = typeof seconds === 'number' ? seconds : Number(seconds)
+  if (!Number.isFinite(n) || n < 0 || n > MAX_FIRST_TOKEN_TIMEOUT_SECONDS) return null
+  return Math.round(n * 1000)
+}
+
+/** Stored milliseconds as the seconds shown in the dashboard. */
+export function timeoutMsToSeconds(ms: number | undefined): number {
+  return ms && ms > 0 ? ms / 1000 : 0
+}
+
+/**
+ * Grace input in seconds -> stored milliseconds. Unlike the timeout, a blank
+ * field is not 0: it means "use the default", returned as undefined so the key
+ * is dropped from storage. null marks an invalid value.
+ */
+export function graceSecondsToMs(seconds: number | string | null | undefined): number | undefined | null {
+  if (seconds === '' || seconds == null) return undefined
+  return secondsToTimeoutMs(seconds)
+}
+
+/** Stored grace milliseconds as seconds for display; blank when defaulted. */
+export function graceMsToSeconds(ms: number | undefined): number | '' {
+  return ms === undefined ? '' : ms / 1000
+}
+
+/** Set or clear (undefined) the grace period, leaving everything else alone. */
+export function updateFirstTokenGrace(
+  currentStrategies: Record<string, ComboStrategyInfo>,
+  comboName: string,
+  firstTokenGraceMs: number | undefined
+): Record<string, ComboStrategyInfo> {
+  if (
+    firstTokenGraceMs !== undefined &&
+    (!Number.isSafeInteger(firstTokenGraceMs) || firstTokenGraceMs < 0 || firstTokenGraceMs > MAX_FIRST_TOKEN_TIMEOUT_MS)
+  ) {
+    return currentStrategies
+  }
+  const next = { ...(currentStrategies[comboName] || {}) }
+  if (firstTokenGraceMs === undefined) delete next.firstTokenGraceMs
+  else next.firstTokenGraceMs = firstTokenGraceMs
+  return { ...currentStrategies, [comboName]: next }
+}
+
+/** Update only the response timeout, leaving strategy inheritance untouched. */
+export function updateFirstTokenTimeout(
+  currentStrategies: Record<string, ComboStrategyInfo>,
+  comboName: string,
+  firstTokenTimeoutMs: number
+): Record<string, ComboStrategyInfo> {
+  if (!Number.isSafeInteger(firstTokenTimeoutMs) || firstTokenTimeoutMs < 0 || firstTokenTimeoutMs > MAX_FIRST_TOKEN_TIMEOUT_MS) return currentStrategies
+  return {
+    ...currentStrategies,
+    [comboName]: { ...(currentStrategies[comboName] || {}), firstTokenTimeoutMs }
+  }
+}
+
+/**
+ * Set (or clear, with 0) a combo's per-window request ceiling. The counter is
+ * process-local server-side, so the value is a spend limit for this process,
+ * not a durable budget.
+ */
+export function updateComboBudgetCalls(
+  currentStrategies: Record<string, ComboStrategyInfo>,
+  comboName: string,
+  budgetCalls: number
+): Record<string, ComboStrategyInfo> {
+  if (!Number.isSafeInteger(budgetCalls) || budgetCalls < 0 || budgetCalls > MAX_BUDGET_CALLS) return currentStrategies
+  const updated = { ...currentStrategies }
+  const current = { ...(updated[comboName] || {}) }
+  if (budgetCalls === 0) {
+    delete current.budgetCalls
+    if (Object.keys(current).length === 0) delete updated[comboName]
+    else updated[comboName] = current
+    return updated
+  }
+  updated[comboName] = { ...current, budgetCalls }
+  return updated
+}
+
+/**
+ * Set (or clear, with 0) the window a combo's call ceiling spans. A blank
+ * field means "the backend default", not "zero window": an explicit 0 clears
+ * the field so the default applies again, while a window that never recycles
+ * would cap the combo permanently after the first `budgetCalls` requests.
+ */
+export function updateComboBudgetWindow(
+  currentStrategies: Record<string, ComboStrategyInfo>,
+  comboName: string,
+  windowMs: number
+): Record<string, ComboStrategyInfo> {
+  if (!Number.isSafeInteger(windowMs) || windowMs < 0 || windowMs > MAX_BUDGET_WINDOW_MINUTES * 60000) return currentStrategies
+  const updated = { ...currentStrategies }
+  const current = { ...(updated[comboName] || {}) }
+  if (windowMs === 0) {
+    delete current.budgetWindowMs
+    if (Object.keys(current).length === 0) delete updated[comboName]
+    else updated[comboName] = current
+    return updated
+  }
+  updated[comboName] = { ...current, budgetWindowMs: windowMs }
+  return updated
+}
+
+/** The window in minutes for the dashboard input, defaulting to one hour. */
+export function budgetWindowMsToMinutes(windowMs: number | undefined | null): number {
+  if (!windowMs || windowMs <= 0) return DEFAULT_BUDGET_WINDOW_MINUTES
+  return Math.round(windowMs / 60000)
+}
+
 export function updateJudgeModel(
   currentStrategies: Record<string, ComboStrategyInfo>,
   comboName: string,
@@ -192,9 +372,8 @@ export function clearJudgeModel(
   const updated = { ...currentStrategies }
   if (updated[comboName]) {
     const { judgeModel: _, ...rest } = updated[comboName]
-    // Only an inheriting combo loses its entry here: a combo that names
-    // `fallback` explicitly keeps it (upstream #4576).
-    if (rest.fallbackStrategy && rest.fallbackStrategy !== INHERIT_STRATEGY) {
+    // Clearing the judge must preserve timeout and other inherited settings.
+    if (Object.keys(rest).length > 0) {
       updated[comboName] = rest
     } else {
       delete updated[comboName]

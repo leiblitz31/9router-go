@@ -6,12 +6,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	json "9router/proxy/internal/fastjson"
+	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/providers"
 )
@@ -22,12 +24,71 @@ import (
 var loadCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 var onboardUserURL = "https://cloudcode-pa.googleapis.com/v1internal:onboardUser"
 
-const antigravityIDEUserAgent = providers.AntigravityCLIUserAgent
+// antigravityProjectUserAgent returns the User-Agent the Antigravity onboarding
+// RPCs must be sent as.
+//
+// The value is load-bearing, not cosmetic. Google answers the generic
+// `google-api-nodejs-client` identity with a 200 that OMITS
+// `cloudaicompanionProject` even for a fully provisioned account, so a caller
+// sending it concludes "no project" and every chat then returns 502 for a
+// healthy login. Verified live on one token: the generic UA yields no project,
+// while the Antigravity identity returns the real project id.
+//
+// The profile comes from the connection, so an account signed in as the CLI is
+// discovered as the CLI rather than as the IDE. A caller with no connection
+// data (the media lanes, which only carry a token) falls back to the CLI shape,
+// which is the identity that keeps working for the Gemini 4 Argon tiers.
+func antigravityProjectUserAgent(connData *shared.ConnectionData) string {
+	profile := providers.AntigravityProfileCLI
+	if connData != nil && connData.ProviderSpecificData != nil {
+		// Only an explicitly recognised value changes the profile. The
+		// normaliser defaults unknown values to "ide", which is the wrong
+		// fallback here: an unrecognised or absent setting must keep sending
+		// the CLI identity, because that is the shape the Argon lanes answer.
+		if providers.IsAntigravityClientProfile(connData.ProviderSpecificData["clientProfile"]) {
+			profile = providers.NormalizeAntigravityClientProfile(connData.ProviderSpecificData["clientProfile"])
+		}
+	}
+	return providers.AntigravityUserAgentFor(profile)
+}
 
 var lcaMetadata = map[string]any{
 	"ideType":    9, // ANTIGRAVITY
-	"platform":   2, // DARWIN_ARM64
+	"platform":   GetAntigravityPlatformEnum(runtime.GOOS, runtime.GOARCH),
 	"pluginType": 2, // GEMINI
+}
+
+// GetAntigravityPlatformEnum maps the host (GOOS, GOARCH) to the Google Cloud
+// Code client platform enum sent in loadCodeAssist/onboardUser metadata.
+//
+//	darwin/arm64 -> 2 (PLATFORM_DARWIN_ARM64)
+//	darwin/amd64 -> 1 (PLATFORM_DARWIN_AMD64)
+//	linux/amd64  -> 3 (PLATFORM_LINUX_AMD64)
+//	linux/arm64  -> 4 (PLATFORM_LINUX_ARM64)
+//	windows/amd64 -> 5 (PLATFORM_WINDOWS_AMD64)
+//	otherwise    -> 0 (PLATFORM_UNSPECIFIED)
+func GetAntigravityPlatformEnum(goos, goarch string) int {
+	switch goos {
+	case "darwin":
+		switch goarch {
+		case "arm64":
+			return 2 // PLATFORM_DARWIN_ARM64
+		case "amd64":
+			return 1 // PLATFORM_DARWIN_AMD64
+		}
+	case "linux":
+		switch goarch {
+		case "amd64":
+			return 3 // PLATFORM_LINUX_AMD64
+		case "arm64":
+			return 4 // PLATFORM_LINUX_ARM64
+		}
+	case "windows":
+		if goarch == "amd64" {
+			return 5 // PLATFORM_WINDOWS_AMD64
+		}
+	}
+	return 0 // PLATFORM_UNSPECIFIED
 }
 
 // projectNoCache short-circuits re-probing the onboarding RPCs for a token whose
@@ -116,11 +177,12 @@ func cacheProjectMissing(connID string) {
 //     with nothing mapped). Safe to cache so we stop hammering the RPCs.
 //
 // FetchAntigravityProjectID probes Google's onboarding RPCs for a projectID.
-func FetchAntigravityProjectID(ctx context.Context, client *http.Client, accessToken string) (pid string, authFailed, noProject bool) {
-	return fetchAntigravityProjectID(ctx, client, accessToken)
+func FetchAntigravityProjectID(ctx context.Context, client *http.Client, accessToken string, connData *shared.ConnectionData) (pid string, authFailed, noProject bool) {
+	return fetchAntigravityProjectID(ctx, client, accessToken, connData)
 }
 
-func fetchAntigravityProjectID(ctx context.Context, client *http.Client, accessToken string) (pid string, authFailed, noProject bool) {
+func fetchAntigravityProjectID(ctx context.Context, client *http.Client, accessToken string, connData *shared.ConnectionData) (pid string, authFailed, noProject bool) {
+	userAgent := antigravityProjectUserAgent(connData)
 	payload, err := json.Marshal(map[string]any{"metadata": lcaMetadata})
 	if err != nil {
 		log.Error("antigravity", "loadCodeAssist marshal failed", "error", err)
@@ -133,7 +195,7 @@ func fetchAntigravityProjectID(ctx context.Context, client *http.Client, accessT
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", antigravityIDEUserAgent)
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -185,11 +247,11 @@ func fetchAntigravityProjectID(ctx context.Context, client *http.Client, accessT
 		}
 	}
 
-	pid, authFailed, onboardNoProject := onboardAntigravityUser(ctx, client, accessToken, tierID)
+	pid, authFailed, onboardNoProject := onboardAntigravityUser(ctx, client, accessToken, tierID, userAgent)
 	return pid, authFailed, noProject || onboardNoProject
 }
 
-func onboardAntigravityUser(ctx context.Context, client *http.Client, accessToken, tierID string) (pid string, authFailed, noProject bool) {
+func onboardAntigravityUser(ctx context.Context, client *http.Client, accessToken, tierID, userAgent string) (pid string, authFailed, noProject bool) {
 	maxAttempts := getOnboardMaxAttempts()
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		payload, err := json.Marshal(map[string]any{
@@ -213,7 +275,7 @@ func onboardAntigravityUser(ctx context.Context, client *http.Client, accessToke
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("User-Agent", antigravityIDEUserAgent)
+		req.Header.Set("User-Agent", userAgent)
 
 		resp, err := client.Do(req)
 		if err != nil {

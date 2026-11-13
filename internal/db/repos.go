@@ -33,11 +33,33 @@ type Repo struct {
 	// jbBuild serialises snapshot rebuilds so concurrent first requests after
 	// a write build it once.
 	jbBuild sync.Mutex
+	// settingsCache holds the parsed settings row. It lives on the Repo for
+	// the same reason activePoolIDs does: the answer belongs to one database.
+	settingsCache atomic.Pointer[cachedSettings]
 	// vault is the optional credential vault. It is stored rather than held by
 	// value so a key rotation can swap the live vault without touching any
 	// reader that already captured a *Repo. A nil value means "no vault", which
 	// is every install that never set ROUTER_MASTER_KEY.
 	vault atomic.Value // *vault.Vault
+	// auditRecorder is the running tamper-evident audit recorder, or nil when
+	// auditing is off. It is stored rather than held by value for the same
+	// reason as vault: the router is built before the boot hook starts the
+	// recorder, so a handler reads it per request instead of snapshotting a
+	// nil at construction. See audit_recorder.go.
+	auditRecorder atomic.Value // *audit.Recorder
+	// budgetColsOnce/budgetCols cache whether the apiKeys table carries the
+	// F-2 budget columns. The answer is a property of the schema, which does
+	// not change while the process runs, and the probe sits on the dashboard's
+	// boot path — so it runs once, like settingsCache.
+	budgetColsOnce sync.Once
+	budgetCols     bool
+}
+
+// cachedSettings is one parsed settings row and the row content it was
+// parsed from.
+type cachedSettings struct {
+	raw   string
+	value *SettingsData
 }
 
 // nowUTC is the timestamp format every connection write stamps.

@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { api, type APIKey, type APIKeyPolicy, type Plan } from '../../api/client'
+  import { api, type APIKey, type ApiKeyBudget, type APIKeyPolicy, type Combo, type Plan, type ProviderConnection, type ProviderNode } from '../../api/client'
   import { Loader2, Save, X } from 'lucide-svelte'
   import { isNavEntryHidden } from '../../lib/navVisibility.svelte'
+  import { formatTokenAmount, parseTokenAmount } from '../../lib/tokenUnits'
+  import ModelPickerModal from '../combos/ModelPickerModal.svelte'
 
   interface Props {
     apiKey: APIKey
@@ -19,8 +21,40 @@
   // The lifetime budget and the concurrency wait are the two governance columns
   // the modal gained alongside the per-window rates. Both read 0 as "unset":
   // no quota, and the server's default queue timeout.
-  let tokenQuota = $state(apiKey.tokenQuota ?? 0)
+  //
+  // The two token amounts are text, not numbers: a budget of ten million is
+  // written "10M", and a seven-digit number field is unreadable. The parser
+  // is decimal, so 1M is a million tokens.
+  let tokenQuota = $state(formatTokenAmount(apiKey.tokenQuota ?? 0))
+  let contextLimit = $state(formatTokenAmount(apiKey.contextLimit ?? 0))
   let queueTimeoutMs = $state(apiKey.queueTimeoutMs ?? 0)
+  // The per-period budget (F-2). Cost is a text dollar amount read into
+  // integer micros on save; tokens reuse the lifetime shorthand parser. A
+  // blank cost means "no cost limit", so 0 is the explicit clear and never a
+  // typo that silently removes the ceiling. hardCutoff starts armed (true)
+  // only when the key already spends against a budget, else it keeps whatever
+  // is stored.
+  let budgetLimitUsd = $state(
+    apiKey.limitMicros ? String(Number((apiKey.limitMicros / 1e6).toFixed(6))) : '',
+  )
+  let budgetLimitTokens = $state(formatTokenAmount(apiKey.limitTokens ?? 0))
+  let budgetPeriod = $state<string>(apiKey.budgetPeriod || 'monthly')
+  let alertPct = $state(apiKey.alertPct ?? 0)
+  // hardCutoff initialises from the stored value, full stop: the list returns
+  // the key's own hardCutoff, so forcing true here would silently flip a
+  // warn-only key to refuse-at-ceiling the moment the operator pressed Save on
+  // this dialog for any other reason. The `?? true` default only covers rows
+  // minted before the column existed, which the server reads the same way.
+  let hardCutoff = $state(apiKey.hardCutoff ?? true)
+  // The spend read is paid when the key could be budgeted: a column on the
+  // key, or a plan assigned to it (a plan can arm the budget while every
+  // column reads zero). The endpoint then resolves plan-then-key like the
+  // limiter and its `armed` field is the truth for what the panel shows.
+  let couldBeArmed = $derived(
+    (apiKey.limitMicros ?? 0) > 0 || (apiKey.limitTokens ?? 0) > 0 || !!apiKey.planId,
+  )
+  let budget = $state<ApiKeyBudget | null>(null)
+  let budgetLoadError = $state(false)
 
   // expiresAt is stored as RFC3339. The input is a plain datetime-local because
   // the browser needs a local time and the server needs UTC; convert at the edge
@@ -33,6 +67,17 @@
   let name = $state(apiKey.name ?? '')
   let models = $state<string[]>([])
   let modelDraft = $state('')
+  let isModelPickerOpen = $state(false)
+  // The picker lists what the gateway publishes, which is a question about the
+  // whole deployment rather than about this key. The three sources are read
+  // when the picker opens, not when the dialog opens: an operator who never
+  // touches the allowlist should not pay for the reads.
+  let pickerConnections = $state<ProviderConnection[]>([])
+  let pickerProviderNodes = $state<ProviderNode[]>([])
+  let pickerCombos = $state<Combo[]>([])
+  // The pattern field is the fallback for the glob and deny syntax the picker
+  // cannot express. It stays out of the way until it is asked for.
+  let showPatternInput = $state(false)
   let isLoadingModels = $state(false)
   let isSaving = $state(false)
   let error = $state<string | null>(null)
@@ -69,6 +114,21 @@
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
   }
 
+  // A token amount is read from the text field into a whole count. An amount
+  // the parser cannot read is refused here rather than stored as 0: 0 means
+  // "unlimited", so a typo would silently remove the ceiling the operator
+  // was trying to set.
+  function tokenAmount(value: string, label: string): number | null {
+    const trimmed = value.trim()
+    if (!trimmed) return 0
+    const parsed = parseTokenAmount(trimmed)
+    if (parsed === null) {
+      error = `${label} is not a token amount. Use a number, or a scale like 500K, 2M or 1B.`
+      return null
+    }
+    return parsed
+  }
+
   async function loadModels() {
     isLoadingModels = true
     try {
@@ -88,6 +148,40 @@
     }
   }
 
+  // openModelPicker reads what the gateway publishes and opens the picker.
+  //
+  // The nodes and their connections are what put a custom endpoint's own
+  // models in the list: without them the picker offers only the catalog's
+  // providers, and a model served by a custom node — the one a reseller is
+  // most likely to be selling — cannot be picked at all.
+  //
+  // Each source catches on its own: one failing request must not leave the
+  // picker empty, which would read as "this gateway publishes nothing".
+  async function openModelPicker() {
+    isModelPickerOpen = true
+    const [nodes, conns, comboList] = await Promise.all([
+      api.getProviderNodes().catch(() => [] as ProviderNode[]),
+      api.getConnections().catch(() => [] as ProviderConnection[]),
+      api.getCombos().catch(() => [] as Combo[]),
+    ])
+    pickerProviderNodes = nodes
+    pickerConnections = conns
+    pickerCombos = comboList
+  }
+
+  // A model picked in the picker joins the allowlist. It is not written
+  // straight away: the allowlist is one part of the policy this dialog saves,
+  // and a half-finished dialog must not leave half of it behind.
+  function selectModel(value: string) {
+    if (!models.includes(value)) {
+      models = [...models, value]
+    }
+  }
+
+  function deselectModel(value: string) {
+    models = models.filter((m) => m !== value)
+  }
+
   // An existing allowlist is part of the policy this modal edits, exactly like
   // the rate limits, so it has to be fetched on open. The list used to start
   // empty and only filled after "Load" was pressed, so the modal claimed "every
@@ -100,6 +194,15 @@
   $effect(() => {
     if (!hasLoadedModels) loadModels()
     if (!plansHidden) void loadPlans()
+    // Open-window spend is read-only context, so a failed read must not block
+    // the save or clobber the shared error banner the save path owns. Both
+    // guards keep it to a single fetch: `budget === null` skips a refetch once
+    // it loaded, and `!budgetLoadError` skips a retry when it failed (leaving
+    // `budget` null would otherwise loop forever). The gate is couldBeArmed,
+    // not the endpoint's armed flag: a plan can arm the budget while the key's
+    // columns read zero, and only the read itself knows for sure — it reports
+    // `armed` and the panel renders on that.
+    if (couldBeArmed && budget === null && !budgetLoadError) void loadKeyBudget()
   })
 
   async function loadPlans() {
@@ -112,6 +215,38 @@
     } finally {
       isLoadingPlans = false
     }
+  }
+
+  async function loadKeyBudget() {
+    try {
+      budget = await api.getKeyBudget(apiKey.id)
+      budgetLoadError = false
+    } catch {
+      budgetLoadError = true
+    }
+  }
+
+  // Micros to dollars, two decimals, the same shape PlansView uses.
+  function fmtMicros(micros: number): string {
+    return `$${(micros / 1_000_000).toFixed(2)}`
+  }
+
+  // formatTokenAmount writes 0 as "", which would render "Spent  of ..."; the
+  // fallback keeps a zero axis legible.
+  function fmtTokens(tokens: number): string {
+    return formatTokenAmount(tokens) || '0'
+  }
+
+  // Status chip colours reuse the Badge palette: success / warning / danger.
+  const statusLabel: Record<ApiKeyBudget['status'], string> = {
+    ok: 'OK',
+    approaching: 'Approaching',
+    exhausted: 'Exhausted',
+  }
+  const statusClasses: Record<ApiKeyBudget['status'], string> = {
+    ok: 'bg-success/10 text-success border border-success/25',
+    approaching: 'bg-warning/10 text-warning border border-warning/25',
+    exhausted: 'bg-danger/10 text-danger border border-danger/25',
   }
 
   async function save(e: SubmitEvent) {
@@ -146,11 +281,46 @@
 
     try {
       isSaving = true
+      const quota = tokenAmount(tokenQuota, 'Lifetime token quota')
+      if (quota === null) {
+        isSaving = false
+        return
+      }
+      const context = tokenAmount(contextLimit, 'Context limit')
+      if (context === null) {
+        isSaving = false
+        return
+      }
+      // Per-period cost budget. A blank is an explicit "no cost limit" (0),
+      // matching how the other unset columns read as unlimited; a value the
+      // parser cannot read is refused rather than stored as 0.
+      const rawUsd = budgetLimitUsd.trim()
+      let budgetMicros = 0
+      if (rawUsd) {
+        const parsed = Number.parseFloat(rawUsd)
+        if (Number.isNaN(parsed) || parsed < 0 || !Number.isFinite(parsed)) {
+          error = 'Period budget is not a dollar amount. Use a number like 25 or 25.50.'
+          isSaving = false
+          return
+        }
+        budgetMicros = Math.round(parsed * 1e6)
+      }
+      const periodTokens = tokenAmount(budgetLimitTokens, 'Period token budget')
+      if (periodTokens === null) {
+        isSaving = false
+        return
+      }
+      if (!Number.isFinite(alertPct) || alertPct < 0 || alertPct > 100) {
+        error = 'Alert percentage must be between 0 and 100.'
+        isSaving = false
+        return
+      }
       const policy: APIKeyPolicy = {
         rateLimitRpm: nonNegative(rpm),
         rateLimitTpm: nonNegative(tpm),
         rateLimitConcurrency: nonNegative(concurrency),
-        tokenQuota: nonNegative(tokenQuota),
+        tokenQuota: quota,
+        contextLimit: context,
         queueTimeoutMs: nonNegative(queueTimeoutMs),
         expiresAt: toRFC3339(expiresLocal),
         metadata: metadataValue,
@@ -159,6 +329,14 @@
         // deliberate detach, and the server refuses an id that does not exist
         // rather than storing a dangling one.
         planId,
+        // Per-period budget. Always sending the cost as an explicit number
+        // matters: the server treats an omitted limitMicros as "keep stored
+        // value", so 0 is the only way to clear a cost limit.
+        limitMicros: budgetMicros,
+        limitTokens: periodTokens,
+        budgetPeriod,
+        alertPct,
+        hardCutoff,
       }
       await api.updateApiKeyPolicy(apiKey.id, policy)
       // The allowlist is part of the same policy the operator pressed Save for.
@@ -322,15 +500,15 @@
             </label>
             <input
               id="pol-quota"
-              type="number"
-              min="0"
-              step="1"
+              type="text"
+              inputmode="text"
+              placeholder="1M"
               bind:value={tokenQuota}
               class="w-full bg-surface border border-border rounded-lg px-3 py-2 font-code text-xs text-text-main focus:outline-none focus:border-brand-500"
             />
             <p class="text-text-subtle mt-1">
-              Total prompt + completion tokens for the key's lifetime. Once spent, requests are
-              refused with 403.
+              Total prompt + completion tokens for the key's lifetime. Accepts a number or a scale
+              (500K, 2M, 1B). Once spent, requests are refused with 429.
             </p>
           </div>
           <div>
@@ -350,6 +528,141 @@
               Leave 0 for the server default.
             </p>
           </div>
+        </div>
+
+        <!-- Per-period budget (F-2). Cost and token ceilings reset on the
+             period below; open-window spend is read-only context loaded once
+             on open. -->
+        <div class="space-y-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label for="pol-bud-usd" class="block font-semibold text-text-muted mb-1">
+                Cost budget ($)
+              </label>
+              <input
+                id="pol-bud-usd"
+                type="text"
+                inputmode="decimal"
+                placeholder="25.00"
+                bind:value={budgetLimitUsd}
+                class="w-full bg-surface border border-border rounded-lg px-3 py-2 font-code text-xs text-text-main focus:outline-none focus:border-brand-500"
+              />
+              <p class="text-text-subtle mt-1">
+                USD the key may spend each {budgetPeriod}. Blank = no cost limit.
+              </p>
+            </div>
+            <div>
+              <label for="pol-bud-tok" class="block font-semibold text-text-muted mb-1">
+                Token budget
+              </label>
+              <input
+                id="pol-bud-tok"
+                type="text"
+                placeholder="1M"
+                bind:value={budgetLimitTokens}
+                class="w-full bg-surface border border-border rounded-lg px-3 py-2 font-code text-xs text-text-main focus:outline-none focus:border-brand-500"
+              />
+              <p class="text-text-subtle mt-1">
+                Prompt + completion tokens per period. Blank = no token limit.
+              </p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label for="pol-bud-period" class="block font-semibold text-text-muted mb-1">
+                Period
+              </label>
+              <select
+                id="pol-bud-period"
+                bind:value={budgetPeriod}
+                class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs text-text-main focus:outline-none focus:border-brand-500"
+              >
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="total">Total — never resets</option>
+              </select>
+            </div>
+            <div>
+              <label for="pol-bud-alert" class="block font-semibold text-text-muted mb-1">
+                Alert at (%)
+              </label>
+              <input
+                id="pol-bud-alert"
+                type="number"
+                min="0"
+                max="100"
+                bind:value={alertPct}
+                class="w-full bg-surface border border-border rounded-lg px-3 py-2 font-code text-xs text-text-main focus:outline-none focus:border-brand-500"
+              />
+              <p class="text-text-subtle mt-1">
+                Warn at this share of the budget. 0 = no warning.
+              </p>
+            </div>
+          </div>
+
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input type="checkbox" bind:checked={hardCutoff} class="mt-0.5" />
+            <span>
+              <span class="block font-semibold text-text-muted">Refuse when exhausted (402)</span>
+              <span class="text-text-subtle block">
+                Off = keep serving past the limit with a warning header only.
+              </span>
+            </span>
+          </label>
+
+          {#if couldBeArmed}
+            {#if budgetLoadError}
+              <p class="text-text-subtle text-[11px]">Could not load period spend.</p>
+            {:else if budget?.armed}
+              <div class="mt-2 space-y-1 rounded-lg border border-border bg-surface-2 px-3 py-2 font-code text-[11px] text-text-main">
+                <p>
+                  {#if budget!.limitMicros === 0}
+                    Spent {fmtMicros(budget!.spentMicros)} (no cost limit)
+                  {:else}
+                    Spent {fmtMicros(budget!.spentMicros)} of {fmtMicros(budget!.limitMicros)}
+                  {/if}
+                </p>
+                <p>
+                  {#if budget!.limitTokens === 0}
+                    Spent {fmtTokens(budget!.spentTokens)} (no token limit)
+                  {:else}
+                    Spent {fmtTokens(budget!.spentTokens)} of {fmtTokens(budget!.limitTokens)}
+                  {/if}
+                </p>
+                <p class="flex items-center gap-1.5">
+                  <span
+                    class="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium {statusClasses[budget!.status]}"
+                  >
+                    {statusLabel[budget!.status]}
+                  </span>
+                </p>
+                {#if budget!.note}
+                  <p class="text-text-subtle">{budget!.note}</p>
+                {/if}
+              </div>
+            {/if}
+          {/if}
+        </div>
+
+        <div>
+          <label for="pol-context" class="block font-semibold text-text-muted mb-1">
+            Context limit per request
+          </label>
+          <input
+            id="pol-context"
+            type="text"
+            inputmode="text"
+            placeholder="200K"
+            bind:value={contextLimit}
+            class="w-full bg-surface border border-border rounded-lg px-3 py-2 font-code text-xs text-text-main focus:outline-none focus:border-brand-500"
+          />
+          <p class="text-text-subtle mt-1">
+            The largest context one request may use. Accepts a number or a scale (200K, 1M). A
+            conversation longer than this is trimmed to fit, and the answer's budget is capped to
+            what is left. Leave empty for the model's own window.
+          </p>
         </div>
       </section>
 
@@ -399,8 +712,7 @@
           <div>
             <h3 class="font-headline text-xs font-bold text-text-main">Model access</h3>
             <p class="text-text-subtle mt-0.5">
-              Patterns may use <span class="font-code">*</span> per segment, e.g.
-              <span class="font-code">e2e/allowed-*</span>. An empty list allows every model.
+              The models this key may call. An empty list allows every model.
             </p>
           </div>
           <button
@@ -417,22 +729,17 @@
           </button>
         </div>
 
-        <div class="flex gap-2">
-          <input
-            type="text"
-            bind:value={modelDraft}
-            onkeydown={(e) => e.key === 'Enter' && (e.preventDefault(), addModel())}
-            placeholder="e2e/allowed-*"
-            class="flex-1 bg-surface border border-border rounded-lg px-3 py-2 font-code text-[11px] text-text-main focus:outline-none focus:border-brand-500"
-          />
-          <button
-            type="button"
-            onclick={addModel}
-            class="px-3 py-2 rounded-lg bg-surface-3 border border-border text-[11px] text-text-main hover:border-brand-500/40 transition cursor-pointer"
-          >
-            Add
-          </button>
-        </div>
+        <!-- The picker is the way in: what a reseller sells is a set of models
+             they can see, and typing a pattern to name one of them is
+             guesswork. The pattern field below stays for the glob and deny
+             syntax the store understands. -->
+        <button
+          type="button"
+          onclick={openModelPicker}
+          class="w-full px-3 py-2 rounded-lg bg-surface-2 border border-border text-[11px] text-text-main hover:border-brand-500/40 transition cursor-pointer"
+        >
+          Choose from the models this gateway publishes
+        </button>
 
         {#if models.length > 0}
           <div class="flex flex-wrap gap-1.5">
@@ -458,6 +765,37 @@
           </p>
         {/if}
 
+        <button
+          type="button"
+          onclick={() => (showPatternInput = !showPatternInput)}
+          class="self-start text-[11px] text-text-subtle hover:text-text-main transition cursor-pointer"
+        >
+          {showPatternInput ? 'Hide pattern input' : 'Add a pattern instead'}
+        </button>
+
+        {#if showPatternInput}
+          <div class="flex gap-2">
+            <input
+              type="text"
+              bind:value={modelDraft}
+              onkeydown={(e) => e.key === 'Enter' && (e.preventDefault(), addModel())}
+              placeholder="e2e/allowed-*"
+              class="flex-1 bg-surface border border-border rounded-lg px-3 py-2 font-code text-[11px] text-text-main focus:outline-none focus:border-brand-500"
+            />
+            <button
+              type="button"
+              onclick={addModel}
+              class="px-3 py-2 rounded-lg bg-surface-3 border border-border text-[11px] text-text-main hover:border-brand-500/40 transition cursor-pointer"
+            >
+              Add
+            </button>
+          </div>
+          <p class="text-text-subtle text-[11px]">
+            Patterns may use <span class="font-code">*</span> per segment, e.g.
+            <span class="font-code">e2e/allowed-*</span>, and
+            <span class="font-code">!</span> or <span class="font-code">-</span> denies a model.
+          </p>
+        {/if}
       </section>
 
       {#if error}
@@ -490,3 +828,15 @@
     </form>
   </div>
 </div>
+
+<ModelPickerModal
+  isOpen={isModelPickerOpen}
+  target="key"
+  connections={pickerConnections}
+  providerNodes={pickerProviderNodes}
+  combos={pickerCombos}
+  addedModelValues={models}
+  onSelect={selectModel}
+  onDeselect={deselectModel}
+  onClose={() => (isModelPickerOpen = false)}
+/>

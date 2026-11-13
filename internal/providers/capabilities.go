@@ -195,7 +195,7 @@ type Capabilities struct {
 	// ThinkingCanDisable reports whether thinking can be turned off. It is a
 	// pointer because a plain bool cannot say "not specified": upstream's
 	// default is true, and a table entry that names a thinking format without
-	// this flag must still resolve to true. See canDisableThinking.
+	// this flag must still resolve to true. See CanDisableThinking.
 	ThinkingCanDisable *bool
 	// ThinkingRange is the {min, max} budget clamp for budget-based formats.
 	ThinkingRange *ThinkingRange
@@ -215,10 +215,10 @@ type ThinkingRange struct {
 	Max int `json:"max"`
 }
 
-// canDisableThinking resolves the tri-state ThinkingCanDisable flag: an unset
+// CanDisableThinking resolves the tri-state ThinkingCanDisable flag: an unset
 // entry means "not specified", which is upstream's default — thinking can be
 // switched off.
-func canDisableThinking(c Capabilities) bool {
+func (c Capabilities) CanDisableThinking() bool {
 	return c.ThinkingCanDisable == nil || *c.ThinkingCanDisable
 }
 
@@ -249,7 +249,7 @@ var modelCapabilities = map[string]Capabilities{
 	"claude-opus-5.5-thinking-agentic": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	// Opus 5.5 on Antigravity (upstream v0.5.99, a07ed95b): all five
 	// effort spellings, 1M window / 128K output. thinkingCanDisable:false is
-	// representable here — without it canDisableThinking defaults to true and
+	// representable here — without it CanDisableThinking defaults to true and
 	// the translator drops thinking on any turn that asked for no reasoning,
 	// which Anthropic answers with a 400 on the thinking.type field.
 	//
@@ -317,10 +317,11 @@ var modelCapabilities = map[string]Capabilities{
 	// window. Upstream decolua/9router#4656: z.ai's docs state that "GLM-5.3
 	// and GLM-5.3-FLASH no longer support disabling thinking (an error will
 	// occur if the thinking.type parameter is set to disabled)". Left unset,
-	// canDisableThinking reports true and the translator emits
+	// CanDisableThinking reports true and the translator emits
 	// enable_thinking:false on any turn that asked for no reasoning — z.ai
 	// answers 400 code 1210 "Invalid API parameter". It looked intermittent
 	// because only some turns ask.
+
 	"glm-5.3-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
 	// claude-fable-5 (no -1 suffix) is adaptive-only like fable-5-1; upstream
 	// capabilities.js only matches it through *claude*fable* -> claude-budget,
@@ -342,6 +343,7 @@ var modelCapabilities = map[string]Capabilities{
 	"glm-4.6v":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
 	"glm-4.5v":                     {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
 	"deepseek-v4-flash-vision-exp": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"sensenova-6.8-flash":          {Vision: true, Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 131072},
 	"sensenova-6.8-flash-lite":     {Vision: true, Reasoning: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 131072},
 	"deepseek-v4-vision":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true},
 	"deepseek-v4.1-flash":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
@@ -352,8 +354,10 @@ var modelCapabilities = map[string]Capabilities{
 	// pattern and lost its vision and 1M window.
 	"deepseek-v4-1-flash":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
 	"deepseek-flash":                  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
-	"muse-spark-1.2-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
-	"muse-spark-1.3-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	"muse-spark-1.2-contributor":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+	"muse-spark-1.3-contributor":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+	"muse-spark-1.2-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+	"muse-spark-1.3-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
 	"nemotron-3-ultra-free":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
 	"nemotron-3.5-lightning-free":     {Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1048576},
 	"nemotron-3.5-super-vl-free":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144},
@@ -535,6 +539,28 @@ var providerCapabilities = map[string]map[string]Capabilities{
 		"deepseek-v4.1-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 393216},
 		"deepseek-v4-flash":   {Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 50000},
 		"deepseek-v3-2-volc":  {Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+	},
+	"hcnsec": {
+		"auto":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"DeepSeek-V4-Flash":        {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"DeepSeek-V4-Pro":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"DeepSeek-V4.1-Flash":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"glm-5.3":                  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 131072},
+		"glm-5.3-flash":            {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 131072},
+		"MiMo-V2.6-Flash":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"MiniCPM-V-4.7-35B-A3B":    {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144, MaxOutput: 65536},
+		"MiniMax-M3.1-Flash":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"Qwen3-Embedding-8B":       {},
+		"Qwen3.8-27B":              {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 200000, MaxOutput: 65536},
+		"Qwen3.8-Flash-Next":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 262144, MaxOutput: 65536},
+		"sensenova-6.8-flash":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"sensenova-6.8-flash-lite": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"sensenova-u1.5-lite":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"step-5-preview":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 1000000, MaxOutput: 64000},
+		"stepaudio-2.5-asr":        {},
+		"stepaudio-2.5-chat":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"stepaudio-2.5-realtime":   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"stepaudio-2.5-tts":        {},
 	},
 	"poolside": {
 		"laguna-s-2.1":  {Reasoning: true, Tools: true, ThinkingFormat: "openai"},
@@ -755,6 +781,15 @@ func init() {
 		"gpt-3.5-turbo": {Tools: true},
 	}
 
+	// Cloudflare AI (workers-ai). Mistral Small 3.1 and Kimi K2.6 are vision
+	// models: keep their image_url parts instead of flattening them to text.
+	// Cloudflare AI speaks the OpenAI wire format, so they take openai thinking.
+	// Kimi K2.6 uses the kimi thinking level set (levelMax) per the fixture.
+	providerCapabilities["cloudflare-ai"] = map[string]Capabilities{
+		"@cf/mistralai/mistral-small-3.1-24b-instruct": {Vision: true, Tools: true, ThinkingFormat: "openai"},
+		"@cf/moonshotai/kimi-k2.6":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi"},
+	}
+
 	// NaN.Builders (nanbuilders) — OpenAI-compatible free tier
 	providerCapabilities["nanbuilders"] = map[string]Capabilities{
 		"gpt-4o":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 128000, MaxOutput: 16384},
@@ -772,6 +807,7 @@ func init() {
 	// Aliases share the same capabilities catalog
 	providerCapabilities["dx"] = providerCapabilities["daoxe"]
 	providerCapabilities["nan"] = providerCapabilities["nanbuilders"]
+	providerCapabilities["hc"] = providerCapabilities["hcnsec"]
 	providerCapabilities["oad"] = providerCapabilities["openadapter"]
 
 	initPatternIndex()
@@ -810,15 +846,27 @@ var patternCapabilities = []patternCapability{
 	{pattern: "*claude*opus-4.8*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
 	{pattern: "*claude*sonnet-4.6*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
 	{pattern: "*claude*sonnet-4.7*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
+	// Dashed ids (Bedrock `us.anthropic.claude-opus-4-7`) miss the dotted patterns above and
+	// would fall to *claude*opus-4* (budget), which Opus 4.7/4.8 reject with a 400.
+	{pattern: "*claude*opus-4-7*", caps: Capabilities{Vision: true, PDF: true, Reasoning: true, Search: true, ThinkingFormat: "claude-adaptive"}},
+	{pattern: "*claude*opus-4-8*", caps: Capabilities{Vision: true, PDF: true, Reasoning: true, Search: true, ThinkingFormat: "claude-adaptive"}},
 	{pattern: "*claude*haiku*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 	{pattern: "*claude*opus*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 	{pattern: "*claude*sonnet*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
-	{pattern: "*claude*fable*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
-	{pattern: "*claude*mythos*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
+	// Fable/Mythos: thinking is always on — `enabled`+budget_tokens and `disabled` both 400.
+	// Covers prefixed ids such as Bedrock `us.anthropic.claude-fable-5-1`.
+	{pattern: "*claude*fable*", caps: Capabilities{Vision: true, PDF: true, Reasoning: true, Search: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000}},
+	{pattern: "*claude*mythos*", caps: Capabilities{Vision: true, PDF: true, Reasoning: true, Search: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000}},
 	{pattern: "*claude-3*", caps: Capabilities{Vision: true, Tools: true}},
 	{pattern: "*claude*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 
 	{pattern: "*gemini*image*", caps: Capabilities{Vision: true, ImageOutput: true, Tools: true}},
+	// Gemini Omni is a reasoning model on the gemini-level wire with thinking
+	// always on. Absent this row the generic *gemini* fallback (Reasoning
+	// false) won, so GetThinkingLevels returned nil and the level never got
+	// clamped. MUST stay above *gemini-4* / *gemini-3.8* for the same reason
+	// as its patternThinking twin.
+	{pattern: "*gemini*omni*", caps: Capabilities{Vision: true, PDF: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	// Gemini 4 (Argon): LOW/MEDIUM/HIGH only — no "minimal" tier, no
 	// thinkingBudget, and thinking cannot be disabled. The bridge publishes
 	// the bare id "gemini-argon" as well as the "gemini-4-argon" alias, so
@@ -946,6 +994,7 @@ var patternCapabilities = []patternCapability{
 	{pattern: "*llama*", caps: Capabilities{Tools: true}},
 
 	{pattern: "*codestral*", caps: Capabilities{Tools: true}},
+	{pattern: "*devstral*", caps: Capabilities{Vision: true, Tools: true}},
 	{pattern: "*mistral-large*", caps: Capabilities{Vision: true, Tools: true}},
 	{pattern: "*mistral*", caps: Capabilities{Tools: true}},
 
@@ -1137,6 +1186,19 @@ func GetCapabilitiesForModel(provider, model string) Capabilities {
 	// per-family patterns below (deepseek-v4 → vision:false, thinkingFormat
 	// deepseek, …) must not win here. Upstream short-circuits the same way
 	// (open-sse/providers/capabilities.js:570).
+	// The goat entry is the documented Provider API: three lanes, per-model
+	// windows from the live feed, and a thinking shape that follows the lane the
+	// model is declared on. It must not inherit the /alpha/generate block below,
+	// whose single-lane assumptions (1M window for everything, the CLI thinking
+	// writer) are exactly what this provider exists to correct.
+	if isCommandCodeGoatProvider(provider) {
+		res := commandCodeGoatCapabilities(model)
+		capsCacheMu.Lock()
+		capsCache[key] = res
+		capsCacheMu.Unlock()
+		return res
+	}
+
 	if isCommandCodeProvider(provider) {
 		res := commandCodeCapabilities(model)
 		capsCacheMu.Lock()
@@ -1218,6 +1280,34 @@ func GetCapabilitiesForModel(provider, model string) Capabilities {
 	// ever turns vision ON.
 	if !res.Vision && looksLikeVisionModel(baseModel) {
 		res.Vision = true
+	}
+
+	// A speech-synthesis model emits audio, and models_list's buildModalities
+	// derives output_modalities from this flag alone — so a TTS model without
+	// it is published as text-only and never reaches the audio lane, while its
+	// endpoint happily answers audio/wav.
+	//
+	// The name signal does the work. The registry's per-provider service kind
+	// is the more authoritative source but cannot stand alone: it needs an
+	// exact ProviderModelKinds[provider][model] hit, which a custom provider
+	// node never has (no registry entry, no alias), so the reported case —
+	// studio/gemini-3.8-flash-tts on an operator-defined node — is reachable
+	// by name only. The same gap hits a builtin that carries a TTS id without
+	// declaring its kind (vertex, ag) and the eight mimo pairs on
+	// xiaomi-tokenplan / xmtp.
+	//
+	// The kind check is kept as a fallback for a classified id whose name
+	// carries no signal at all. Removing it breaks no test today, so it is
+	// deliberate slack, not redundancy — ttsName would have nothing to match
+	// in a future id like "sonic-2".
+	//
+	// Only ever turns audio output ON, like the vision rule above. It must stay
+	// that narrow: upstream advertises thinking levels for its TTS models
+	// (13 pairs in testdata/thinking_levels.json), so clearing Reasoning or the
+	// thinking format here would break that parity.
+	if !res.AudioOutput &&
+		(GetProviderModelKind(provider, model) == serviceKindTTS || looksLikeTTSModel(baseModel)) {
+		res.AudioOutput = true
 	}
 
 	capsCacheMu.Lock()
@@ -1327,7 +1417,8 @@ type CapabilitiesDetail struct {
 // (aggregateComboCapabilities). It is deliberately a different type: the union
 // drops thinkingEffortSupported, booleans fold with `some` — except tools, which
 // requires *every* leaf to support it — the thinking fields come from the first
-// leaf, the context window is the narrowest leaf and maxOutput the widest.
+// leaf, the context window is the narrowest leaf and maxOutput the narrowest
+// positive leaf (zero/unbounded never wins unless every leaf is unbounded).
 type ComboCapabilities struct {
 	Vision             bool    `json:"vision"`
 	PDF                bool    `json:"pdf"`
@@ -1370,10 +1461,10 @@ func AggregateComboCapabilities(leaves []CapabilitiesDetail) (ComboCapabilities,
 		merged.AudioOutput = merged.AudioOutput || leaf.AudioOutput
 		merged.Search = merged.Search || leaf.Search
 		merged.Tools = merged.Tools && leaf.Tools
-		if leaf.ContextWindow < merged.ContextWindow {
+		if leaf.ContextWindow > 0 && (merged.ContextWindow == 0 || leaf.ContextWindow < merged.ContextWindow) {
 			merged.ContextWindow = leaf.ContextWindow
 		}
-		if leaf.MaxOutput > merged.MaxOutput {
+		if leaf.MaxOutput > 0 && (merged.MaxOutput == 0 || leaf.MaxOutput < merged.MaxOutput) {
 			merged.MaxOutput = leaf.MaxOutput
 		}
 	}
@@ -1467,7 +1558,7 @@ func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 		Reasoning:               caps.Reasoning,
 		Jailbreak:               caps.Jailbreak || IsJailbreakModel(model),
 		ThinkingFormat:          thinkingFormat,
-		ThinkingCanDisable:      canDisableThinking(caps),
+		ThinkingCanDisable:      caps.CanDisableThinking(),
 		ThinkingRange:           thinkingRange,
 		ThinkingEffortSupported: caps.ThinkingEffortSupported,
 		ThinkingLevels:          GetThinkingLevels(provider, model),

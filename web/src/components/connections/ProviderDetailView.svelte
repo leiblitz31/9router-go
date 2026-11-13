@@ -13,6 +13,7 @@
     type Settings
   } from '../../api/client'
   import { PROVIDER_CATALOG, PROVIDER_CATALOG_MAP, type ProviderCatalogItem } from '../../lib/providers'
+  import ClaudeCacheTtl from '../quota/ClaudeCacheTtl.svelte'
   import {
     clearCallback,
     CODEX_REDIRECT_URI,
@@ -30,6 +31,7 @@
   import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
   import { copyToClipboard } from '../../lib/clipboard'
   import { parseModelIds } from '../../lib/bulk-models'
+  import { inferModelKind, customModelKeyFor } from '../../lib/modelKindInference'
   import {
     importCustomModelsBestEffort,
     notifyCustomModelsChanged,
@@ -48,10 +50,12 @@
     fetchSuggestedModels,
     getIconPath,
     isChatModel,
+    isConnectionError,
     type CustomModelData,
     type ModelItem,
     type SuggestedModel
   } from './types'
+  import { isBannedConnection, appealUrl } from '../../lib/ban'
   import { proxyBadgeInfo } from './proxyBadge'
   import AutoPingScheduleModal, { type AutoPingSave } from '../quota/AutoPingScheduleModal.svelte'
   import type { NormalizedPingSchedule } from '../quota/pingSchedule'
@@ -91,7 +95,11 @@
   import Toggle from '../../lib/ui/Toggle.svelte'
   import { PauseCircle } from 'lucide-svelte'
   import ProviderHeaderOverridesModal from './ProviderHeaderOverridesModal.svelte'
+  import FreePiConnectModal from './FreePiConnectModal.svelte'
+  import FreePiAdBanner from './FreePiAdBanner.svelte'
   import EditCompatibleNodeModal from './EditCompatibleNodeModal.svelte'
+  import ExportKeysModal from './ExportKeysModal.svelte'
+  import ShareProviderModal from './ShareProviderModal.svelte'
   import FreebuffSessionBanner from './FreebuffSessionBanner.svelte'
   import ProviderIcon from './ProviderIcon.svelte'
   import { portal } from '../../lib/ui/portal'
@@ -175,7 +183,59 @@
   // is NOT equivalent — kiro/gemini-cli are free with noAuth:false and still
   // need their Connect/OAuth + API Key buttons.
   let isNoAuth = $derived(selectedCatalogItem?.noAuth === true)
-  let hasRiskNotice = $derived(providerId === 'antigravity' || Boolean(selectedCatalogItem?.notice?.text?.includes('RISK_NOTICE')))
+
+  // Filtered connections for this provider, sorted by priority ASC
+  let providerConnections = $derived(
+    connections
+      .filter((c) => c.provider === providerId)
+      .sort((a, b) => (a.priority ?? 999999) - (b.priority ?? 999999))
+  )
+  let isProviderAllDisabled = $derived(
+    providerConnections.length > 0 && providerConnections.every((c) => c.isActive === 0)
+  )
+  let isProviderActive = $derived(providerConnections.some((c) => c.isActive === 1))
+
+  // Connection tab partition: every connection appears in exactly one tab.
+  let connTab = $state<'active' | 'error' | 'banned'>('active')
+  let bannedConnections = $derived(providerConnections.filter(isBannedConnection))
+  let errorConnections = $derived(
+    providerConnections.filter((c) => !isBannedConnection(c) && isConnectionError(c))
+  )
+  let activeConnections = $derived(
+    providerConnections.filter((c) => !isBannedConnection(c) && !isConnectionError(c))
+  )
+  let tabConnections = $derived(
+    connTab === 'banned'
+      ? bannedConnections
+      : connTab === 'error'
+        ? errorConnections
+        : activeConnections
+  )
+  let tabCounts = $derived({
+    active: activeConnections.length,
+    error: errorConnections.length,
+    banned: bannedConnections.length,
+  })
+  function tabMatches(c: ProviderConnection): boolean {
+    if (connTab === 'banned') return isBannedConnection(c)
+    if (connTab === 'error') return !isBannedConnection(c) && isConnectionError(c)
+    return !isBannedConnection(c) && !isConnectionError(c)
+  }
+
+  // Risk notice is driven by the connection's auth type (OAuth / subscription
+  // providers) and the upstream registry notice text — never by a hardcoded
+  // provider id such as `antigravity`.
+  let hasRiskNotice = $derived(
+    providerConnections.some((c) => c.authType === 'oauth') ||
+    Boolean(selectedCatalogItem?.notice?.text?.includes('RISK_NOTICE'))
+  )
+
+  // MiniMax Code lease auth: the connection borrows the desktop app's sign-in
+  // over its local broker, so there is no browser login and no stored refresh
+  // token. Only the two MiniMax Code lanes have that broker.
+  let isLeaseProvider = $derived(providerId === 'minimax-code' || providerId === 'minimax-code-global')
+  let isLeaseConnecting = $state(false)
+  let leaseError = $state('')
 
   // Free provider proxy & rotation state
   let freeProxyPoolId = $state('none')
@@ -218,16 +278,9 @@
     selectedNode?.id || selectedCatalogItem?.alias || PROVIDER_ID_TO_ALIAS[providerId] || providerId
   )
 
-  // Filtered connections for this provider, sorted by priority ASC
-  let providerConnections = $derived(
-    connections
-      .filter((c) => c.provider === providerId)
-      .sort((a, b) => (a.priority ?? 999999) - (b.priority ?? 999999))
-  )
-  let isProviderAllDisabled = $derived(
-    providerConnections.length > 0 && providerConnections.every((c) => c.isActive === 0)
-  )
-  let isProviderActive = $derived(providerConnections.some((c) => c.isActive === 1))
+  function openAppeal(url: string) {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
 
   async function handleToggleProvider(targetActive: boolean) {
     try {
@@ -268,11 +321,22 @@
   // filter change; it is cleared on provider switch with the rest of the
   // model state (see the reset block below).
   let compatibleRows = $derived.by(() => {
-    const rows: Array<{ id: string; source: 'custom' | 'legacyAlias'; alias?: string; addedAt?: number }> = []
+    const rows: Array<{
+      id: string
+      source: 'custom' | 'legacyAlias'
+      alias?: string
+      addedAt?: number
+      kind?: string
+    }> = []
     const seen = new Set<string>()
     for (const cm of customModels) {
       if (!cm.id || cm.providerAlias !== storageAlias) continue
-      if ((cm.type || 'llm') !== 'llm') continue
+      // Every custom row on this node is listed, whatever its kind. This list is
+      // the only place a compatible node's custom models can be seen, tested or
+      // deleted, so filtering out the non-LLM ones made an imported TTS or video
+      // model unreachable: correctly absent from /v1/models, and equally absent
+      // from the one screen that could remove it. The row carries its kind so
+      // delete addresses the right key.
       const full = `${storageAlias}/${cm.id}`
       if (seen.has(full)) continue
       seen.add(full)
@@ -281,7 +345,12 @@
       // insertion order, and the newest write is last. A later row with the
       // same key keeps its original position (the upsert does not move it),
       // which is what "when was this first registered" means.
-      rows.push({ id: cm.id, source: 'custom', addedAt: customModels.length - customModels.indexOf(cm) })
+      rows.push({
+        id: cm.id,
+        source: 'custom',
+        addedAt: customModels.length - customModels.indexOf(cm),
+        kind: cm.type || 'llm',
+      })
     }
     const prefix = `${storageAlias}/`
     for (const [alias, full] of Object.entries(modelAliases || {})) {
@@ -777,7 +846,31 @@
   let addConnectionError = $state('')
   let showAddCustomModelModal = $state(false)
   let showEditNodeModal = $state(false)
+  let showExportKeysModal = $state(false)
+  let showShareProviderModal = $state(false)
+  // Everything the Share modal can offer in a multi-provider set: the custom
+  // nodes (which carry their own endpoint) plus the registered providers this
+  // instance actually holds a connection for. A provider with no credential is
+  // not shareable — the receiver would get a row that cannot answer.
+  let shareableProviders = $derived.by(() => {
+    const withConnections = new Set(providerConnections.filter((c) => c.isActive !== 0).map((c) => c.provider))
+    const out: Array<{ id: string; name: string; isCompatible: boolean }> = []
+    for (const n of providerNodes) out.push({ id: n.id, name: n.name || n.id, isCompatible: true })
+    for (const item of PROVIDER_CATALOG) {
+      if (withConnections.has(item.id) || withConnections.has(item.alias || '')) {
+        out.push({ id: item.id, name: item.name || item.id, isCompatible: false })
+      }
+    }
+    return out
+  })
   let showHeaderOverrides = $state(false)
+  let showFreePiConnect = $state(false)
+  let isFreePi = $derived(providerId === 'free-pi' || storageAlias === 'fp' || storageAlias === 'free-pi')
+  let freePiConn = $derived(
+    providerConnections.find((c) => c.isActive === 1) ?? providerConnections[0] ?? null
+  )
+  let freePiResetBusy = $state(false)
+  let freePiResetResult = $state<string>('')
   // Freebuff specific state & session tracking
   let isFreebuff = $derived(
     providerId === 'freebuff' || storageAlias === 'fb' || storageAlias === 'freebuff'
@@ -1580,6 +1673,31 @@
     onRefresh()
   }
 
+  // MiniMax Code lease: probe the desktop broker, then create a connection
+  // that borrows its sign-in. The broker's own code is shown verbatim, so an
+  // operator is told to sign in to the desktop app rather than "something
+  // went wrong".
+  async function handleLeaseConnect() {
+    isLeaseConnecting = true
+    leaseError = ''
+    try {
+      const status = await api.minimaxLeaseStatus(providerId)
+      if (!status.found) {
+        leaseError = status.message || 'Could not reach the MiniMax Code desktop app'
+        return
+      }
+      const res = await api.minimaxLeaseConnect(providerId)
+      if (!res.success) {
+        leaseError = 'Could not create the lease connection'
+        return
+      }
+      onRefresh()
+    } catch (err) {
+      leaseError = err instanceof Error ? err.message : 'Could not reach the MiniMax Code desktop app'
+    } finally {
+      isLeaseConnecting = false
+    }
+  }
   // Add Connection Button flow
   async function handleAddConnectionClick() {
     if (providerId === 'antigravity') {
@@ -1599,6 +1717,8 @@
       openAuthCodeOAuth()
     } else if (isCustomOAuth) {
       openCustomOAuth()
+    } else if (providerId === 'free-pi') {
+      showFreePiConnect = true
     } else if (providerId === 'kiro') {
       openKiroOAuth()
     } else if (isDeviceOAuth) {
@@ -1983,6 +2103,24 @@
   }
 
 
+  let isPollingDevice = $state(false)
+
+  async function clearFreePiSession() {
+    if (!freePiConn || freePiResetBusy) return
+    freePiResetBusy = true
+    freePiResetResult = ''
+    try {
+      const res = await api.freePiResetSession(freePiConn.id)
+      freePiResetResult = res.released
+        ? 'Cleared your other sessions — you can start a new one now.'
+        : 'No other session was running.'
+    } catch (err) {
+      freePiResetResult = err instanceof Error ? err.message : String(err)
+    } finally {
+      freePiResetBusy = false
+    }
+  }
+
   async function openDeviceOAuth() {
     oauthError = null
     callbackInput = ''
@@ -1999,7 +2137,6 @@
       if (typeof window !== 'undefined' && oauthAuthUrl) {
         window.open(oauthAuthUrl, '_blank')
       }
-      pollDeviceOnce()
       devicePollTimer = setInterval(pollDeviceOnce, deviceInterval * 1000)
     } catch (err) {
       oauthError = err instanceof Error ? err.message : String(err)
@@ -2008,9 +2145,17 @@
   }
 
   async function pollDeviceOnce() {
-    if (!showOAuthModal || !deviceCode) return
+    if (!showOAuthModal || !deviceCode || isPollingDevice) return
+    isPollingDevice = true
     try {
       const res = await api.devicePoll(providerId, deviceCode, deviceSession)
+      if (res?.interval && res.interval > deviceInterval) {
+        deviceInterval = res.interval
+        if (devicePollTimer) {
+          clearInterval(devicePollTimer)
+          devicePollTimer = setInterval(pollDeviceOnce, deviceInterval * 1000)
+        }
+      }
       if (res?.status === 'authorized') {
         stopDevicePoll()
         showOAuthModal = false
@@ -2021,6 +2166,8 @@
       }
     } catch {
       // Biarkan polling berikutnya mencoba lagi.
+    } finally {
+      isPollingDevice = false
     }
   }
 
@@ -2486,10 +2633,10 @@
     limits?: { contextWindow?: number; maxOutput?: number },
   ) {
     try {
-      await api.saveCustomModel(`${storageAlias}|${modelId}|llm`, {
+      await api.saveCustomModel(customModelKeyFor(storageAlias, modelId), {
         id: modelId,
         providerAlias: storageAlias,
-        type: 'llm',
+        type: inferModelKind(modelId),
         ...(caps ? { caps } : {}),
         ...(limits?.contextWindow ? { contextWindow: limits.contextWindow } : {}),
         ...(limits?.maxOutput ? { maxOutput: limits.maxOutput } : {}),
@@ -2634,7 +2781,7 @@
       // the response says which lines landed instead of leaving it to the refresh.
       const out = await api.saveCustomModelsBulk({
         providerAlias: storageAlias,
-        models: plan.ids.map((id) => ({ id, type: 'llm' })),
+        models: plan.ids.map((id) => ({ id, type: inferModelKind(id) })),
       })
       newCompatibleModel = ''
       await refreshCompatibleModels()
@@ -2660,10 +2807,10 @@
     }
     isAddingCompatibleModel = true
     try {
-      await api.saveCustomModel(`${storageAlias}|${modelId}|llm`, {
+      await api.saveCustomModel(customModelKeyFor(storageAlias, modelId), {
         id: modelId,
         providerAlias: storageAlias,
-        type: 'llm',
+        type: inferModelKind(modelId),
       })
       newCompatibleModel = ''
       await refreshCompatibleModels()
@@ -2678,10 +2825,10 @@
     }
   }
 
-  async function handleDeleteCompatibleModel(row: { id: string; source: string; alias?: string }) {
+  async function handleDeleteCompatibleModel(row: { id: string; source: string; alias?: string; kind?: string }) {
     try {
       if (row.source === 'custom') {
-        await api.deleteCustomModel(`${storageAlias}|${row.id}|llm`)
+        await api.deleteCustomModel(customModelKeyFor(storageAlias, row.id, row.kind))
       } else if (row.source === 'legacyAlias' && row.alias) {
         await api.deleteModelAlias(row.alias)
       }
@@ -2754,7 +2901,10 @@
   async function handleTestAllCompatibleModels() {
     if (compatibleTestAllRunning) return
     const pid = providerId
-    const ids = compatibleRows.map((r) => r.id)
+    // A probe is a chat request, so only chat rows are probed: a TTS or video
+    // model answers one with an error, and reporting that as a dead model would
+    // be a false failure for a model that works on its own lane.
+    const ids = compatibleRows.filter((r) => isChatModel({ type: r.kind })).map((r) => r.id)
     if (ids.length === 0) return
     compatibleTestAllRunning = true
     compatibleTestResults = {}
@@ -2817,8 +2967,8 @@
         if (freeOnly && !isFreeTierModelId(modelId)) continue
         pending.push({
           id: modelId,
-          key: `${storageAlias}|${modelId}|llm`,
-          value: { id: modelId, providerAlias: storageAlias, type: 'llm' },
+          key: customModelKeyFor(storageAlias, modelId),
+          value: { id: modelId, providerAlias: storageAlias, type: inferModelKind(modelId) },
         })
       }
       const outcome = await importCustomModelsBestEffort(pending, api.saveCustomModel)
@@ -2894,11 +3044,11 @@
             : 0
         pending.push({
           id: modelId,
-          key: `${storageAlias}|${modelId}|llm`,
+          key: customModelKeyFor(storageAlias, modelId),
           value: {
             id: modelId,
             providerAlias: storageAlias,
-            type: 'llm',
+            type: inferModelKind(modelId),
             ...(caps ? { caps } : {}),
             ...(declaredCtxLen > 0 ? { contextWindow: declaredCtxLen } : {}),
             ...(declaredMaxOut > 0 ? { maxOutput: declaredMaxOut } : {}),
@@ -3035,10 +3185,10 @@
 
   async function handleAddLatestModel(id: string, name?: string) {
     try {
-      await api.saveCustomModel(`${storageAlias}|${id}|llm`, {
+      await api.saveCustomModel(customModelKeyFor(storageAlias, id), {
         id,
         providerAlias: storageAlias,
-        type: 'llm',
+        type: inferModelKind(id),
         ...(name ? { name } : {}),
       })
       latestModels = latestModels.filter((m) => m.id !== id)
@@ -3278,12 +3428,13 @@
           await handleDisableModel(row.id)
           disabledOnly++
         } else if (row.source === 'legacyAlias') {
-          const alias = compatibleRows.find((r) => r.id === row.id)?.alias
-          if (alias) await api.deleteModelAlias(alias)
-          else await api.deleteCustomModel(`${storageAlias}|${row.id}|llm`)
+          const match = compatibleRows.find((r) => r.id === row.id)
+          if (match?.alias) await api.deleteModelAlias(match.alias)
+          else await api.deleteCustomModel(customModelKeyFor(storageAlias, row.id, match?.kind))
           deleted++
         } else {
-          await api.deleteCustomModel(`${storageAlias}|${row.id}|llm`)
+          const stored = compatibleRows.find((r) => r.id === row.id)?.kind
+          await api.deleteCustomModel(customModelKeyFor(storageAlias, row.id, stored))
           deleted++
         }
       } catch (err) {
@@ -3309,7 +3460,7 @@
     if (custom) {
       if (!confirm(`Delete custom model "${modelId}"?`)) return
       try {
-        await api.deleteCustomModel(`${storageAlias}|${modelId}|llm`)
+        await api.deleteCustomModel(customModelKeyFor(storageAlias, modelId, custom.type))
         const modelsData = await fetchProviderModelsData(providerId, storageAlias)
         customModels = modelsData.customModels
         notifyCustomModelsChanged()
@@ -3381,47 +3532,49 @@
     </button>
 
     <div class="flex min-w-0 items-center justify-between gap-3 sm:gap-4">
-      <div
-        class="flex size-12 shrink-0 items-center justify-center rounded-lg"
-        style="background-color: {providerColor}15;"
-      >
-        <ProviderIcon
-          id={providerId}
-          apiType={selectedNode?.apiType}
-          size="lg"
-          class="border-transparent bg-transparent"
-        />
-      </div>
-
-      <div class="min-w-0">
-        <div class="flex items-center gap-3 flex-wrap">
-          <h1 class="truncate text-2xl font-semibold tracking-tight sm:text-3xl">
-            {providerName}
-          </h1>
-          {#if providerWebsite}
-            <a
-              href={providerWebsite}
-              target="_blank"
-              rel="noopener noreferrer"
-              class="text-xs text-primary hover:underline inline-flex items-center gap-1"
-            >
-              <span class="material-symbols-outlined text-sm">open_in_new</span>
-              {providerWebsiteLabel}
-            </a>
-          {/if}
+      <div class="flex min-w-0 items-center gap-3 sm:gap-4">
+        <div
+          class="flex size-12 shrink-0 items-center justify-center rounded-lg"
+          style="background-color: {providerColor}15;"
+        >
+          <ProviderIcon
+            id={providerId}
+            apiType={selectedNode?.apiType}
+            size="lg"
+            class="border-transparent bg-transparent"
+          />
         </div>
-        <div class="flex items-center gap-2 flex-wrap">
-          <p class="text-text-muted">
-            {providerConnections.length} connection{providerConnections.length === 1 ? '' : 's'}
-          </p>
-          {#if isProviderAllDisabled}
-            <Badge variant="default" size="sm">
-              <span class="flex items-center gap-1">
-                <PauseCircle class="w-3 h-3" />
-                Disabled
-              </span>
-            </Badge>
-          {/if}
+
+        <div class="min-w-0">
+          <div class="flex items-center gap-3 flex-wrap">
+            <h1 class="truncate text-2xl font-semibold tracking-tight sm:text-3xl">
+              {providerName}
+            </h1>
+            {#if providerWebsite}
+              <a
+                href={providerWebsite}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-xs text-primary hover:underline inline-flex items-center gap-1"
+              >
+                <span class="material-symbols-outlined text-sm">open_in_new</span>
+                {providerWebsiteLabel}
+              </a>
+            {/if}
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <p class="text-text-muted">
+              {providerConnections.length} connection{providerConnections.length === 1 ? '' : 's'}
+            </p>
+            {#if isProviderAllDisabled}
+              <Badge variant="default" size="sm">
+                <span class="flex items-center gap-1">
+                  <PauseCircle class="w-3 h-3" />
+                  Disabled
+                </span>
+              </Badge>
+            {/if}
+          </div>
         </div>
       </div>
 
@@ -3437,6 +3590,11 @@
       {/if}
     </div>
   </div>
+
+  <!-- Claude prompt-cache window: a billing knob that belongs on the provider page. -->
+  {#if providerId === 'claude'}
+    <ClaudeCacheTtl />
+  {/if}
 
   <!-- 1. Risk Notice (for OAuth / subscription providers) -->
   {#if hasRiskNotice}
@@ -3488,6 +3646,22 @@
           >
             <span class="material-symbols-outlined text-[18px]">add</span>
             Add API Key
+          </button>
+          <button
+            type="button"
+            onclick={() => (showExportKeysModal = true)}
+            class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-7 px-3 text-xs rounded-[8px] w-full sm:w-auto"
+          >
+            <span class="material-symbols-outlined text-[18px]">download</span>
+            Export Keys
+          </button>
+          <button
+            type="button"
+            onclick={() => (showShareProviderModal = true)}
+            class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-7 px-3 text-xs rounded-[8px] w-full sm:w-auto"
+          >
+            <span class="material-symbols-outlined text-[18px]">link</span>
+            Share
           </button>
           <button
             type="button"
@@ -3746,8 +3920,50 @@
       </div>
     {/if}
 
+    <!-- Connection tabs: Active / Error / Banned. Every connection belongs to
+         exactly one tab; banned connections are excluded from Error. -->
+    <div class="flex gap-1 border border-border rounded-lg bg-surface px-1 py-1 sm:px-2">
+      <button
+        type="button"
+        onclick={() => (connTab = 'active')}
+        class="px-3 py-1.5 text-xs font-medium rounded-md transition-colors {connTab === 'active'
+          ? 'bg-primary text-white shadow-[var(--shadow-warm)]'
+          : tabCounts.active === 0
+            ? 'text-text-muted/40 pointer-events-none'
+            : 'text-text-main hover:text-text-main hover:bg-surface-2'}"
+        disabled={tabCounts.active === 0}
+      >
+        Active <span class="ml-1">{tabCounts.active}</span>
+      </button>
+      <button
+        type="button"
+        onclick={() => (connTab = 'error')}
+        class="px-3 py-1.5 text-xs font-medium rounded-md transition-colors {connTab === 'error'
+          ? 'bg-red-500/10 text-red-600 dark:text-red-400 shadow-[var(--shadow-warm)]'
+          : tabCounts.error === 0
+            ? 'text-text-muted/40 pointer-events-none'
+            : 'text-text-main hover:text-text-main hover:bg-surface-2'}"
+        disabled={tabCounts.error === 0}
+      >
+        Error <span class="ml-1">{tabCounts.error}</span>
+      </button>
+      <button
+        type="button"
+        onclick={() => (connTab = 'banned')}
+        class="px-3 py-1.5 text-xs font-medium rounded-md transition-colors {connTab === 'banned'
+          ? 'bg-orange-500/10 text-orange-600 dark:text-orange-400 shadow-[var(--shadow-warm)]'
+          : tabCounts.banned === 0
+            ? 'text-text-muted/40 pointer-events-none'
+            : 'text-text-main hover:text-text-main hover:bg-surface-2'}"
+        disabled={tabCounts.banned === 0}
+      >
+        <span class="material-symbols-outlined text-[14px] mr-1">block</span>
+        Banned <span class="ml-1">{tabCounts.banned}</span>
+      </button>
+    </div>
+
     <!-- Connections List -->
-      {#if providerConnections.length === 0}
+      {#if tabConnections.length === 0}
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex items-center gap-3">
           <div class="inline-flex items-center justify-center w-9 h-9 rounded-full bg-primary/10 text-primary shrink-0">
@@ -3825,7 +4041,7 @@
            click-away backdrop over the whole viewport, which otherwise swallows
            the first click on any priority chevron. -->
       <div class="relative z-50 flex min-w-0 flex-col divide-y divide-black/[0.03] dark:divide-white/[0.03] max-h-[500px] overflow-y-auto pr-1">
-        {#each providerConnections as conn, idx (conn.id)}
+        {#each tabConnections as conn, idx (conn.id)}
           {@const isFirst = idx === 0}
           {@const isLast = idx === providerConnections.length - 1}
           {@const isSelected = selectedConnIds.includes(conn.id)}
@@ -3841,6 +4057,7 @@
                connection's persisted testStatus; the markup below only renders
                the verdict it returns. -->
           {@const connBadge = badgeFor(status, conn.testStatus, lastErr)}
+          {#if tabMatches(conn)}
           <div class="flex min-w-0 items-stretch">
             <!-- Multi-select checkbox -->
             <div class="flex shrink-0 items-center pl-1 sm:pl-2">
@@ -3888,9 +4105,22 @@
 
                   <!-- Title & badges -->
                   <div class="flex-1 min-w-0">
-                    <p class="text-sm font-medium truncate">
-                      {formatEmailLabel(conn.name || conn.email || (conn.authType === 'oauth' ? 'OAuth Account' : 'API Key Slot'), $emailPrivacy)}
-                    </p>
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <p class="text-sm font-medium truncate">
+                        {formatEmailLabel(conn.name || conn.email || (conn.authType === 'oauth' ? 'OAuth Account' : 'API Key Slot'), $emailPrivacy)}
+                      </p>
+                      {#if providerId === 'mistral'}
+                        {#if specificData?.usageLane === 'vibe' || (conn.name && conn.name.toLowerCase().includes('vibe'))}
+                          <span class="inline-flex items-center gap-1 rounded font-semibold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 px-1.5 py-0.5 text-[10px]">
+                            VIBE CODE
+                          </span>
+                        {:else if specificData?.usageLane === 'api' || (conn.name && conn.name.toLowerCase().includes('api'))}
+                          <span class="inline-flex items-center gap-1 rounded font-semibold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 px-1.5 py-0.5 text-[10px]">
+                            API PAYG
+                          </span>
+                        {/if}
+                      {/if}
+                    </div>
                     <!-- Secondary label: upstream ConnectionRow shows the email
                          under a name, or the displayName when the stored name is
                          the email (which is what the Qoder device flow writes). -->
@@ -4170,6 +4400,14 @@
                       {/if}
                       <MenuItem label="Edit" icon="edit" onSelect={() => openEditConnection(conn)} />
 
+                      {#if appealUrl(conn)}
+                        <MenuItem
+                          label="Submit Appeal"
+                          icon="open_in_new"
+                          onSelect={() => openAppeal(appealUrl(conn)!)}
+                        />
+                      {/if}
+
                       <div class="my-1 border-t border-border-subtle" role="separator"></div>
 
                       <MenuItem label="Delete" icon="delete" danger onSelect={() => handleDeleteConnection(conn)} />
@@ -4195,6 +4433,7 @@
               </div>
             </div>
           </div>
+        {/if}
         {/each}
       </div>
     {/if}
@@ -4221,6 +4460,28 @@
           <span class="material-symbols-outlined text-[18px]">login</span>
           Connect Kiro
         </button>
+      {:else if isLeaseProvider}
+        <button
+          type="button"
+          onclick={handleAddConnectionClick}
+          class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-7 px-3 text-xs rounded-[8px] w-full sm:w-auto"
+        >
+          <span class="material-symbols-outlined text-[18px]">login</span>
+          Sign In
+        </button>
+        <button
+          type="button"
+          onclick={handleLeaseConnect}
+          disabled={isLeaseConnecting}
+          title="Borrow the signed-in MiniMax Code desktop app's login — no second sign-in, refresh stays with the desktop app"
+          class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-brand-500 hover:bg-brand-600 text-white shadow-sm h-7 px-3 text-xs rounded-[8px] w-full sm:w-auto disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          <span class="material-symbols-outlined text-[18px]">desktop_windows</span>
+          {isLeaseConnecting ? 'Connecting...' : 'Use Desktop App'}
+        </button>
+        {#if leaseError}
+          <p class="w-full text-xs text-error break-words">{leaseError}</p>
+        {/if}
       {:else if hasDualAuthModes}
         <button
           type="button"
@@ -4246,6 +4507,24 @@
         >
           <span class="material-symbols-outlined text-[18px]">add</span>
           Add
+        </button>
+      {/if}
+      {#if providerConnections.length > 0}
+        <button
+          type="button"
+          onclick={() => (showExportKeysModal = true)}
+          class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-7 px-3 text-xs rounded-[8px] w-full sm:w-auto"
+        >
+          <span class="material-symbols-outlined text-[18px]">download</span>
+          Export Keys
+        </button>
+        <button
+          type="button"
+          onclick={() => (showShareProviderModal = true)}
+          class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-7 px-3 text-xs rounded-[8px] w-full sm:w-auto"
+        >
+          <span class="material-symbols-outlined text-[18px]">link</span>
+          Share
         </button>
       {/if}
     </div>
@@ -4407,8 +4686,8 @@
               </span>
               <div class="flex-1 min-w-0">
                 <p class="text-sm font-medium truncate">{row.id}</p>
-                <div class="flex items-center gap-1 mt-1">
-                  <code class="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{displayAlias()}/{row.id}</code>
+                <div class="flex items-center gap-1 mt-1 flex-wrap">
+                  <code class="max-w-[72vw] truncate text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded sm:max-w-[360px]">{displayAlias()}/{row.id}</code>
                   <!-- Capability icons, mirroring the registered grid's row:
                        the same model id can be imported into a compatible
                        node, and a row that shows nothing there reads as a
@@ -4582,6 +4861,22 @@
         >
           <span class="material-symbols-outlined text-sm">close</span>
         </button>
+      </div>
+    {/if}
+    {#if isFreePi && freePiConn}
+      <div class="mb-4">
+        <FreePiAdBanner connectionId={freePiConn.id} />
+        <div class="flex flex-wrap items-center gap-2 rounded-[10px] border border-border-subtle bg-surface-2 px-3 py-2">
+          <span class="material-symbols-outlined text-[16px] text-text-muted" aria-hidden="true">layers_clear</span>
+          <span class="text-[11px] text-text-muted">Clear this account's other sessions if a stale one blocks a request.</span>
+          <button type="button" onclick={clearFreePiSession} disabled={freePiResetBusy}
+            class="ml-auto shrink-0 rounded-lg border border-border px-2.5 py-1 text-[11px] font-medium text-text-main hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50">
+            {freePiResetBusy ? 'Clearing…' : 'Clear session'}
+          </button>
+        </div>
+        {#if freePiResetResult}
+          <p class="mt-1 text-[11px] text-text-muted">{freePiResetResult}</p>
+        {/if}
       </div>
     {/if}
     {#if isFreebuff}
@@ -4783,7 +5078,7 @@
         Add Model
       </button>
 
-      {#if (providerId === 'cline' || providerId === 'clinepass' || providerId === 'qoder' || providerId === 'qoder-cn' || providerId === 'commandcode' || providerId === 'vercel-ai-gateway' || providerId === 'chutes' || providerId === 'nvidia' || providerId === 'ollama' || providerId === 'openrouter') && providerConnections.some((c) => c.isActive !== 0)}
+      {#if (providerId === 'cline' || providerId === 'clinepass' || providerId === 'qoder' || providerId === 'qoder-cn' || providerId === 'commandcode' || providerId === 'commandcode-goat' || providerId === 'vercel-ai-gateway' || providerId === 'chutes' || providerId === 'nvidia' || providerId === 'ollama' || providerId === 'openrouter') && providerConnections.some((c) => c.isActive !== 0)}
         <button
           type="button"
           onclick={handleImportLiveCatalogModels}
@@ -5226,6 +5521,7 @@
             </div>
           </div>
         {/if}
+        {#if !deviceUserCode}
         <div>
           <p class="text-sm font-medium mb-1">
             {providerId === 'freebuff'
@@ -5253,6 +5549,7 @@
                   : 'Paste the access token here, then click Connect.'}
           </p>
         </div>
+        {/if}
 
         {#if oauthError}
           <p class="text-xs text-red-500">{oauthError}</p>
@@ -5268,10 +5565,10 @@
                 submitManualCallback()
               }
             }}
-            disabled={isConnecting}
+            disabled={isConnecting || isPollingDevice}
             class="flex-1 py-1.5 text-xs font-semibold rounded-[8px] bg-brand-500 hover:bg-brand-600 text-white shadow-sm disabled:opacity-50 cursor-pointer"
           >
-            {isConnecting ? 'Checking…' : deviceUserCode ? 'Check now' : providerId === 'freebuff' ? 'Check & Connect' : 'Connect'}
+            {isConnecting || isPollingDevice ? 'Checking…' : deviceUserCode ? 'Check now' : providerId === 'freebuff' ? 'Check & Connect' : 'Connect'}
           </button>
           <button
             type="button"
@@ -5440,6 +5737,12 @@
   onClose={() => (showHeaderOverrides = false)}
 />
 
+<FreePiConnectModal
+  isOpen={showFreePiConnect}
+  onClose={() => (showFreePiConnect = false)}
+  onConnected={onRefresh}
+/>
+
 <!-- 5b. Edit Compatible Node Modal (upstream EditCompatibleNodeModal parity) -->
 <EditCompatibleNodeModal
   isOpen={showEditNodeModal && isCompatibleNode}
@@ -5468,4 +5771,21 @@
   }}
   onSubmit={handleAddKeyConnection}
   onBulkDone={onRefresh}
+/>
+
+<ExportKeysModal
+  isOpen={showExportKeysModal}
+  providerId={providerId}
+  providerName={providerName}
+  onClose={() => (showExportKeysModal = false)}
+/>
+<ShareProviderModal
+  isOpen={showShareProviderModal}
+  providerId={providerId}
+  providerName={providerName}
+  isCompatibleNode={isCompatibleNode}
+  node={selectedNode}
+  connections={providerConnections}
+  availableProviders={shareableProviders}
+  onClose={() => (showShareProviderModal = false)}
 />

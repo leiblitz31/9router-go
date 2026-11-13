@@ -17,7 +17,10 @@ const pageTemplate = `<!doctype html>
       content="9router-go is a single-binary AI gateway and token saver in Go. Serve OpenAI, Claude and Gemini compatible APIs to your CLI tools with automatic fallback across 40+ providers."
     />
     <link rel="stylesheet" href="style.css" />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e56a4a'/%3E%3Ctext x='16' y='23' font-family='system-ui,sans-serif' font-size='19' font-weight='700' fill='%23fff' text-anchor='middle'%3E9%3C/text%3E%3C/svg%3E" />
+    <!-- The product's own icon, the same SVG the dashboard serves from
+         web/public/favicon.svg. Inlined as a data URI rather than shipped as a
+         second asset for a 48px image. -->
+    <link rel="icon" href="` + brandMarkPNG + `" />
   </head>
   <body>
     <a class="skip-link" href="#readme">Skip to content</a>
@@ -25,7 +28,15 @@ const pageTemplate = `<!doctype html>
     <header class="masthead">
       <div class="masthead-inner">
         <a class="wordmark" href="index.html">
-          <span class="wordmark-mark" aria-hidden="true">9</span>
+          <!-- The product's own icon: the same mark the dashboard and the
+               repository use, the shared brandMarkPNG embedded in an SVG so it
+               is the real glyph rather than a letter in a coloured box.
+               aria-hidden, because the word beside it is the accessible name. -->
+          <span class="wordmark-mark" aria-hidden="true">
+            <svg viewBox="0 0 512 512" focusable="false">
+              <image width="512" height="512" href="` + brandMarkPNG + `"/>
+            </svg>
+          </span>
           <span>9router-go</span>
         </a>
         <nav aria-label="Project">

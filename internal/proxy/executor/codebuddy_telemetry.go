@@ -143,7 +143,7 @@ func codebuddyTelemetryPost(ctx context.Context, client *http.Client, targetURL 
 	}
 	resp, err := client.Do(req)
 	if err == nil && resp.Body != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 }
 
@@ -157,7 +157,7 @@ func codebuddyTelemetryGet(ctx context.Context, client *http.Client, targetURL s
 	}
 	resp, err := client.Do(req)
 	if err == nil && resp.Body != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 }
 

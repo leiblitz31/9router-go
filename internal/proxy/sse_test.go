@@ -7,9 +7,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
-	"sync"
 	"time"
 )
 
@@ -187,7 +187,6 @@ func (m *mockResponseWriter) wasFlushed() bool {
 	defer m.mu.Unlock()
 	return m.flushed
 }
-
 
 func TestHeartbeatWriter_EmitsKeepAliveWhenIdle(t *testing.T) {
 	rec := &mockResponseWriter{}
@@ -496,5 +495,25 @@ func TestSSECopy_QuotedTerminalInsideContentIsNotATerminal(t *testing.T) {
 	}
 	if got := strings.Count(out, sseStopTerminal); got != 1 {
 		t.Errorf("expected exactly 1 injected terminal, got %d in %q", got, out)
+	}
+}
+
+// TestSSECopy_ResponsesCompletedIsTerminal covers #1073.
+func TestSSECopy_ResponsesCompletedIsTerminal(t *testing.T) {
+	rec := &mockResponseWriter{}
+	stream := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n"
+	if err := SSECopy(rec, strings.NewReader(stream), rec, nil); err != nil {
+		t.Fatalf("SSECopy failed: %v", err)
+	}
+	out := rec.String()
+	if strings.Contains(out, "network_error") {
+		t.Errorf("completed Responses stream must not gain a network_error frame, got %q", out)
+	}
+	if strings.Contains(out, sseStopTerminal) {
+		t.Errorf("completed Responses stream must not gain a stop terminal, got %q", out)
+	}
+	if !strings.Contains(out, "response.completed") {
+		t.Errorf("response.completed must be relayed, got %q", out)
 	}
 }

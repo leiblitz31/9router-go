@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"database/sql"
 	json "encoding/json/v2"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"9router/proxy/internal/db"
@@ -477,5 +479,292 @@ func seedXaiConn(t *testing.T, database *sql.DB, baseURL string) {
 	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
 		('conn-xai', 'xai', 'apikey', 'xAI Test', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, string(data)); err != nil {
 		t.Fatalf("seed xai connection: %v", err)
+	}
+}
+
+func TestHandleVideoGenerations_xai(t *testing.T) {
+	var mu sync.Mutex
+	var capturedBodies []map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var captured map[string]any
+		_ = json.Unmarshal(body, &captured)
+		mu.Lock()
+		capturedBodies = append(capturedBodies, captured)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"request_id":"xai-job-123","status":"pending"}`))
+	}))
+	defer upstream.Close()
+
+	cfg := providers.KnownProviders["xai"]
+	cfg.VideoURL = upstream.URL + "/v1/videos"
+	providers.KnownProviders["xai"] = cfg
+
+	database, cleanup := setupMultimodalTestDB(t)
+	defer cleanup()
+	seedXaiConn(t, database, upstream.URL)
+
+	repo := db.NewRepo(database)
+	handler := newTestMediaHandler(repo)
+
+	tests := []struct {
+		name          string
+		body          string
+		checkCaptured func(t *testing.T, payload map[string]any)
+	}{
+		{
+			name: "string image converted to url object",
+			body: `{"model":"xai/grok-imagine-video","prompt":"animate it","image":"https://example.com/frame.jpg"}`,
+			checkCaptured: func(t *testing.T, p map[string]any) {
+				img, ok := p["image"].(map[string]any)
+				if !ok {
+					t.Fatalf("expected image to be map, got %T: %v", p["image"], p["image"])
+				}
+				if img["url"] != "https://example.com/frame.jpg" {
+					t.Errorf("expected url https://example.com/frame.jpg, got %v", img["url"])
+				}
+			},
+		},
+		{
+			name: "object image preserved and reference_images forwarded",
+			body: `{"model":"xai/grok-imagine-video","prompt":"animate it","image":{"url":"data:image/jpeg;base64,AAAA"},"reference_images":[{"url":"https://example.com/style.jpg"}]}`,
+			checkCaptured: func(t *testing.T, p map[string]any) {
+				img, ok := p["image"].(map[string]any)
+				if !ok {
+					t.Fatalf("expected image to be map, got %T: %v", p["image"], p["image"])
+				}
+				if img["url"] != "data:image/jpeg;base64,AAAA" {
+					t.Errorf("expected data uri preserved, got %v", img["url"])
+				}
+				ref, ok := p["reference_images"].([]any)
+				if !ok || len(ref) != 1 {
+					t.Fatalf("expected reference_images slice of length 1, got %v", p["reference_images"])
+				}
+			},
+		},
+		{
+			name: "invalid image stripped",
+			body: `{"model":"xai/grok-imagine-video","prompt":"animate it","image":42}`,
+			checkCaptured: func(t *testing.T, p map[string]any) {
+				if _, ok := p["image"]; ok {
+					t.Errorf("expected image stripped for numeric type, got %v", p["image"])
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			startLen := len(capturedBodies)
+			mu.Unlock()
+
+			req := httptest.NewRequest("POST", "/v1/videos/generations", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handler.HandleVideoGenerations(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			mu.Lock()
+			if len(capturedBodies) <= startLen {
+				mu.Unlock()
+				t.Fatalf("expected upstream call, but none captured")
+			}
+			last := capturedBodies[len(capturedBodies)-1]
+			mu.Unlock()
+
+			tc.checkCaptured(t, last)
+		})
+	}
+}
+
+func TestHandleImages_CloudflareFluxSchnellStripsDimensions(t *testing.T) {
+	var mu sync.Mutex
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		_ = json.Unmarshal(body, &captured)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1,"data":[{"url":"https://example.com/flux.png"}]}`))
+	}))
+	defer upstream.Close()
+
+	database, cleanup := setupMultimodalTestDB(t)
+	defer cleanup()
+
+	data, _ := json.Marshal(map[string]any{"apiKey": "cf-token", "baseUrl": upstream.URL})
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-cf', 'cloudflare-ai', 'apikey', 'Cloudflare AI Test', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, string(data)); err != nil {
+		t.Fatalf("seed cloudflare connection: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+	handler := newTestMediaHandler(repo)
+
+	body := `{"model":"cf/@cf/black-forest-labs/flux-1-schnell","prompt":"a red fox","size":"1024x1024","width":1024,"height":1024}`
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.HandleImages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if _, hasWidth := captured["width"]; hasWidth {
+		t.Errorf("expected width stripped for flux-1-schnell, but found %v", captured["width"])
+	}
+	if _, hasHeight := captured["height"]; hasHeight {
+		t.Errorf("expected height stripped for flux-1-schnell, but found %v", captured["height"])
+	}
+	if _, hasSize := captured["size"]; hasSize {
+		t.Errorf("expected size stripped for flux-1-schnell, but found %v", captured["size"])
+	}
+	if prompt, _ := captured["prompt"].(string); prompt != "a red fox" {
+		t.Errorf("expected prompt preserved, got %q", prompt)
+	}
+}
+
+func TestHandleImages_CloudflareFlux2DevKeepsDimensions(t *testing.T) {
+	// Negative check: flux-2-dev must NOT have width/height/size stripped,
+	// only flux-1-schnell is subject to Cloudflare's closed schema (upstream #5373).
+	var mu sync.Mutex
+	var captured map[string]string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		captured = multipartFields(t, r)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1,"data":[{"url":"https://example.com/flux.png"}]}`))
+	}))
+	defer upstream.Close()
+
+	database, cleanup := setupMultimodalTestDB(t)
+	defer cleanup()
+
+	data, _ := json.Marshal(map[string]any{"apiKey": "cf-token", "baseUrl": upstream.URL})
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-cf', 'cloudflare-ai', 'apikey', 'Cloudflare AI Test', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, string(data)); err != nil {
+		t.Fatalf("seed cloudflare connection: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+	handler := newTestMediaHandler(repo)
+
+	body := `{"model":"cf/@cf/black-forest-labs/flux-2-dev","prompt":"a red fox","size":"1024x1024","width":1024,"height":1024}`
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.HandleImages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if v, ok := captured["width"]; !ok || v != "1024" {
+		t.Errorf("expected width preserved for flux-2-dev (multipart), got %v", captured["width"])
+	}
+	if v, ok := captured["height"]; !ok || v != "1024" {
+		t.Errorf("expected height preserved for flux-2-dev (multipart), got %v", captured["height"])
+	}
+	if prompt := captured["prompt"]; prompt != "a red fox" {
+		t.Errorf("expected prompt preserved, got %q", prompt)
+	}
+}
+
+func TestHandleImages_CloudflareFluxSchnellComboStripsDimensions(t *testing.T) {
+	// Combo path: a combo whose cloudflare flux-1-schnell member also has
+	// width/height/size stripped (forwardMediaRequest combo branch).
+	var mu sync.Mutex
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		_ = json.Unmarshal(body, &captured)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1,"data":[{"url":"https://example.com/flux.png"}]}`))
+	}))
+	defer upstream.Close()
+
+	database, cleanup := setupMultimodalTestDB(t)
+	defer cleanup()
+
+	if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS combos (
+		id TEXT PRIMARY KEY,
+		name TEXT UNIQUE NOT NULL,
+		kind TEXT,
+		models TEXT NOT NULL,
+		strategy TEXT DEFAULT 'fallback',
+		createdAt TEXT NOT NULL,
+		updatedAt TEXT NOT NULL,
+		matchRules TEXT DEFAULT ''
+	)`); err != nil {
+		t.Fatalf("create combos table: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+
+	data, _ := json.Marshal(map[string]any{"apiKey": "cf-token", "baseUrl": upstream.URL})
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-cf', 'cloudflare-ai', 'apikey', 'Cloudflare AI Test', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, string(data)); err != nil {
+		t.Fatalf("seed cloudflare connection: %v", err)
+	}
+
+	if err := repo.CreateCombo("flux-combo", "flux-combo", "image", `["cf/@cf/black-forest-labs/flux-1-schnell"]`, "fallback"); err != nil {
+		t.Fatalf("seed flux combo: %v", err)
+	}
+
+	handler := newTestMediaHandler(repo)
+
+	body := `{"model":"flux-combo","prompt":"a red fox","size":"1024x1024","width":1024,"height":1024}`
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.HandleImages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if _, hasWidth := captured["width"]; hasWidth {
+		t.Errorf("expected width stripped for flux-1-schnell combo member, but found %v", captured["width"])
+	}
+	if _, hasHeight := captured["height"]; hasHeight {
+		t.Errorf("expected height stripped for flux-1-schnell combo member, but found %v", captured["height"])
+	}
+	if _, hasSize := captured["size"]; hasSize {
+		t.Errorf("expected size stripped for flux-1-schnell combo member, but found %v", captured["size"])
+	}
+	if prompt, _ := captured["prompt"].(string); prompt != "a red fox" {
+		t.Errorf("expected prompt preserved, got %q", prompt)
 	}
 }

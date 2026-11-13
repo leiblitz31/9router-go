@@ -12,16 +12,21 @@ Whenever you implement features, fix bugs, add providers, update routing logic, 
 - **Local Clone Path**: `/Users/luqmannul.hakim/htdocs/9router`
 
 ### Parity Protocol
-1. **Always Inspect Local Upstream First**:
+1. **Merged-Only Upstream Mandate (Strictly No Speculative Ports)**:
+   - **Port ONLY what is already merged** into upstream's default branch (`main`/`master`) or published in an upstream release tag.
+   - **STRICTLY FORBIDDEN**: Never port from open pull requests, draft PRs, speculative feature proposals, or unverified discussion issues (e.g. open feature threads or experimental detection-evasion ideas).
+   - **Why**: Unmerged upstream PRs and open proposals are unproven in production, frequently rejected upstream, or carry speculative headers/payloads that trigger provider WAF bans (such as GCP 403 on Antigravity or ad-gate lockouts on Free-Pi).
+   - If an issue or contributor requests a feature citing an open upstream PR/issue, refuse or defer it until upstream formally merges, tests, and verifies the change in production.
+2. **Always Inspect Local Upstream First**:
    - Before writing or modifying logic, inspect the corresponding code in `/Users/luqmannul.hakim/htdocs/9router`.
-   - Check upstream git history, PRs, issues, and vitest unit tests in `/Users/luqmannul.hakim/htdocs/9router/tests/` to understand edge cases, headers, and protocol nuances.
-2. **Behavioral Compatibility (100% Contract Match)**:
+   - Check upstream git history, PRs, issues, and vitest unit tests in `/Users/luqmannul.hakim/htdocs/9router/tests/` to understand edge cases, headers, and protocol nuances. Confirm that the reference commit is genuinely part of upstream `main` history (`git -C /Users/luqmannul.hakim/htdocs/9router branch --contains <commit>`).
+3. **Behavioral Compatibility (100% Contract Match)**:
    - Request and response schemas for `/v1/*` (Chat Completions, Messages, Embeddings, Audio, Models).
    - Dashboard endpoints `/api/*` (Connections, Combos, ProxyPools, Settings, ProviderNodes, Usage, Auth).
    - Combo expansion, model fallback, account rotation, and strike-breaker quota handling.
    - SQLite database compatibility (`~/.9router/db/data.sqlite`).
-3. **Changelog Tracking**:
-   - When porting features or fixes, reference the upstream commit/issue/PR in
+4. **Changelog Tracking**:
+   - When porting features or fixes, reference the upstream merged commit/PR in
      your `.changes/<pr-number>-<slug>.md` fragment (e.g. `upstream
      decolua/9router#4197 parity`). **Never write it into `CHANGELOG.md`** — see
      §7.6 for the rule and the reason behind it.
@@ -117,6 +122,12 @@ Every upstream provider in this repository (`antigravity`, `opencode`, `claude`,
   - Use `json.RawMessage` to forward opaque/passthrough payload segments without unmarshaling into generic intermediate `map[string]any`.
 - **HTTP Transport Hygiene**:
   - Reuse `*http.Client` instances with pooled `http.Transport` (`MaxIdleConnsPerHost`, keep-alives enabled, appropriate response header timeouts). Never instantiate an unconfigured `&http.Client{}` per request.
+- **SQLite Access: One Read Per Page, Never N+1 (STRICTLY MANDATORY)**:
+  - Never issue a query per row inside a loop over query results. A list endpoint that reads related data per row pays 1 + N statements and one ledger pass per row; on the §4.G hardware that pattern measured ~700 ms for one dashboard list (GET /api/keys on a 108k-row ledger, fixed 2026-10-29).
+  - Batch the read: one statement over the whole page with an `IN (...)` list or a `VALUES` CTE. In-repo patterns to copy: `GetAllowedModelsForKeys` (`internal/db/modelaccess.go`), `GetPlansForKeys` (`internal/db/plans.go`), `GetApiKeyTokenUsageForKeys` (`internal/db/quota_reset.go`).
+  - The batched statement must be answered from an index, not a scan. Run `EXPLAIN QUERY PLAN` before merging; any `SCAN <table>` on a large table means stop and reshape or add the index. Covering composites beat bare equality indexes when the statement aggregates columns (see the `idx_uh_apikey_tok` / `idx_uh_clientkey_tok` pair and `supersededIndexes` in `internal/db/schema.go`).
+  - Pin the plan with a unit test so a later schema edit cannot silently reintroduce the scan (patterns: `TestGetApiKeyTokenUsageForKeysQueryPlan`, `TestUsageHistoryClientKeyIndexExists`).
+  - Hoist correlated scalar subqueries out of per-row predicates: SQLite re-evaluates them for every candidate row, which cost 2.5x the whole per-key path on that same ledger. Read such a value once per page and pass it as a CTE column or bound parameter instead.
 
 ### B. Concurrency & Goroutine Safety
 - **Context Propagation**:
@@ -133,15 +144,24 @@ Every upstream provider in this repository (`antigravity`, `opencode`, `claude`,
   - Use strongly typed structs for known wire protocols (OpenAI Chat Completions, Anthropic Messages, Gemini GenerateContent, Antigravity envelopes).
   - Use unexported fields or typed wrappers instead of passing untyped maps across package boundaries.
   - Reserve `any` / `map[string]any` strictly for dynamic, provider-specific, or open-ended passthrough payloads.
+- **Enumerations for closed value sets**: Represent finite, known-at-build-time choices with named enum-like types and constants instead of repeating raw string literals in logic, comparisons, switches, or serialized state. In Go, define a named type with constants; in TypeScript, prefer a string-literal union (or an `enum` when runtime enumeration is needed). Reuse the canonical definition across callers.
+- **Do not force enums onto open-ended values**: Keep strings for user input, provider/model IDs, URLs, paths, arbitrary JSON keys, protocol values that must remain extensible, and exact wire-format literals where a named constant alone is appropriate. Preserve required JSON/API wire values when introducing typed enums.
+- **No duplicated string checks for closed sets**: If a string represents a finite internal mode, status, kind, or category, compare against the named constants/type rather than embedding its literal at each use site. Validate external input against the canonical set at the boundary.
 - **Clean JSON Serialization**:
   - Use accurate struct tags (`json:"fieldName,omitempty"`). Omit zero-value fields when required by upstream provider specs.
 
-### D. Code Style, Modularity & Cognitive Complexity
+### D. Code Style, Modularity & Concise Go (`github.com/samber/lo`)
+- **Concise & Expressive Functional Patterns (`github.com/samber/lo`)**:
+  - Always prefer [`github.com/samber/lo`](https://github.com/samber/lo) to eliminate verbose, handwritten loop boilerplate and multi-line conditional assignments. `samber/lo` is already a direct dependency in `go.mod`.
+  - **Slices & Collections**: Use `lo.Map`, `lo.Filter`, `lo.FilterMap`, `lo.FlatMap`, `lo.Contains`, `lo.Find`, `lo.Uniq`, `lo.GroupBy`, and `lo.KeyBy` instead of manual accumulator loops (`var out []T; for ... if ... out = append(out, ...)`).
+  - **Ternary & Defaults**: Use `lo.Ternary(cond, a, b)` instead of multi-line `if/else` variable assignments. Use `lo.Coalesce(val, fallback)` instead of cascading `if val != ""` fallback chains.
+  - **Pointers & References**: Use `lo.ToPtr(v)` and `lo.FromPtr(p)` (or `lo.FromPtrOr(p, defaultVal)`) instead of declaring temporary variables just to take their address (`tmp := v; &tmp`).
+  - **Maps & Sets**: Use `lo.Keys(m)`, `lo.Values(m)`, `lo.PickBy(m, predicate)`, `lo.Invert(m)`, and `lo.Assign(m1, m2)` instead of manual iteration to extract keys or merge maps.
+  - **Batching & Partitioning**: Use `lo.Chunk(slice, size)` and `lo.PartitionBy(slice, predicate)` for cleanly chunking or splitting items.
 - **Cognitive Complexity**: Maintain SonarQube cognitive complexity $\le 15$ per function/method.
 - **Guard Clauses**: Keep the happy path left-aligned using early returns. Avoid nested `if/else` ladders (3+ levels forbidden). Decompose branching into focused private helper functions.
 - **File Size Discipline**: Target files $\le 300$ LoC (modularize files $>400$ LoC into focused files or subpackages).
 - **Dependency Injection**: Use Uber Fx (`go.uber.org/fx`) in `internal/app/` for clean wiring. Usecases and handlers must never perform defensive `nil` checks on injected dependencies—fail fast during startup container initialization.
-- **Functional Helpers**: Prefer [`github.com/samber/lo`](https://github.com/samber/lo) (`lo.Map`, `lo.Filter`, `lo.Contains`, `lo.Ternary`, `lo.ToPtr`) for clean slice operations instead of handwritten boilerplate loops.
 
 ### E. Error Handling
 - **Wrap Errors with `%w`**: Always provide caller context: `fmt.Errorf("receiver.MethodName: %w", err)` or `fmt.Errorf("op: %w", err)`.
@@ -472,9 +492,10 @@ The screen stays for as long as the boot requests take, and the boot requests ar
 
 When tasked with syncing a feature, bugfix, or provider from upstream:
 
-1. **Investigate Upstream**:
+1. **Investigate Upstream (Merged Code Only)**:
+   - Verify that the commit or feature is **already merged into upstream's main branch** (`git -C /Users/luqmannul.hakim/htdocs/9router branch --contains <commit>`). Never sync from open PRs, draft PRs, or open proposal issues (§1).
    ```bash
-   # Check recent upstream commits, tags, or file changes
+   # Check recent upstream commits on main
    git -C /Users/luqmannul.hakim/htdocs/9router log -n 5 --oneline
    # Inspect specific upstream file or test
    cat /Users/luqmannul.hakim/htdocs/9router/open-sse/...
@@ -542,6 +563,13 @@ When tasked with syncing a feature, bugfix, or provider from upstream:
      `scripts/bump-version.sh`. It files every fragment under
      `## [TAG] - <date>`, drops the emptied `[Unreleased]` section, and clears
      `.changes/`. Contributors do not run this per PR.
+   - **The one-command release.** `./scripts/release.sh <version>` (or
+     `make release VER=<version>`) chains the whole flow: bump-version.sh →
+     changelog-merge (when fragments are pending) → commit `chore: bump to
+     <version>` → tag `v<version>` → push branch, then the tag. The tag goes
+     last because release.yml's channel gate refuses a tag whose commit does
+     not carry the matching VERSION. `--dry-run` previews the plan without
+     touching anything; the manual sequence above stays valid as a fallback.
    - Format reference: [`.changes/README.md`](.changes/README.md).
 
 7. **Branch & PR Targeting (`main` ONLY — MANDATORY)**:
@@ -656,6 +684,9 @@ make dev
 go run ./cmd/changelog-merge --tag v1.9.11 --dry-run
 # Release time only — files the fragments under ## [TAG], clears .changes/:
 make changelog-merge TAG=v1.9.11
+# The whole release in one command (bump + changelog-merge + commit + tag + push):
+./scripts/release.sh 1.9.16-exp.3      # add --dry-run to preview, --yes to skip prompts
+make release VER=1.9.16-exp.3          # same thing via make
 
 # Prove a PR does not touch CHANGELOG.md (prints nothing when clean)
 { rtk git diff --name-only HEAD; rtk git diff --name-only main...HEAD; \

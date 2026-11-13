@@ -1,6 +1,9 @@
 package translator
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Block types the Claude Messages API accepts in a message content array.
 const (
@@ -24,11 +27,14 @@ var contentfulBlocks = map[string]struct{}{
 	"image":                    {},
 	"document":                 {},
 	claudeBlockContainerUpload: {},
+	"redacted_thinking":        {},
 }
 
 // isContentfulBlock reports whether one content block keeps its message alive.
 // Text counts only when it is not blank: an Anthropic 400s on empty text, and
 // a whitespace-only turn carries nothing either.
+// Thinking blocks count only when carrying a valid Claude signature, ensuring
+// invalid/unsigned thinking blocks are dropped while valid blank thinking survives.
 func isContentfulBlock(block map[string]any) bool {
 	bType, _ := block["type"].(string)
 	if bType == claudeBlockText {
@@ -36,12 +42,8 @@ func isContentfulBlock(block map[string]any) bool {
 		return strings.TrimSpace(text) != ""
 	}
 	if bType == claudeBlockThinking {
-		// The Messages API rejects a thinking block with no visible text (400
-		// "each thinking block must contain non-whitespace thinking"), and a
-		// valid signature does not save it — so a whitespace-only block must
-		// not keep its message alive either (upstream #4727).
-		thinking, _ := block["thinking"].(string)
-		return strings.TrimSpace(thinking) != ""
+		sig, _ := block["signature"].(string)
+		return IsValidClaudeSignature(sig)
 	}
 	_, ok := contentfulBlocks[bType]
 	return ok
@@ -128,4 +130,83 @@ func markFinalToolResults(req map[string]any) bool {
 		return false
 	}
 	return markLastCacheableBlock(content)
+}
+
+// ToolResultIsError inspects a tool turn or tool_result block/message map and
+// reports whether it indicates an error condition.
+// Zed Editor and strict Anthropic consumers require `is_error: bool` to be
+// explicitly emitted on every tool_result block.
+// Returns true when:
+// - `is_error` / `isError` boolean is true
+// - `status` equals "error" (case-insensitive)
+// - content contains an error payload or JSON error structure
+func ToolResultIsError(m map[string]any) bool {
+	if m == nil {
+		return false
+	}
+	if b, ok := m["is_error"].(bool); ok && b {
+		return true
+	}
+	if b, ok := m["isError"].(bool); ok && b {
+		return true
+	}
+	if s, ok := m["status"].(string); ok && strings.EqualFold(strings.TrimSpace(s), "error") {
+		return true
+	}
+
+	// Check content/text fields for string error markers or JSON error payloads
+	for _, key := range []string{"content", "output", "text"} {
+		if raw, ok := m[key]; ok && raw != nil {
+			if checkToolContentIsError(raw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func checkToolContentIsError(content any) bool {
+	switch v := content.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return false
+		}
+		// Check JSON error payload
+		if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(trimmed), &obj); err == nil {
+				if b, ok := obj["is_error"].(bool); ok && b {
+					return true
+				}
+				if b, ok := obj["isError"].(bool); ok && b {
+					return true
+				}
+				if s, ok := obj["status"].(string); ok && strings.EqualFold(strings.TrimSpace(s), "error") {
+					return true
+				}
+				if errVal, hasErr := obj["error"]; hasErr && errVal != nil && errVal != false && errVal != "" {
+					return true
+				}
+			}
+		}
+		// Error string markers
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "error:") ||
+			strings.HasPrefix(lower, "exception:") ||
+			strings.HasPrefix(lower, "traceback (most recent call last):") {
+			return true
+		}
+	case []any:
+		for _, item := range v {
+			if im, ok := item.(map[string]any); ok {
+				if ToolResultIsError(im) {
+					return true
+				}
+			}
+		}
+	case map[string]any:
+		return ToolResultIsError(v)
+	}
+	return false
 }

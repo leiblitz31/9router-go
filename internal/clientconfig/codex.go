@@ -1,6 +1,10 @@
 package clientconfig
 
-import "errors"
+import (
+	"errors"
+	"strconv"
+	"strings"
+)
 
 // OpenAI Codex CLI: ~/.codex/config.toml, TOML.
 // docs/specs/client-schema-matrix.md §3.2.
@@ -44,6 +48,9 @@ func (a codexAdapter) Reset(opts Options) (Result, error) {
 	// Order matters in one place only: the provider table is removed after the
 	// keys that reference it, so a half-finished reset never leaves
 	// `model_provider = "9router"` pointing at a table that is already gone.
+	// The limit keys are removed unconditionally: they are global in codex's
+	// config, so one left behind would silently describe this gateway's
+	// window to whatever provider the user configures next.
 	edits := []Edit{
 		{KeyPath: []string{"model_providers", codexProviderKey, "http_headers", "Authorization"}, Delete: true},
 		{KeyPath: []string{"model_providers", codexProviderKey, "wire_api"}, Delete: true},
@@ -51,6 +58,9 @@ func (a codexAdapter) Reset(opts Options) (Result, error) {
 		{KeyPath: []string{"model_providers", codexProviderKey, "name"}, Delete: true},
 		{KeyPath: []string{"model_providers", codexProviderKey}, Delete: true},
 		{KeyPath: []string{"agents", "default_subagent_model"}, Delete: true},
+		{KeyPath: []string{"model_context_window"}, Delete: true},
+		{KeyPath: []string{"model_auto_compact_token_limit"}, Delete: true},
+		{KeyPath: []string{"model_max_output_tokens"}, Delete: true},
 	}
 	// `model` and `model_provider` are the user's own keys once the provider
 	// table is gone, so they are only removed when they still name us. That
@@ -95,9 +105,27 @@ func codexApplyEdits(opts Options) []Edit {
 	// The legacy `agents.subagent` key is replaced by default_subagent_model.
 	// Deleting it is part of Apply, not Reset: leaving both means Codex reads
 	// whichever it prefers and the user sees a config with two answers.
-	return append(edits,
+	edits = append(edits,
 		Edit{KeyPath: []string{"agents", "subagent"}, Delete: true},
 	)
+	// Codex sizes its context meter and its auto-compact trigger from its own
+	// model registry; a custom provider's model is not in it, so the numbers
+	// must be stated. model_auto_compact_token_limit matters as much as the
+	// window: compaction fires from the limit, and 90% keeps the turn that
+	// triggers it under a boundary the upstream actually enforces.
+	if limits, ok := opts.ModelLimits[opts.Model]; ok && limits.ContextWindow > 0 {
+		w := limits.ContextWindow
+		edits = append(edits,
+			Edit{KeyPath: []string{"model_context_window"}, ValueJSON: strconv.Itoa(w), CreateIfMissing: true},
+			Edit{KeyPath: []string{"model_auto_compact_token_limit"}, ValueJSON: strconv.Itoa(w - w/10), CreateIfMissing: true},
+		)
+		if limits.MaxOutput > 0 {
+			edits = append(edits, Edit{
+				KeyPath: []string{"model_max_output_tokens"}, ValueJSON: strconv.Itoa(limits.MaxOutput), CreateIfMissing: true,
+			})
+		}
+	}
+	return edits
 }
 
 // codexPointsAtUs reports whether the file's model_provider still names the
@@ -125,4 +153,38 @@ func codexPointsAtUs(file TargetFile) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (a codexAdapter) Current(opts Options) (map[string]any, error) {
+	paths, err := a.Paths(opts)
+	if err != nil || len(paths.Files) == 0 {
+		return nil, err
+	}
+	file := paths.Files[0]
+	g, err := resolveGuard(file.Dir, relFromDir(file.Dir, file.Path))
+	if err != nil {
+		if errors.Is(err, ErrBaseMissing) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	b, err := readThroughGuard(g)
+	if err != nil || len(b) == 0 {
+		return nil, err
+	}
+	doc, err := scanTOML(parseableTOML(b), b)
+	if err != nil {
+		return nil, err
+	}
+	res := make(map[string]any)
+	for _, kv := range doc.kvs {
+		if samePath(kv.fullPath, []string{"model"}) {
+			val := string(b[kv.valStart:kv.valEnd])
+			res["model"] = strings.Trim(val, `"'`)
+		} else if samePath(kv.fullPath, []string{"model_providers", codexProviderKey, "base_url"}) {
+			val := string(b[kv.valStart:kv.valEnd])
+			res["baseUrl"] = strings.Trim(val, `"'`)
+		}
+	}
+	return res, nil
 }

@@ -17,17 +17,18 @@ import (
 
 // Config holds the proxy gateway configuration.
 type Config struct {
-	Host            string
-	Port            int
-	DatabasePath    string
-	JWTSecret       string
-	InitialPassword string
-	APIKeySecret    string
-	MachineIDSalt   string
-	RTKEnabled      bool
-	CavemanEnabled  bool
-	PonytailEnabled bool
-	ADHDEnabled     bool
+	Host                string
+	Port                int
+	DatabasePath        string
+	JWTSecret           string
+	InitialPassword     string
+	APIKeySecret        string
+	MachineIDSalt       string
+	RTKEnabled          bool
+	CavemanEnabled      bool
+	PonytailEnabled     bool
+	ADHDEnabled         bool
+	SeatAttemptBudgetMs int
 }
 
 // NewViper creates and configures a new Viper instance reading from .env with standard defaults.
@@ -52,6 +53,7 @@ func NewViperWithFile(configFile string) *viper.Viper {
 	v.SetDefault("CAVEMAN_ENABLED", false)
 	v.SetDefault("PONYTAIL_ENABLED", false)
 	v.SetDefault("ADHD_ENABLED", false)
+	v.SetDefault("SEAT_ATTEMPT_BUDGET_MS", 0)
 
 	if configFile != "" {
 		if err := v.ReadInConfig(); err != nil {
@@ -60,9 +62,47 @@ func NewViperWithFile(configFile string) *viper.Viper {
 				log.Warn("config", "read config file failed", "file", configFile, "error", err)
 			}
 		}
+		syncEnvFromViper(v)
 	}
 
 	return v
+}
+
+// syncEnvFromViper populates environment variables that Go's runtime or
+// standard library (such as net/http's ProxyFromEnvironment) reads directly
+// from os.Getenv rather than from Viper. Values already present in the OS
+// environment take precedence.
+func syncEnvFromViper(v *viper.Viper) {
+	if v == nil {
+		return
+	}
+	proxyKeys := []string{
+		"HTTP_PROXY", "http_proxy",
+		"HTTPS_PROXY", "https_proxy",
+		"ALL_PROXY", "all_proxy",
+		"NO_PROXY", "no_proxy",
+		"STRICT_SSL",
+		"FORCE_FALLBACK_ON_ALL_UNAVAILABLE",
+	}
+	for _, key := range proxyKeys {
+		if os.Getenv(key) == "" {
+			if val := strings.TrimSpace(v.GetString(key)); val != "" {
+				_ = os.Setenv(key, val)
+			}
+		}
+	}
+	allProxy := os.Getenv("ALL_PROXY")
+	if allProxy == "" {
+		allProxy = os.Getenv("all_proxy")
+	}
+	if allProxy != "" {
+		if os.Getenv("HTTP_PROXY") == "" && os.Getenv("http_proxy") == "" {
+			_ = os.Setenv("HTTP_PROXY", allProxy)
+		}
+		if os.Getenv("HTTPS_PROXY") == "" && os.Getenv("https_proxy") == "" {
+			_ = os.Setenv("HTTPS_PROXY", allProxy)
+		}
+	}
 }
 
 // ProvideViper returns a configured Viper instance for dependency injection.
@@ -203,19 +243,21 @@ func LoadConfigFromViper(v *viper.Viper) *Config {
 	cavemanEnabled := v.GetBool("CAVEMAN_ENABLED")
 	ponytailEnabled := v.GetBool("PONYTAIL_ENABLED")
 	adhdEnabled := v.GetBool("ADHD_ENABLED")
+	seatAttemptBudgetMs := v.GetInt("SEAT_ATTEMPT_BUDGET_MS")
 
 	return &Config{
-		Host:            host,
-		Port:            port,
-		DatabasePath:    dbPath,
-		JWTSecret:       loadJWTSecret(v, dataDir),
-		InitialPassword: initialPassword,
-		APIKeySecret:    apiKeySecret,
-		MachineIDSalt:   machineIDSalt,
-		RTKEnabled:      rtkEnabled,
-		CavemanEnabled:  cavemanEnabled,
-		PonytailEnabled: ponytailEnabled,
-		ADHDEnabled:     adhdEnabled,
+		Host:                host,
+		Port:                port,
+		DatabasePath:        dbPath,
+		JWTSecret:           loadJWTSecret(v, dataDir),
+		InitialPassword:     initialPassword,
+		APIKeySecret:        apiKeySecret,
+		MachineIDSalt:       machineIDSalt,
+		RTKEnabled:          rtkEnabled,
+		CavemanEnabled:      cavemanEnabled,
+		PonytailEnabled:     ponytailEnabled,
+		ADHDEnabled:         adhdEnabled,
+		SeatAttemptBudgetMs: seatAttemptBudgetMs,
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	internalproxy "9router/proxy/internal/proxy"
 	"9router/proxy/internal/proxy/oauth"
 	"9router/proxy/internal/translator"
+	"9router/proxy/internal/updater"
 )
 
 // CredentialFallbacks maps search/tool providers to the primary chat provider whose API key can be reused.
@@ -241,6 +242,7 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 	var conn *models.ProviderConnection
 	var err error
 	isProbe := handlerutil.IsProbeContext(ctx)
+	serviceKind := handlerutil.GetServiceKind(ctx)
 
 	if connectionID != "" {
 		conn, err = h.Repo.GetProviderConnectionByID(connectionID)
@@ -263,11 +265,22 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 		// row never matches and the request falls through to the configured
 		// strategy. Honouring the pin unconditionally made the dashboard's
 		// enable/disable toggle a no-op for every pinned request.
-		ineligible, reason := h.pinnedConnectionIneligible(conn, excludeIDs, model)
+		ineligible, reason := h.pinnedConnectionIneligible(conn, excludeIDs, model, serviceKind)
 		if ineligible && isProbe && conn.IsActive == 1 && !slices.Contains(excludeIDs, conn.ID) {
-			if strings.HasPrefix(reason, "account cooldown") || strings.HasPrefix(reason, "model lock") || reason == "quota cache" {
+			// A reauth_required account whose park has run out returns as a
+			// normal probe candidate; while parked it stays ineligible.
+			parked := false
+			if db.ConnectionRequiresReauth(conn.Data) {
+				if until, ok := db.ConnectionOAuthLockUntil(conn.Data); ok && until.After(time.Now()) {
+					parked = true
+				}
+			}
+			if !parked &&
+				(strings.HasPrefix(reason, "account cooldown") || strings.HasPrefix(reason, "model lock") || reason == "quota cache") {
 				// Probes bypass cooldown / locks to test actual upstream reachability,
 				// but must still honor model enablement, disabled accounts, and strict assignment.
+				// A parked dead grant stays ineligible even under a probe: the
+				// upstream answer is already known (401 invalid access token).
 				ineligible = false
 			}
 		}
@@ -338,6 +351,17 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 			return nil, nil, fmt.Errorf("no connection for provider %s has model %s enabled", provider, model)
 		}
 
+		// Service-kind and media eligibility filter: connections with
+		// media disabled are excluded from media requests (image, video,
+		// tts, stt, embedding, search, fetch). Text chat requests (empty
+		// serviceKind) keep all active connections.
+		if serviceKind != "" {
+			connections = filterConnectionsForServiceKind(connections, serviceKind)
+			if len(connections) == 0 {
+				return nil, nil, fmt.Errorf("no active connections for provider: %s", provider)
+			}
+		}
+
 		// Node state before rotation: a node whose contract has ended, or whose
 		// lifetime token quota is spent, must not receive the request at all — and
 		// the verdict comes from the same helper the dispatch path asks, so a node
@@ -351,56 +375,115 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 			return nil, nil, h.providerLimitError(ctx, provider, refusal)
 		}
 
-		// Rotate only connections eligible for the requested model.
-		if len(connections) > 1 && settingsErr == nil && settings != nil {
-			strat := connRotationStrategy(settings, provider)
-			if strat.RotateStrategy != "" && strat.RotateStrategy != "none" {
-				connections = h.applyConnectionStrategy(connections, strat)
-			}
-		}
-
 		excludeSet := make(map[string]bool, len(excludeIDs))
 		for _, id := range excludeIDs {
 			excludeSet[id] = true
 		}
 
+		sessionID := handlerutil.GetSessionID(ctx)
 		conn = nil
 		var cooldownUntil time.Time
 		var inCooldown []*models.ProviderConnection
 		now := time.Now()
-		for _, c := range connections {
-			if excludeSet[c.ID] {
-				continue
-			}
-			// The strategy sweep reorders the whole candidate list, so the
-			// account filter runs again on the row actually reached.
-			if !codexAccountServesModel(c, model) {
-				continue
-			}
-			// Per-model lock and quota cache first: an account parked for
-			// this model carries no cooldown to shorten, so it must not enter
-			// the forced pool either (h.connectionModelBlocked).
-			if !isProbe {
-				if h.connectionModelBlocked(c, provider, model) {
-					continue
-				}
-				// Account-scoped cooldown. An account whose quota is spent, or
-				// whose OAuth grant the provider already rejected, is skipped
-				// before it is selected — round-robin otherwise kept handing out
-				// dead accounts until a live 429/401 locked them, and a rejected
-				// grant cost a token-endpoint call on every request until the IP
-				// was rate limited. Upstream parity: filterAvailableAccounts.
-				if until, ok := db.ConnectionBlockedUntil(c.Data); ok && until.After(now) {
-					inCooldown = append(inCooldown, c)
-					if cooldownUntil.IsZero() || until.Before(cooldownUntil) {
-						cooldownUntil = until
-					}
-					continue
-				}
-			}
-			conn = c
-			break
+
+		var strat db.ProviderStrategy
+		hasStrat := false
+		affinityEligible := false
+		if settingsErr == nil && settings != nil {
+			strat = connRotationStrategy(settings, provider)
+			hasStrat = strat.RotateStrategy != "" && strat.RotateStrategy != "none"
+			affinityEligible = isAffinityEligibleStrategy(strat.RotateStrategy)
 		}
+
+		// Check session affinity if rotation is configured and a session is identified
+		if !isProbe && sessionID != "" && affinityEligible {
+			if boundID, ok := h.getSessionAffinity().Get(provider, model, sessionID); ok && boundID != "" {
+				var boundConn *models.ProviderConnection
+				for _, c := range connections {
+					if c.ID == boundID {
+						boundConn = c
+						break
+					}
+				}
+				if boundConn != nil && !excludeSet[boundConn.ID] && codexAccountServesModel(boundConn, model) {
+					if serviceKind == "" || boundConn.IsMediaActive(serviceKind) {
+						if !h.connectionModelBlocked(boundConn, provider, model) {
+							if until, ok := db.ConnectionBlockedUntil(boundConn.Data); !ok || !until.After(now) {
+								conn = boundConn
+							}
+						}
+					}
+				}
+				// If bound connection is no longer eligible (in cooldown, blocked, or not in candidate list),
+				// evict the dead binding so rotation can advance to an eligible account.
+				if conn == nil {
+					h.getSessionAffinity().Evict(provider, model, sessionID)
+				}
+			}
+		}
+
+		if conn == nil {
+			// Rotate only connections eligible for the requested model.
+			// New session distribution uses round-robin with effective stickyLimit = 1 across
+			// candidate accounts so distinct sessions alternate evenly.
+			if len(connections) > 1 && hasStrat {
+				effectiveStrat := strat
+				if sessionID != "" && affinityEligible {
+					effectiveStrat.StickyLimit = 1
+				}
+				connections = h.applyConnectionStrategy(connections, effectiveStrat)
+			}
+
+			for _, c := range connections {
+				if excludeSet[c.ID] {
+					continue
+				}
+				// The strategy sweep reorders the whole candidate list, so the
+				// account filter runs again on the row actually reached.
+				if !codexAccountServesModel(c, model) {
+					continue
+				}
+				// Per-model lock and quota cache first: an account parked for
+				// this model carries no cooldown to shorten, so it must not enter
+				// the forced pool either (h.connectionModelBlocked).
+				// A parked dead grant is terminal only while its park is active:
+				// once oauthLockedUntil runs out the account returns as a
+				// normal candidate (the park is a cooldown, not a disable).
+				// While parked even a probe (which otherwise bypasses cooldowns
+				// to test live reachability) must not re-pick it — the upstream
+				// answer is already known (401 invalid token).
+				if db.ConnectionRequiresReauth(c.Data) {
+					if until, ok := db.ConnectionOAuthLockUntil(c.Data); ok && until.After(now) {
+						inCooldown = append(inCooldown, c)
+						if cooldownUntil.IsZero() || until.Before(cooldownUntil) {
+							cooldownUntil = until
+						}
+						continue
+					}
+				}
+				if !isProbe {
+					if h.connectionModelBlocked(c, provider, model) {
+						continue
+					}
+					// Account-scoped cooldown. An account whose quota is spent, or
+					// whose OAuth grant the provider already rejected, is skipped
+					// before it is selected — round-robin otherwise kept handing out
+					// dead accounts until a live 429/401 locked them, and a rejected
+					// grant cost a token-endpoint call on every request until the IP
+					// was rate limited. Upstream parity: filterAvailableAccounts.
+					if until, ok := db.ConnectionBlockedUntil(c.Data); ok && until.After(now) {
+						inCooldown = append(inCooldown, c)
+						if cooldownUntil.IsZero() || until.Before(cooldownUntil) {
+							cooldownUntil = until
+						}
+						continue
+					}
+				}
+				conn = c
+				break
+			}
+		}
+
 		if conn == nil && forceFallbackEnabled(settings) {
 			// The operator asked for traffic to keep flowing while every
 			// account is cooling down, so take the account that frees up
@@ -412,6 +495,11 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 				log.Warn("connections", "all accounts in cooldown, forcing the soonest to reset",
 					"provider", provider, "conn", forced.ID, "reset", until.UTC().Format(time.RFC3339))
 			}
+		}
+
+		// Optimistically bind session to the selected connection
+		if conn != nil && !isProbe && sessionID != "" && affinityEligible {
+			h.getSessionAffinity().Bind(provider, model, sessionID, conn.ID)
 		}
 		if conn == nil {
 			// Every candidate was in cooldown, so say when the first one comes
@@ -510,7 +598,7 @@ func (h *ChatHandler) applyProviderProxyPool(connData *ConnectionData, provider 
 // before it looks for a preferred connection (src/sse/services/auth.js:100-148):
 // disabled rows, explicitly excluded rows, active model locks, and connections
 // the provider's strict model assignment does not bind to this model.
-func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection, excludeIDs []string, model string) (bool, string) {
+func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection, excludeIDs []string, model string, serviceKind ...string) (bool, string) {
 	if conn == nil {
 		return true, "nil connection"
 	}
@@ -519,6 +607,12 @@ func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection
 	}
 	if slices.Contains(excludeIDs, conn.ID) {
 		return true, "excluded"
+	}
+	if len(serviceKind) > 0 && serviceKind[0] != "" {
+		kind := serviceKind[0]
+		if !conn.IsMediaActive(kind) {
+			return true, "media disabled for " + kind
+		}
 	}
 	if until, ok := db.ConnectionBlockedUntil(conn.Data); ok && until.After(time.Now()) {
 		return true, "account cooldown until " + until.UTC().Format(time.RFC3339)
@@ -594,6 +688,20 @@ func filterConnectionsByEnabledModels(provider string, conns []*models.ProviderC
 	return kept
 }
 
+// filterConnectionsForServiceKind keeps only connections whose media capability allows serviceKind.
+func filterConnectionsForServiceKind(conns []*models.ProviderConnection, serviceKind string) []*models.ProviderConnection {
+	if serviceKind == "" {
+		return conns
+	}
+	out := make([]*models.ProviderConnection, 0, len(conns))
+	for _, c := range conns {
+		if c != nil && c.IsMediaActive(serviceKind) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // quotaCacheBlocked reports whether a provider's in-memory quota cache says
 // this connection must not serve the request. Each provider keeps its own
 // cache, so this dispatches per provider and never crosses them (AGENTS.md
@@ -613,6 +721,18 @@ func quotaCacheBlocked(provider, connectionID, model string) bool {
 	return false
 }
 
+func (h *ChatHandler) getSessionAffinity() *SessionAffinityStore {
+	if h == nil {
+		return nil
+	}
+	h.sessionAffinityMu.Lock()
+	defer h.sessionAffinityMu.Unlock()
+	if h.SessionAffinity == nil {
+		h.SessionAffinity = NewSessionAffinityStore(10000, 2*time.Hour)
+	}
+	return h.SessionAffinity
+}
+
 // GetProviderConfig returns the upstream configuration for a provider.
 func (h *ChatHandler) GetProviderConfig(provider string, connData *ConnectionData) (*providers.ProviderConfig, error) {
 	return h.getProviderConfig(provider, connData)
@@ -627,7 +747,10 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		// field is typed as "http://192.168.1.10:11434"), and a host alone names
 		// no route, so the POST used to land on the server root. A URL that
 		// already names a route is passed through untouched.
-		baseURL := chatCompletionsURL(connData.BaseURL)
+		//
+		// A custom node's baseUrl is a PREFIX rather than an endpoint the
+		// operator named, so it is completed by a different rule (#768).
+		baseURL := CompatibleNodeLaneURL(provider, connectionAPIType(connData), connData.BaseURL)
 		if cfg, ok := providers.KnownProviders[provider]; ok {
 			cloned := cfg
 			cloned.BaseURL = baseURL
@@ -650,7 +773,7 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		}
 		if node != nil && nodeData != nil && nodeData.BaseURL != "" {
 			baseCfg = &providers.ProviderConfig{
-				BaseURL:    chatCompletionsURL(nodeData.BaseURL),
+				BaseURL:    CompatibleNodeLaneURL(provider, nodeData.APIType, nodeData.BaseURL),
 				AuthHeader: constants.HeaderAuthorization,
 				AuthScheme: constants.AuthSchemeBearer,
 			}
@@ -697,56 +820,267 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		}
 	}
 
-	// Check if this connection uses an Edge Relay Proxy Pool (Vercel, Cloudflare, Deno)
+	// A compatible node's wire format comes from the same table its lane comes
+	// from (providers.CompatibleNodeWires), so the two cannot drift apart —
+	// that drift was the "no choices in OpenAI response" bug: the lane sent
+	// the request to /messages while the format machinery still treated the
+	// upstream as Chat Completions.
+	if format := compatibleNodeFormat(provider); format != "" && baseCfg.Format == "" {
+		cloned := *baseCfg
+		cloned.Format = format
+		baseCfg = &cloned
+	}
+
+	// An edge relay pool (vercel/cloudflare/deno/netlify) is not a CONNECT proxy:
+	// it forwards on x-relay-target / x-relay-path. It used to be applied here by
+	// rewriting BaseURL to the relay host and stamping those headers into
+	// StaticHeaders, which made relay support a per-provider convention — every
+	// executor that built its own request had to re-apply it by hand, and the
+	// ones that did not (trae, zed, windsurf, the embeddings lane) leaked the
+	// operator's real IP or sent a provider path to the relay's root.
+	//
+	// The relay now travels with the connection's client (proxy.RelayTransport),
+	// which moves the dial and names the URL the caller actually built. BaseURL
+	// therefore stays the real provider endpoint, and this function only records
+	// which relay fronts the connection so an executor can opt out of a transport
+	// the relay cannot carry.
 	if connData != nil {
-		var relayURL string
-		var noProxy string
-
-		if connData.ProxyPoolID != "" {
-			if pool, err := h.Repo.GetProxyPool(connData.ProxyPoolID); err == nil && pool != nil && pool.IsActive {
-				if pool.IsEdgeRelay() {
-					relayURL = pool.NextURL()
-					noProxy = pool.NoProxy
-					logProxyOnce(connData.ProxyPoolID, relayURL, pool.Type)
-				}
-			}
-		}
-		if relayURL == "" && connData.ProviderSpecificData != nil {
-			if u, ok := connData.ProviderSpecificData["vercelRelayUrl"].(string); ok && u != "" {
-				relayURL = u
-				if np, ok := connData.ProviderSpecificData["connectionNoProxy"].(string); ok {
-					noProxy = np
-				}
-			}
-		}
-
+		relayURL, noProxy := h.resolveEdgeRelay(connData)
 		if relayURL != "" && !internalproxy.ShouldBypassNoProxy(baseCfg.BaseURL, noProxy) {
 			cloned := *baseCfg
-			cloned.StaticHeaders = internalproxy.BuildEdgeRelayHeaders(baseCfg.BaseURL, cloned.StaticHeaders)
-			cloned.BaseURL = relayURL
-			return h.applyProviderOverrides(provider, &cloned), nil
+			cloned.RelayURL = relayURL
+			baseCfg = &cloned
 		}
 	}
 
-	return h.applyProviderOverrides(provider, baseCfg), nil
+	// Stamp the pool this connection routed through onto the config, so
+	// resilienceProxyKey reads it back and the breaker and semaphore key on
+	// provider+pool rather than on the provider alone.
+	//
+	// Without this the egress component was always "direct": nothing in the
+	// production path recorded the pool, only tests fabricated it, so one dead
+	// pool still opened the provider's single breaker and took every other
+	// egress with it.
+	//
+	// This is a field on ProviderConfig rather than a HeaderOverrides entry,
+	// which is where it used to be expected to live: that map is applied to the
+	// outbound request (internal/proxy/openai.go), so an internal key written
+	// there is sent to every upstream provider. It follows RelayURL — a
+	// gateway-internal value the executors read, never one they forward.
+	if connData != nil && connData.ProxyPoolID != "" {
+		cloned := *baseCfg
+		cloned.ProxyPoolID = connData.ProxyPoolID
+		baseCfg = &cloned
+	}
+	return h.applyProviderOverrides(provider, h.withClineIdentity(provider, baseCfg)), nil
 }
 
-// chatCompletionsURL completes a configured endpoint into the chat-completions
+// resolveEdgeRelay returns the edge relay an assigned pool puts in front of a
+// connection, plus the pool's noProxy list. An inactive or non-relay pool
+// answers "", which leaves the request direct.
+func (h *ChatHandler) resolveEdgeRelay(connData *ConnectionData) (relayURL, noProxy string) {
+	if connData.ProxyPoolID != "" && h.Repo != nil {
+		if pool, err := h.Repo.GetProxyPool(connData.ProxyPoolID); err == nil && pool != nil && pool.IsActive {
+			if pool.IsEdgeRelay() {
+				relayURL = pool.NextURL()
+				noProxy = pool.NoProxy
+				logProxyOnce(connData.ProxyPoolID, relayURL, pool.Type)
+			}
+		}
+	}
+	if relayURL == "" && connData.ProviderSpecificData != nil {
+		if u, ok := connData.ProviderSpecificData["vercelRelayUrl"].(string); ok && u != "" {
+			relayURL = u
+			if np, ok := connData.ProviderSpecificData["connectionNoProxy"].(string); ok {
+				noProxy = np
+			}
+		}
+	}
+	return relayURL, noProxy
+}
+
+// withClineIdentity stamps the 9Router client identity onto cline/clinepass
+// configs (upstream buildClineHeaders). The version comes from the linked
+// binary; the registry literal cannot carry it (import cycle), so it is
+// applied here per request on the already-cloned config.
+func (h *ChatHandler) withClineIdentity(provider string, cfg *providers.ProviderConfig) *providers.ProviderConfig {
+	if cfg == nil || (provider != "cline" && provider != "clinepass") {
+		return cfg
+	}
+	cloned := *cfg
+	cloned.StaticHeaders = providers.ClineIdentityHeaders(updater.CurrentVersion, cfg.StaticHeaders)
+	return &cloned
+}
+
+// compatibleNodeLaneURL completes a custom provider node's baseUrl into the
+// lane its node type and apiType name, and leaves a URL that already names a
+// lane untouched.
+//
+// Upstream treats a node's baseUrl as a PREFIX and appends the lane
+// unconditionally (open-sse/executors/base.js buildUrl: `${normalized}${path}`,
+// with the path chosen by resolveOpenAICompatibleApiType). A node pointed at
+// https://developer.amd.com.cn/radeon/api/v1 therefore reaches
+// /radeon/api/v1/chat/completions there, while this port dialled the base URL
+// itself and the upstream answered 404 (#768).
+//
+// chatCompletionsURL cannot serve this case: it leaves a multi-segment path
+// alone, which is correct for the Ollama Local host field — an endpoint the
+// operator typed — and wrong for a node, whose baseUrl is a prefix by contract.
+// The two rules stay separate for that reason. The bare-host and /v1 shapes
+// resolve exactly as they did through chatCompletionsURL, so a node that
+// already worked keeps the URL it had.
+func CompatibleNodeLaneURL(provider, apiType, baseURL string) string {
+	if !isCompatibleNodeProvider(provider) {
+		return ChatCompletionsURL(baseURL)
+	}
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		return baseURL
+	}
+	// A base URL that already names a lane is used as-is: appending a second
+	// one would produce the same 404 this function exists to remove, and a node
+	// created before this rule may store the full route.
+	for _, lane := range compatibleNodeLanes {
+		if strings.HasSuffix(base, lane) {
+			return base
+		}
+	}
+	lane := compatibleNodeLane(provider, apiType)
+	// A URL naming no path, or only a version prefix, still needs the /v1 that
+	// makes the prefix an API root — the same completion chatCompletionsURL
+	// applies to the Ollama Local host field.
+	if compatibleNodeNeedsVersionPrefix(base) {
+		return base + "/v1" + lane
+	}
+	return base + lane
+}
+
+// compatibleNodeNeedsVersionPrefix reports whether a base URL carries no path
+// beyond its authority, so the /v1 prefix is still missing.
+func compatibleNodeNeedsVersionPrefix(base string) bool {
+	_, rest, found := strings.Cut(base, "://")
+	if !found {
+		return true
+	}
+	_, path, _ := strings.Cut(rest, "/")
+	return strings.Trim(path, "/") == ""
+}
+
+// compatibleNodeLanes are the routes a custom node baseUrl may already name.
+// A base ending in one of them is an endpoint, not a prefix. The list is the
+// parent's chatCompletionsURL route table rather than only the three lanes this
+// function appends: a node that already stored /v1/chat, /v1/completions or an
+// Ollama-shaped /api/chat was dialled as configured before this rule existed,
+// and appending a lane behind one of those would turn a working node into a
+// doubled path.
+var compatibleNodeLanes = []string{
+	"/chat/completions", "/messages", "/responses", "/completions",
+	"/chat", "/embeddings", "/api/chat", "/api/generate",
+}
+
+// compatibleNodeLane is the route a node of this type and apiType serves,
+// read from providers.CompatibleNodeWires — the same table getProviderConfig
+// stamps the wire format from, so the lane a request dials and the format the
+// translators speak can never disagree again. An openai-compatible node picks
+// between Chat Completions and Responses from its apiType — the same mapping
+// upstream's buildUrl applies, including its fallback: when no apiType is
+// stored, upstream reads the node id (resolveOpenAICompatibleApiType returns
+// "responses" for a provider id containing "responses"). A connection row
+// written before the apiType sync landed carries no apiType, and a responses
+// node created then has only its id to say so.
+//
+// A custom-embedding node's declared lane is the chat route: the embeddings
+// handler derives its own URL from this one (buildEmbeddingsURL swaps
+// /chat/completions for /embeddings), so producing /embeddings here would
+// append it twice.
+func compatibleNodeLane(provider, apiType string) string {
+	wire, ok := nodeWireOf(provider)
+	if !ok {
+		// Not a node id: the caller (compatibleNodeLaneURL) guards this, and
+		// chatCompletionsURL's shape rule is the historical default.
+		return "/chat/completions"
+	}
+	if compatibleNodeFormat(provider) == "" {
+		switch {
+		case apiType == compatibleAPITypeResponses:
+			return "/responses"
+		case apiType == "" && strings.Contains(provider, compatibleAPITypeResponses):
+			return "/responses"
+		}
+	}
+	return wire.Lane
+}
+
+// compatibleAPITypeResponses is the stored apiType of an openai-compatible node
+// whose upstream speaks the Responses API (upstream resolveOpenAICompatibleApiType).
+const compatibleAPITypeResponses = "responses"
+
+// nodeWireOf returns the wire contract of the custom node type behind a
+// provider id ("anthropic-compatible-<id>" → the "anthropic-compatible"
+// entry) and whether the id is a compatible node at all. The map's keys are
+// mutually exclusive prefixes, so the match is deterministic.
+func nodeWireOf(provider string) (providers.NodeWire, bool) {
+	for nodeType, wire := range providers.CompatibleNodeWires {
+		if strings.HasPrefix(provider, nodeType+"-") {
+			return wire, true
+		}
+	}
+	return providers.NodeWire{}, false
+}
+
+// isCompatibleNodeProvider reports whether a provider id belongs to a custom
+// endpoint the operator registered, matching the node shapes the create
+// handler composes (provider_node_id.go) — derived from
+// providers.CompatibleNodeWires so detection cannot outgrow the wire table.
+func isCompatibleNodeProvider(provider string) bool {
+	_, ok := nodeWireOf(provider)
+	return ok
+}
+
+// compatibleNodeFormat reports the format a custom node's upstream speaks
+// ("" = OpenAI Chat Completions).
+func compatibleNodeFormat(provider string) string {
+	wire, ok := nodeWireOf(provider)
+	if !ok {
+		return ""
+	}
+	return wire.Format
+}
+
+// connectionAPIType reads the apiType the dashboard stores on a compatible
+// node's connection, which is kept in sync with the node on create and update.
+// An absent value means Chat Completions, the same default upstream applies.
+func connectionAPIType(connData *ConnectionData) string {
+	if connData == nil || connData.ProviderSpecificData == nil {
+		return ""
+	}
+	apiType, _ := connData.ProviderSpecificData["apiType"].(string)
+	return apiType
+}
+
+// ChatCompletionsURL completes a configured endpoint into the chat-completions
 // route, and leaves one that already names a route untouched.
+//
+// Exported because the dashboard's node/key probes run the same request the
+// chat path will run, and a probe that completes the base URL differently
+// reports a working node as broken (or the reverse).
 //
 // A configured endpoint arrives in one of two shapes: the full route, or a bare
 // host — the compatible-node baseUrl and the Ollama Local host field both take
-// this form, and a dotted IP is the common case
-// ("http://192.168.1.10:11434"). A bare host names no route upstream, so the
-// gateway's /v1 is what makes it a chat endpoint.
+// this form, and a dotted IP is the common case ("http://192.168.1.10:11434").
+// A bare host names no route upstream, so the gateway's /v1 is what makes it a
+// chat endpoint.
 //
 // Detection is by shape, not by guessing whether the last path segment looks
 // like a filename: an early version did that and exempted exactly the dotted-IP
-// host it existed to fix. A URL whose path is only a version prefix (/v1, and
-// the /v1beta Google uses) is that prefix plus the route; a path that carries
-// any segment beyond it is taken to be an endpoint the operator named, and is
-// left alone rather than having /v1 appended behind it.
-func chatCompletionsURL(baseURL string) string {
+// host it existed to fix. A URL whose path ends in a version prefix (/v1, and
+// the /v1beta Google uses) is that prefix plus the route. The version may sit
+// behind a vendor segment — an OpenAI-compatible provider publishes its base as
+// "https://anyrouter.dev/api/v1" — so the trailing segment decides, not the
+// whole path; a path that ends in any other segment is taken to be an endpoint
+// the operator chose, and is left alone rather than having /v1 appended behind
+// it.
+func ChatCompletionsURL(baseURL string) string {
 	url := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if url == "" {
 		return baseURL
@@ -759,24 +1093,30 @@ func chatCompletionsURL(baseURL string) string {
 			return url
 		}
 	}
-	// Split off the scheme and authority, then decide from the path alone: no
-	// path at all, or only a version prefix, means nothing named an endpoint and
-	// the route is appended to the prefix that is there.
+	// Split off the scheme and authority, then decide from the path's last
+	// segment: no path at all, or a path ending in a version prefix, means
+	// nothing named an endpoint and the route is appended behind the prefix
+	// that is there.
 	_, rest, found := strings.Cut(url, "://")
 	if !found {
 		return url + "/v1/chat/completions"
 	}
 	_, path, _ := strings.Cut(rest, "/")
-	switch trimmed := strings.Trim(path, "/"); {
+	trimmed := strings.Trim(path, "/")
+	last := ""
+	if trimmed != "" {
+		last = trimmed[strings.LastIndex(trimmed, "/")+1:]
+	}
+	switch {
 	case trimmed == "":
 		return url + "/v1/chat/completions"
-	case isVersionPrefix(trimmed):
-		// Already versioned ("https://host/v1"): the lane is the prefix plus the
-		// route, not a second prefix.
+	case isVersionPrefix(last):
+		// Already versioned ("https://host/v1", "https://host/api/v1"): the
+		// lane is the prefix plus the route, not a second prefix.
 		return url + "/chat/completions"
 	default:
-		// A path carrying a segment beyond the prefix names an endpoint the
-		// operator chose; appending behind it would only produce a 404.
+		// A path ending in a named segment is an endpoint the operator chose;
+		// appending behind it would only produce a 404.
 		return url
 	}
 }
@@ -806,11 +1146,20 @@ func isDigits(s string) bool {
 // applyProviderOverrides merges the operator's stored header overrides for a
 // provider into a per-request config.
 //
-// This is the single injection point on purpose: every executor builds its
-// outbound headers from cfg.StaticHeaders, so merging here reaches all of
-// them without each one learning the feature. It is also after the relay
-// rewrite, so a relay's own headers are on the table the override wins over —
-// which is what upstream's executor-level merge does too.
+// This is the single injection point: every executor builds its outbound
+// headers from cfg, so merging here reaches all of them without each one
+// learning the feature. It is also after the relay rewrite, so a relay's own
+// headers are on the table the override wins over — which is what upstream's
+// executor-level merge does too.
+//
+// The overrides are recorded twice, on purpose. Folding them into
+// StaticHeaders is what every forwarder already reads, so nothing that builds
+// its own header map from that field changes behaviour. Carrying them in
+// HeaderOverrides as well lets a forwarder that assembles the map itself
+// (CodeBuddy rebuilds the full channel-verification set) re-apply them after
+// its own values, which is the order upstream uses
+// (open-sse/executors/base.js:132). Without the second copy such an executor
+// silently replaces an override the dashboard accepted.
 func (h *ChatHandler) applyProviderOverrides(provider string, cfg *providers.ProviderConfig) *providers.ProviderConfig {
 	if cfg == nil || h.Repo == nil {
 		return cfg
@@ -821,6 +1170,7 @@ func (h *ChatHandler) applyProviderOverrides(provider string, cfg *providers.Pro
 	}
 	merged := *cfg
 	merged.StaticHeaders = providers.MergeHeaderOverrides(cfg.StaticHeaders, stored.Headers)
+	merged.HeaderOverrides = stored.Headers
 	return &merged
 }
 

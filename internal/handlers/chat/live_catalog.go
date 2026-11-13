@@ -17,7 +17,9 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
+	"9router/proxy/internal/constants"
 	"9router/proxy/internal/handlers/shared"
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
@@ -33,6 +35,7 @@ import (
 
 const (
 	liveCatalogTTL       = 5 * time.Minute
+	liveCatalogNegTTL    = 60 * time.Second
 	liveCatalogFastHTTP  = 10 * time.Second
 	kiroCatalogHTTP      = 30 * time.Second
 	kiroRuntimeSDKVer    = "1.0.0"
@@ -106,11 +109,31 @@ var liveCatalogStore = struct {
 // node) before the first result populates the cache.
 var liveCatalogFlight singleflight.Group
 
+// pinnedEnabledModels reports whether the operator pinned a model list on the
+// connection. Such a connection already publishes exactly that list, so a live
+// catalog cannot add anything — and fetching it once per combo leaf is what made
+// /v1/models take minutes at thousands of connections.
+func pinnedEnabledModels(cd *shared.ConnectionData) bool {
+	if cd == nil || cd.ProviderSpecificData == nil {
+		return false
+	}
+	switch v := cd.ProviderSpecificData["enabledModels"].(type) {
+	case []any:
+		return len(v) > 0
+	case []string:
+		return len(v) > 0
+	}
+	return false
+}
+
 // resolveLiveCatalog returns the live catalog for a provider connection, or nil
 // when the provider has no live resolver or discovery failed. Callers fall back
 // to the static registry, exactly like upstream's `live?.models?.length` guard.
 func (h *ChatHandler) resolveLiveCatalog(ctx context.Context, conn *models.ProviderConnection, connData *shared.ConnectionData, providerID string) []LiveModel {
 	if conn == nil || connData == nil {
+		return nil
+	}
+	if pinnedEnabledModels(connData) {
 		return nil
 	}
 	accessToken := connData.AccessToken
@@ -147,6 +170,10 @@ func (h *ChatHandler) resolveLiveCatalog(ctx context.Context, conn *models.Provi
 		fetch = func(ctx context.Context, _ string) []LiveModel {
 			return h.fetchCompatibleNodeModels(ctx, conn, connData, providerID)
 		}
+	case providerID == "anthropic":
+		fetch = func(ctx context.Context, token string) []LiveModel {
+			return h.fetchAnthropicLiveCatalog(ctx, conn, connData, token)
+		}
 	default:
 		return nil
 	}
@@ -180,6 +207,11 @@ func (h *ChatHandler) resolveLiveCatalog(ctx context.Context, conn *models.Provi
 			}
 		}
 		if len(discovered) == 0 {
+			// Negative cache: a provider whose catalog endpoint times out used to be
+			// re-fetched by every combo leaf (liveCapabilityLeaf) because nothing was
+			// stored for a failure. At thousands of connections that turned
+			// /v1/models into minutes of sequential 10s timeouts.
+			liveCatalogStoreNegative(cacheKey)
 			return nil, nil
 		}
 		liveCatalogStoreModels(cacheKey, discovered)
@@ -235,6 +267,29 @@ func liveCatalogStoreModels(key string, discovered []LiveModel) {
 	liveCatalogStore.mu.Lock()
 	defer liveCatalogStore.mu.Unlock()
 	liveCatalogStore.entries[key] = liveCatalogEntry{expiresAt: time.Now().Add(liveCatalogTTL), models: discovered}
+}
+
+func liveCatalogStoreNegative(key string) {
+	liveCatalogStore.mu.Lock()
+	defer liveCatalogStore.mu.Unlock()
+	liveCatalogStore.entries[key] = liveCatalogEntry{expiresAt: time.Now().Add(liveCatalogNegTTL)}
+}
+
+// InvalidateLiveCatalog purges cached live catalog entries for a provider.
+// If providerID is empty, it purges all cached entries.
+func InvalidateLiveCatalog(providerID string) {
+	liveCatalogStore.mu.Lock()
+	defer liveCatalogStore.mu.Unlock()
+	if providerID == "" {
+		liveCatalogStore.entries = make(map[string]liveCatalogEntry)
+		return
+	}
+	prefix := providerID + "|"
+	for k := range liveCatalogStore.entries {
+		if k == providerID || strings.HasPrefix(k, prefix) {
+			delete(liveCatalogStore.entries, k)
+		}
+	}
 }
 
 // ---- Kiro (AWS CodeWhisperer ListAvailableModels) ----
@@ -445,8 +500,20 @@ func (h *ChatHandler) fetchCompatibleNodeModels(ctx context.Context, conn *model
 	if apiKey == "" {
 		apiKey = connData.AccessToken
 	}
-	baseURL, _ := connData.ProviderSpecificData["baseUrl"].(string)
+	baseURL := strings.TrimSpace(connData.BaseURL)
+	if baseURL == "" {
+		baseURL, _ = connData.ProviderSpecificData["baseUrl"].(string)
+	}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		// A compatible node keeps its endpoint on the node row, not on every
+		// connection: adding a key under a node asks for the credential alone.
+		// Without this lookup the catalogue request had no URL to call, so a
+		// node that was configured and working never published a live list.
+		if _, nodeData, err := h.Repo.GetProviderNodeByID(providerID); err == nil && nodeData != nil {
+			baseURL = strings.TrimRight(strings.TrimSpace(nodeData.BaseURL), "/")
+		}
+	}
 	if apiKey == "" || baseURL == "" {
 		return nil
 	}
@@ -455,6 +522,7 @@ func (h *ChatHandler) fetchCompatibleNodeModels(ctx context.Context, conn *model
 	switch {
 	case strings.HasPrefix(providerID, "openai-compatible-"):
 		headers["Authorization"] = "Bearer " + apiKey
+		baseURL = CompatibleNodeModelsURL(baseURL)
 	case strings.HasPrefix(providerID, "anthropic-compatible-"):
 		baseURL = strings.TrimSuffix(baseURL, "/messages/models")
 		if !strings.HasSuffix(baseURL, "/messages") {
@@ -475,7 +543,7 @@ func (h *ChatHandler) fetchCompatibleNodeModels(ctx context.Context, conn *model
 	if err != nil {
 		return nil
 	}
-	for key, value := range headers {
+	for key, value := range handlerutil.WithDefaultUserAgent(headers) {
 		req.Header.Set(key, value)
 	}
 	resp, err := h.Client.Do(req)
@@ -520,6 +588,28 @@ func parseOpenAIStyleModelIDs(body []byte) []LiveModel {
 		out = append(out, LiveModel{ID: id})
 	}
 	return out
+}
+
+// CompatibleNodeModelsURL derives a compatible node's catalogue endpoint from
+// the same completed chat route a request uses, so both routes sit on the
+// prefix the operator configured. Appending a fixed "/v1/models" instead
+// doubled the version in AnyRouter's documented base
+// (https://anyrouter.dev/api/v1 became /api/v1/v1/models) while a bare host
+// was asked for /models even though its chat route gains /v1 — neither is the
+// models route belonging to the chat endpoint beside it.
+//
+// Exported because the dashboard's "Import from /models" fetch asks the same
+// question for the same node, and its answer must agree with the live
+// catalogue's.
+func CompatibleNodeModelsURL(baseURL string) string {
+	completed := ChatCompletionsURL(baseURL)
+	if route := strings.TrimSuffix(completed, "/chat/completions"); route != completed {
+		return route + "/models"
+	}
+	// A URL that names its own endpoint is left untouched by
+	// ChatCompletionsURL; that endpoint keeps its own /models child, which is
+	// what this call did before the derivation existed.
+	return strings.TrimRight(completed, "/") + "/models"
 }
 
 // parseGrokCLILiveModels mirrors upstream parseGrokCliModels: the catalog may
@@ -620,4 +710,70 @@ func firstPositiveInt(item map[string]any, keys ...string) int {
 		}
 	}
 	return 0
+}
+
+// ---- Anthropic ----
+
+// anthropicCatalogURL is the live catalog endpoint for the Anthropic provider.
+var anthropicCatalogURL = "https://api.anthropic.com/v1/models?limit=1000"
+
+// fetchAnthropicLiveCatalog ports upstream's Anthropic models listing: it calls
+// https://api.anthropic.com/v1/models with x-api-key and anthropic-version
+// headers, subject to a 10s timeout, and falls back to the static registry on
+// any error (empty result).
+func (h *ChatHandler) fetchAnthropicLiveCatalog(ctx context.Context, conn *models.ProviderConnection, connData *shared.ConnectionData, apiKey string) []LiveModel {
+	if apiKey == "" {
+		return nil
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, liveCatalogFastHTTP)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, anthropicCatalogURL, nil)
+	if err != nil {
+		log.Warn("models", "anthropic catalog request failed", "conn", conn.ID, "error", err)
+		return nil
+	}
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set(constants.HeaderUserAgent, constants.DefaultClientUserAgent)
+
+	resp, err := h.Client.Do(req)
+	if err != nil {
+		log.Warn("models", "anthropic catalog fetch failed", "conn", conn.ID, "error", err)
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		log.Warn("models", "anthropic catalog rejected", "conn", conn.ID, "status", resp.StatusCode)
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil
+	}
+	return parseAnthropicLiveModels(body)
+}
+
+// parseAnthropicLiveModels reads the Anthropic /v1/models response, whose model
+// entries live under `data` and expose `id`/`name`.
+func parseAnthropicLiveModels(body []byte) []LiveModel {
+	var payload struct {
+		Data []map[string]any `json:"data"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return nil
+	}
+
+	seen := make(map[string]bool, len(payload.Data))
+	out := make([]LiveModel, 0, len(payload.Data))
+	for _, entry := range payload.Data {
+		id := firstNonEmptyString(entry, "id", "name")
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, LiveModel{ID: id})
+	}
+	return out
 }

@@ -33,6 +33,7 @@ var ProviderAliasMap = map[string]string{
 	"ch":             "chutes",
 	"cl":             "cline",
 	"cmc":            "commandcode",
+	"cmc-goat":       "commandcode-goat",
 	"cp":             "clinepass",
 	"cu":             "cursor",
 	"cx":             "codex",
@@ -46,6 +47,8 @@ var ProviderAliasMap = map[string]string{
 	"fb":             "freebuff",
 	"fish":           "fish-audio",
 	"fl":             "featherless",
+	"fp":             "free-pi",
+	"freepi":         "free-pi",
 	"fw":             "fireworks",
 	"gb":             "grok-cli",
 	"gc":             "gemini-cli",
@@ -140,6 +143,9 @@ var ProviderAliasMap = map[string]string{
 	"ws":       "windsurf",
 	"xq":       "xquik",
 	"zd":       "zed",
+	"atmo":     "atmorouter",
+	"rc":       "runcrate",
+	"hc":       "hcnsec",
 }
 
 // ResolveAlias returns the canonical provider ID for an alias, or the alias itself if not found.

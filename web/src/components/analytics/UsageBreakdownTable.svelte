@@ -14,7 +14,13 @@
   } from './types'
   import { costIn } from '../../lib/currency.svelte'
 
-  let { stats = {} }: { stats?: StatsData } = $props()
+  interface Props {
+    stats?: StatsData
+    /** Custom provider nodes, so a synthetic id renders as its configured name. */
+    providerNodes?: { id: string; name?: string }[]
+  }
+
+  let { stats = {}, providerNodes = [] }: Props = $props()
 
   let tableView = $state<TableView>('model')
   let viewMode = $state<ViewMode>('costs')
@@ -31,6 +37,7 @@
     | 'promptTokens'
     | 'completionTokens'
     | 'cachedTokens'
+    | 'avgTps'
     | 'lastUsed'
 
   let sortKey = $state<SortKey>('requests')
@@ -65,7 +72,7 @@
       case 'provider':
         // byProvider is keyed by the provider id; the dashboard shows its
         // display name, so the column and the sort agree with what is drawn.
-        return providerDisplayName(key)
+        return providerDisplayName(key, providerNodes)
       default:
         return item.rawModel || key
     }
@@ -108,6 +115,8 @@
           return dir * ((a.completionTokens || 0) - (b.completionTokens || 0))
         case 'cachedTokens':
           return dir * ((a.cachedTokens || 0) - (b.cachedTokens || 0))
+        case 'avgTps':
+          return dir * (((a.avgTps ?? a.avgSpeed) || 0) - ((b.avgTps ?? b.avgSpeed) || 0))
         case 'lastUsed':
           // Timestamps are stored as ISO strings, so a lexical compare is a
           // chronological one. Rows without one (daily windows) sort last
@@ -240,6 +249,14 @@
                   </button>
                 </th>
               {/if}
+              {#if tableView === 'model'}
+                <th class="py-3 px-4" aria-sort={sortKey === 'avgTps' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <button type="button" class={headerClass('avgTps', 'right')} onclick={() => toggleSort('avgTps')}>
+                    Avg Speed
+                    <span class="text-[9px]">{arrow('avgTps')}</span>
+                  </button>
+                </th>
+              {/if}
               <th class="py-3 px-4" aria-sort={sortKey === 'lastUsed' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                 <button type="button" class={headerClass('lastUsed', 'right')} onclick={() => toggleSort('lastUsed')}>
                   Last Used
@@ -293,6 +310,16 @@
                   </td>
                   <td class="py-3 px-4 text-right font-mono text-info">
                     {fmt(row.cachedTokens)}
+                  </td>
+                {/if}
+                {#if tableView === 'model'}
+                  <td class="py-3 px-4 text-right font-mono font-medium text-text-main">
+                    {#if ((row.avgTps ?? row.avgSpeed) || 0) > 0}
+                      <span class="text-brand-500 font-semibold">{((row.avgTps ?? row.avgSpeed) as number).toFixed(1)}</span>
+                      <span class="text-[10px] text-text-muted"> tok/s</span>
+                    {:else}
+                      <span class="text-text-muted">—</span>
+                    {/if}
                   </td>
                 {/if}
                 <td class="py-3 px-4 text-right text-text-muted whitespace-nowrap text-[11px]">

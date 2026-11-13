@@ -387,13 +387,13 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 		return body, false
 	}
 
-	compressedBytes, err := json.Marshal(items)
+	compressedBytes, err := json.Marshal(items, json.Deterministic(true))
 	if err != nil {
 		return body, false
 	}
 	rawMap[key] = jsontext.Value(compressedBytes)
 
-	out, err := json.Marshal(rawMap)
+	out, err := json.Marshal(rawMap, json.Deterministic(true))
 	if err != nil {
 		return body, false
 	}

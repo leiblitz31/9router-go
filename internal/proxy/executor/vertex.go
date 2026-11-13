@@ -1,263 +1,390 @@
 package executor
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
+	"time"
+
+	json "encoding/json/v2"
 
 	"9router/proxy/internal/constants"
+	"9router/proxy/internal/log"
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/translator"
 )
 
-// vertexDefaultLocation is the fallback location for OAuth/SA/ADC
-// connections when neither providerSpecificData.location nor the model
-// registry declares one.
-const vertexDefaultLocation = "us-central1"
-
-// vertexGlobalLocation is the default for raw API-key connections with an
-// explicit project, and for models the registry marks global-only (Argon).
-const vertexGlobalLocation = "global"
-
-// VertexModelDefaultLocation mirrors the registry's per-model defaultLocation
-// (open-sse/providers/registry/vertex.js): Argon serves only from the
-// global/us/eu multi-regions, never from a regional location.
-func VertexModelDefaultLocation(model string) string {
-	if translator.IsGemini4Model(strings.ToLower(model)) {
-		return vertexGlobalLocation
-	}
-	return ""
-}
-
-// VertexCredentials carries the auth material a Vertex request is built from.
-type VertexCredentials struct {
-	APIKey               string
-	AccessToken          string
-	ProjectID            string
-	Location             string
-	Provider             string // "vertex" or "vertex-partner"
-	IsServiceAccountJSON bool   // apiKey holds an SA JSON blob
-	IsADCJSON            bool   // apiKey holds an ADC authorized_user blob
-}
-
-// VertexCredentialsFromRequest derives credentials from an executor request:
-// the OAuth access token wins over the raw key (matching buildHeaders), and
-// project/location come from providerSpecificData.
-func VertexCredentialsFromRequest(req *Request, provider string) VertexCredentials {
-	creds := VertexCredentials{Provider: provider}
-	if req == nil {
-		return creds
-	}
-	creds.APIKey = req.APIKey
-	if req.ConnData != nil {
-		creds.ProjectID = vertexStringField(req.ConnData, "projectId")
-		creds.Location = vertexStringField(req.ConnData, "location")
-	}
-	return creds
-}
-
-// VertexCredentialsWithToken returns creds with the access token set, so
-// BuildVertexURL routes the OAuth path and BuildVertexHeaders sends Bearer.
-func VertexCredentialsWithToken(creds VertexCredentials, token string) VertexCredentials {
-	creds.AccessToken = token
-	return creds
-}
-
-func vertexStringField(connData map[string]any, key string) string {
-	if connData == nil {
-		return ""
-	}
-	s, _ := connData[key].(string)
-	return strings.TrimSpace(s)
-}
-
-// UsesOAuth reports whether the credentials take the OAuth path (SA JSON,
-// ADC JSON, or a pre-set access token).
-func (c VertexCredentials) UsesOAuth() bool {
-	return c.IsServiceAccountJSON || c.IsADCJSON || c.AccessToken != ""
-}
-
-// BuildVertexURL constructs the Vertex AI endpoint for a model, mirroring
-// VertexExecutor.buildUrl in open-sse/executors/vertex.js (#4821, 29fc880e):
+// Vertex AI.
 //
-//   - vertex-partner always uses the global OpenAI-compatible endpoint and
-//     requires a project.
-//   - OAuth/SA/ADC requires a project and honors providerSpecificData.location,
-//     falling back to the registry defaultLocation (Argon → global) and then
-//     us-central1.
-//   - Raw API keys with an explicit project honor its location (default
-//     global); without a project the projectless publishers endpoint is kept
-//     for existing connections.
-func BuildVertexURL(model string, stream bool, creds VertexCredentials) (string, error) {
-	provider := creds.Provider
-	if provider == "" {
-		provider = "vertex"
+// The registry entries for vertex and vertex-partner carried a base URL and
+// nothing else — no executor, no format. Every request POSTed an OpenAI body at
+// https://aiplatform.googleapis.com/v1, which serves neither lane.
+//
+// Two auth shapes reach this host, and they put the credential in different
+// places:
+//
+//   - a Service Account JSON key (the `apiKey` field holds the JSON) mints a
+//     Bearer token by signing a JWT assertion with the SA's RS256 key;
+//   - a raw API key rides in the query string (`?key=`) and never in a header.
+//
+// The URL differs too: Gemini models need the project-scoped
+// /publishers/google/models path, while partner models (Llama, Mistral, GLM,
+// DeepSeek, Qwen) use the OpenAI-compatible
+// /endpoints/openapi/chat/completions path and require a project.
+
+const (
+	vertexGoogleTokenURL = "https://oauth2.googleapis.com/token"
+	vertexCloudScope     = "https://www.googleapis.com/auth/cloud-platform"
+
+	// vertexTokenSkew re-mints slightly before expiry so a request is never
+	// sent with a token that dies in flight.
+	vertexTokenSkew = 5 * time.Minute
+)
+
+// vertexServiceAccount is the subset of a GCP service-account key needed to
+// mint a token.
+type vertexServiceAccount struct {
+	Type        string `json:"type"`
+	ProjectID   string `json:"project_id"`
+	ClientEmail string `json:"client_email"`
+	PrivateKey  string `json:"private_key"`
+}
+
+// vertexADC is a `gcloud auth application-default login` credential.
+type vertexADC struct {
+	Type         string `json:"type"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	RefreshToken string `json:"refresh_token"`
+	QuotaProject string `json:"quota_project_id"`
+}
+
+type vertexCachedToken struct {
+	token     string
+	expiresAt time.Time
+}
+
+var (
+	vertexTokenMu    sync.Mutex
+	vertexTokenCache = map[string]vertexCachedToken{}
+)
+
+// parseVertexServiceAccount returns the SA key when the credential is one.
+func parseVertexServiceAccount(apiKey string) *vertexServiceAccount {
+	if !strings.HasPrefix(strings.TrimSpace(apiKey), "{") {
+		return nil
 	}
-	projectID := creds.ProjectID
-	action := "generateContent"
-	if stream {
-		action = "streamGenerateContent"
+	var sa vertexServiceAccount
+	if json.Unmarshal([]byte(apiKey), &sa) != nil {
+		return nil
+	}
+	if sa.Type != "service_account" || sa.ClientEmail == "" || sa.PrivateKey == "" || sa.ProjectID == "" {
+		return nil
+	}
+	return &sa
+}
+
+// parseVertexADC returns the ADC credential when the key is one.
+func parseVertexADC(apiKey string) *vertexADC {
+	if !strings.HasPrefix(strings.TrimSpace(apiKey), "{") {
+		return nil
+	}
+	var adc vertexADC
+	if json.Unmarshal([]byte(apiKey), &adc) != nil {
+		return nil
+	}
+	if adc.Type != "authorized_user" || adc.RefreshToken == "" || adc.ClientID == "" {
+		return nil
+	}
+	return &adc
+}
+
+// vertexTokenFor mints (or reuses) a Bearer token for a service account.
+func vertexTokenFor(ctx context.Context, client *http.Client, sa *vertexServiceAccount) (string, error) {
+	key := sa.ClientEmail
+	vertexTokenMu.Lock()
+	cached, ok := vertexTokenCache[key]
+	vertexTokenMu.Unlock()
+	if ok && time.Now().Add(vertexTokenSkew).Before(cached.expiresAt) {
+		return cached.token, nil
 	}
 
-	if provider == "vertex-partner" {
-		if projectID == "" {
-			return "", fmt.Errorf("vertex partner models require a project_id: set providerSpecificData.projectId")
-		}
-		url := fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/global/endpoints/openapi/chat/completions", projectID)
-		if rawKey := vertexRawKey(creds); rawKey != "" {
-			url += "?key=" + rawKey
-		}
-		return url, nil
+	assertion, err := vertexJWTAssertion(sa)
+	if err != nil {
+		return "", err
 	}
+	form := url.Values{
+		"grant_type": {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
+		"assertion":  {assertion},
+	}
+	tok, expiresIn, err := vertexPostToken(ctx, client, form)
+	if err != nil {
+		return "", err
+	}
+	vertexTokenMu.Lock()
+	vertexTokenCache[key] = vertexCachedToken{token: tok, expiresAt: time.Now().Add(time.Duration(expiresIn) * time.Second)}
+	vertexTokenMu.Unlock()
+	return tok, nil
+}
 
-	if creds.UsesOAuth() {
-		if projectID == "" {
-			return "", fmt.Errorf("vertex OAuth/ADC requires a project_id: add quota_project_id to your ADC JSON or set providerSpecificData.projectId")
-		}
-		location := creds.Location
-		if location == "" {
-			location = VertexModelDefaultLocation(model)
-		}
-		if location == "" {
-			location = vertexDefaultLocation
-		}
-		url := fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:%s", projectID, location, model, action)
-		if stream {
-			url += "?alt=sse"
-		}
-		return url, nil
+// vertexADCRefresh exchanges an ADC refresh token for an access token.
+func vertexADCRefresh(ctx context.Context, client *http.Client, adc *vertexADC) (string, error) {
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {adc.RefreshToken},
+		"client_id":     {adc.ClientID},
 	}
+	if adc.ClientSecret != "" {
+		form.Set("client_secret", adc.ClientSecret)
+	}
+	tok, _, err := vertexPostToken(ctx, client, form)
+	return tok, err
+}
 
-	location := creds.Location
-	if location == "" {
-		location = vertexGlobalLocation
+func vertexPostToken(ctx context.Context, client *http.Client, form url.Values) (string, int, error) {
+	if client == nil {
+		client = http.DefaultClient
 	}
-	var url string
-	if projectID != "" {
-		url = fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:%s", projectID, location, model, action)
-	} else {
-		url = fmt.Sprintf("https://aiplatform.googleapis.com/v1/publishers/google/models/%s:%s", model, action)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, vertexGoogleTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", 0, err
 	}
-	if stream {
-		url += "?alt=sse"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("vertex token: %w", err)
 	}
-	if rawKey := vertexRawKey(creds); rawKey != "" {
-		if stream {
-			url += "&key=" + rawKey
+	defer func() { _ = resp.Body.Close() }()
+	var payload struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+		Error       string `json:"error"`
+	}
+	if err := json.UnmarshalRead(resp.Body, &payload); err != nil {
+		return "", 0, fmt.Errorf("vertex token: parse response: %w", err)
+	}
+	if payload.AccessToken == "" {
+		return "", 0, fmt.Errorf("vertex token: %s", payload.Error)
+	}
+	if payload.ExpiresIn <= 0 {
+		payload.ExpiresIn = 3600
+	}
+	return payload.AccessToken, payload.ExpiresIn, nil
+}
+
+// vertexJWTAssertion signs the RS256 assertion Google exchanges for a token.
+func vertexJWTAssertion(sa *vertexServiceAccount) (string, error) {
+	// The key arrives with literal \n from a JSON-in-JSON paste.
+	pemText := strings.ReplaceAll(sa.PrivateKey, `\n`, "\n")
+	block, _ := pem.Decode([]byte(pemText))
+	if block == nil {
+		return "", fmt.Errorf("vertex: service account private_key is not PEM")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		// Older keys are PKCS#1; accept both rather than telling the operator
+		// to re-export.
+		if rsaKey, rsaErr := x509.ParsePKCS1PrivateKey(block.Bytes); rsaErr == nil {
+			parsed = rsaKey
 		} else {
-			url += "?key=" + rawKey
+			return "", fmt.Errorf("vertex: parse private_key: %w", err)
 		}
 	}
-	return url, nil
+	rsaKey, ok := parsed.(*rsa.PrivateKey)
+	if !ok {
+		return "", fmt.Errorf("vertex: private_key is not an RSA key")
+	}
+
+	now := time.Now().Unix()
+	sign := func(s string) string {
+		return base64.RawURLEncoding.EncodeToString([]byte(s))
+	}
+	header := sign(`{"alg":"RS256","typ":"JWT"}`)
+	claims := fmt.Sprintf(`{"iss":%q,"scope":%q,"aud":%q,"iat":%d,"exp":%d}`,
+		sa.ClientEmail, vertexCloudScope, vertexGoogleTokenURL, now, now+3600)
+	unsigned := header + "." + sign(claims)
+	sum := sha256.Sum256([]byte(unsigned))
+	sig, err := rsaKey.Sign(nil, sum[:], crypto.SHA256)
+	if err != nil {
+		return "", fmt.Errorf("vertex: sign assertion: %w", err)
+	}
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-func vertexRawKey(creds VertexCredentials) string {
-	if creds.UsesOAuth() {
-		return ""
-	}
-	return creds.APIKey
-}
-
-// BuildVertexHeaders builds the request headers: Bearer only when an access
-// token is present (a raw key rides in the URL ?key=).
-func BuildVertexHeaders(creds VertexCredentials, stream bool) map[string]string {
-	headers := map[string]string{"Content-Type": "application/json"}
-	if creds.AccessToken != "" {
-		headers["Authorization"] = "Bearer " + creds.AccessToken
-	}
-	if stream {
-		headers["Accept"] = "text/event-stream"
-	}
-	return headers
-}
-
-// ForwardVertex forwards an OpenAI-format request to Vertex AI's Gemini
-// endpoint. The body is translated OpenAI → Gemini native first; the response
-// continues through the existing Gemini handlers so stream and non-stream
-// behave like every other Gemini executor.
+// ForwardVertex serves both vertex and vertex-partner.
 func ForwardVertex(w http.ResponseWriter, req *Request) error {
-	return forwardVertexAs(w, req, "vertex")
-}
-
-// ForwardVertexPartner forwards to the Vertex partner endpoint (global
-// OpenAI-compatible URL). Registered for "vertex-partner" so the entry's
-// provider id — not a Format flag — decides the wire shape, the way one
-// Bedrock executor serves both Bedrock entries.
-func ForwardVertexPartner(w http.ResponseWriter, req *Request) error {
-	return forwardVertexAs(w, req, "vertex-partner")
-}
-
-func forwardVertexAs(w http.ResponseWriter, req *Request, provider string) error {
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	creds := VertexCredentialsFromRequest(req, provider)
 
-	model := req.ModelName
-	if model == "" {
-		model = vertexModelFromBody(req.Body)
+	sa := parseVertexServiceAccount(req.APIKey)
+	adc := parseVertexADC(req.APIKey)
+
+	projectID := ""
+	location := ""
+	if req.ConnData != nil {
+		if s, ok := req.ConnData["projectId"].(string); ok {
+			projectID = strings.TrimSpace(s)
+		}
+		if s, ok := req.ConnData["location"].(string); ok {
+			location = strings.TrimSpace(s)
+		}
 	}
-	if model == "" {
-		return fmt.Errorf("vertex: no model in request")
+	if sa != nil && projectID == "" {
+		projectID = sa.ProjectID
+	}
+	if adc != nil && projectID == "" {
+		projectID = adc.QuotaProject
 	}
 
-	url, err := BuildVertexURL(model, req.IsStream, creds)
+	bearer := ""
+	rawKey := req.APIKey
+	switch {
+	case sa != nil:
+		tok, err := vertexTokenFor(ctx, req.Client, sa)
+		if err != nil {
+			return fmt.Errorf("ForwardVertex: %w", err)
+		}
+		bearer, rawKey = tok, ""
+	case adc != nil:
+		tok, err := vertexADCRefresh(ctx, req.Client, adc)
+		if err != nil {
+			return fmt.Errorf("ForwardVertex: %w", err)
+		}
+		bearer, rawKey = tok, ""
+	}
+
+	model := vertexModel(req.ModelName)
+	streamSuffix := ""
+	if req.IsStream {
+		streamSuffix = "?alt=sse"
+	}
+
+	var targetURL string
+	var sendBody []byte
+	if req.Provider == "vertex-partner" {
+		// Partner models are the OpenAI-compatible surface, so the body needs
+		// no translation and the project is mandatory.
+		if projectID == "" {
+			return fmt.Errorf("ForwardVertex: vertex-partner requires a project id")
+		}
+		targetURL = fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/global/endpoints/openapi/chat/completions", projectID)
+		if rawKey != "" {
+			targetURL += "?key=" + url.QueryEscape(rawKey)
+		}
+		sendBody = req.Body
+	} else {
+		geminiBody, err := translator.TranslateOpenAIToGeminiWithSession(req.Body, req.SessionID)
+		if err != nil {
+			return fmt.Errorf("ForwardVertex: translate to Gemini: %w", err)
+		}
+		sendBody = geminiBody
+		action := "generateContent"
+		if req.IsStream {
+			action = "streamGenerateContent"
+		}
+		if bearer != "" {
+			// OAuth/SA tokens must use the project-scoped path or Vertex
+			// answers RESOURCE_PROJECT_INVALID.
+			if projectID == "" {
+				return fmt.Errorf("ForwardVertex: an OAuth or service-account credential requires a project id")
+			}
+			if location == "" {
+				// Argon (Gemini 4) serves only from the global multi-region,
+				// never from a regional location: default it to global instead
+				// of us-central1 (fork rule, ported from BuildVertexURL).
+				if translator.IsGemini4Model(strings.ToLower(model)) {
+					location = "global"
+				} else {
+					location = "us-central1"
+				}
+			}
+			targetURL = fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:%s%s",
+				projectID, location, model, action, streamSuffix)
+		} else {
+			if location == "" {
+				location = "global"
+			}
+			if projectID != "" {
+				targetURL = fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:%s%s",
+					projectID, location, model, action, streamSuffix)
+			} else {
+				targetURL = fmt.Sprintf("https://aiplatform.googleapis.com/v1/publishers/google/models/%s:%s%s", model, action, streamSuffix)
+			}
+			if rawKey != "" {
+				if strings.Contains(targetURL, "?") {
+					targetURL += "&key=" + url.QueryEscape(rawKey)
+				} else {
+					targetURL += "?key=" + url.QueryEscape(rawKey)
+				}
+			}
+		}
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(string(sendBody)))
 	if err != nil {
-		return err
+		return fmt.Errorf("ForwardVertex: create request: %w", err)
 	}
-
-	geminiBody, err := translator.TranslateOpenAIToGemini(req.Body)
-	if err != nil {
-		return fmt.Errorf("vertex translate to Gemini: %w", err)
+	httpReq.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+bearer)
 	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(geminiBody))
-	if err != nil {
-		return fmt.Errorf("vertex create request: %w", err)
+	if req.IsStream {
+		httpReq.Header.Set("Accept", "text/event-stream")
 	}
-	for k, v := range BuildVertexHeaders(creds, req.IsStream) {
-		httpReq.Header.Set(k, v)
+	if req.IsStream && httpReq.Header.Get("Accept-Encoding") == "" {
+		httpReq.Header.Set("Accept-Encoding", "identity")
 	}
-
 	client := req.Client
 	if client == nil {
 		client = http.DefaultClient
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("vertex upstream request: %w", err)
+		return fmt.Errorf("ForwardVertex: upstream request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	forwardUpstreamResponseHeaders(w, resp.Header)
-
+	proxy.UnwrapIdentityGzip(httpReq, resp)
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
-		resp.Body.Close()
-		if readErr != nil {
-			return fmt.Errorf("vertex upstream returned %d and body read failed: %w", resp.StatusCode, readErr)
-		}
-		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
+		log.Warn("vertex", "upstream refused", "status", resp.StatusCode, "model", model)
+		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: body, Header: resp.Header}
 	}
-
+	// The response is Gemini-shaped for the Gemini lanes and OpenAI-shaped for
+	// the partner lane; the caller's translation layer reads it accordingly.
 	if req.IsStream {
-		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, 0, "vertex")
-		return geminiStream(w, stallReader, req.Ctx)
+		return execSSEStream(w, resp.Body, req)
 	}
-	return geminiNonStream(w, resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
+	if err != nil {
+		return fmt.Errorf("ForwardVertex: read response: %w", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(body)
+	return err
 }
 
-func vertexModelFromBody(body []byte) string {
-	var meta struct {
-		Model string `json:"model"`
+// vertexModel strips 9router's provider prefix and effort suffixes.
+func vertexModel(model string) string {
+	if _, after, ok := strings.Cut(model, "/"); ok {
+		model = after
 	}
-	if err := json.Unmarshal(body, &meta); err != nil {
-		return ""
+	for _, suffix := range []string{"-thinking", "-agentic"} {
+		model = strings.TrimSuffix(model, suffix)
 	}
-	return strings.TrimSpace(meta.Model)
+	if idx := strings.IndexByte(model, '('); idx > 0 {
+		model = model[:idx]
+	}
+	return model
 }

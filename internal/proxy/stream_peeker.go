@@ -11,19 +11,41 @@ import (
 // ErrStreamingZeroContent indicates that an upstream SSE stream completed without producing usable content.
 var ErrStreamingZeroContent = errors.New("streaming upstream finished without content")
 
-// HasSSEContent reports whether an SSE chunk carries client-visible assistant content.
-// Delta role, reasoning/thinking, and empty finish frames do not count as content.
+// HasSSEContent reports whether an SSE chunk carries client-visible assistant content
+// (visible text, reasoning/thinking, or tool calls).
+// Delta role, empty reasoning/thinking, and empty finish frames do not count as content.
 func HasSSEContent(chunk []byte) bool {
 	if len(chunk) == 0 {
 		return false
 	}
+	// One write can contain multiple SSE events. Evaluate each line separately:
+	// an empty content_block_start must not mask a later non-empty text delta.
 	s := string(chunk)
+	for {
+		line, rest, more := strings.Cut(s, "\n")
+		if hasSSEContentLine(line) {
+			return true
+		}
+		if !more {
+			return false
+		}
+		s = rest
+	}
+}
+
+func hasSSEContentLine(s string) bool {
 	// OpenAI chat completions
 	if strings.Contains(s, `"content":"`) {
 		// Ensure it's not empty content: ""
 		if !strings.Contains(s, `"content":""`) && !strings.Contains(s, `"content":null`) {
 			return true
 		}
+	}
+	if strings.Contains(s, `"reasoning_content":"`) && !strings.Contains(s, `"reasoning_content":""`) && !strings.Contains(s, `"reasoning_content":null`) {
+		return true
+	}
+	if strings.Contains(s, `"reasoning":"`) && !strings.Contains(s, `"reasoning":""`) && !strings.Contains(s, `"reasoning":null`) {
+		return true
 	}
 	if strings.Contains(s, `"tool_calls":[`) && !strings.Contains(s, `"tool_calls":[]`) {
 		return true
@@ -34,12 +56,34 @@ func HasSSEContent(chunk []byte) bool {
 			return true
 		}
 	}
-	if strings.Contains(s, `"type":"content_block_start"`) && strings.Contains(s, `"type":"tool_use"`) {
+	if strings.Contains(s, `"type":"content_block_delta"`) && strings.Contains(s, `"thinking":"`) {
+		if !strings.Contains(s, `"thinking":""`) && !strings.Contains(s, `"thinking":null`) {
+			return true
+		}
+	}
+	if strings.Contains(s, `"type":"content_block_delta"`) && strings.Contains(s, `"signature_delta"`) {
+		return true
+	}
+	if strings.Contains(s, `"type":"content_block_start"`) {
+		if strings.Contains(s, `"type":"tool_use"`) ||
+			strings.Contains(s, `"type":"thinking"`) ||
+			strings.Contains(s, `"type":"redacted_thinking"`) {
+			return true
+		}
+	}
+	if strings.Contains(s, `"redacted_thinking"`) {
 		return true
 	}
 	// Responses API
 	if strings.Contains(s, `"response.output_text.delta"`) || strings.Contains(s, `"response.output_item.added"`) {
 		return true
+	}
+	if strings.Contains(s, `"response.reasoning_text.delta"`) ||
+		strings.Contains(s, `"response.reasoning_summary_text.delta"`) ||
+		strings.Contains(s, `"response.reasoning_summary_text.done"`) {
+		if !strings.Contains(s, `"delta":""`) && !strings.Contains(s, `"text":""`) {
+			return true
+		}
 	}
 	return false
 }

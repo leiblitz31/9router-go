@@ -5,28 +5,48 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"9router/proxy/internal/providers"
 )
 
+// codebuddyLifecycleCopy snapshots the lifecycle-dedup map under its lock, so
+// tests can restore the pre-test state without racing the telemetry goroutines.
+func codebuddyLifecycleCopy() map[string]bool {
+	codebuddyLifecycleMu.Lock()
+	defer codebuddyLifecycleMu.Unlock()
+	cp := make(map[string]bool, len(codebuddyLifecycleSent))
+	for k, v := range codebuddyLifecycleSent {
+		cp[k] = v
+	}
+	return cp
+}
+
 // TestCodebuddyTelemetryOnlyForCN asserts the telemetry wrapper only fires for
 // the codebuddy-cn provider — the intl lane (WorkBuddy) must pass straight
 // through with no telemetry side effects.
 func TestCodebuddyTelemetryOnlyForCN(t *testing.T) {
+	var mu sync.Mutex
 	var reports []string
 	report := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		reports = append(reports, r.URL.Path)
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer report.Close()
 	origReport := codebuddyReportURL
-	origLifecycle := codebuddyLifecycleSent
+	origLifecycle := codebuddyLifecycleCopy()
+	codebuddyLifecycleMu.Lock()
 	codebuddyLifecycleSent = make(map[string]bool)
+	codebuddyLifecycleMu.Unlock()
 	defer func() {
 		codebuddyReportURL = origReport
+		codebuddyLifecycleMu.Lock()
 		codebuddyLifecycleSent = origLifecycle
+		codebuddyLifecycleMu.Unlock()
 	}()
 	codebuddyReportURL = report.URL + "/v2/report"
 
@@ -56,15 +76,24 @@ func TestCodebuddyTelemetryOnlyForCN(t *testing.T) {
 	}
 	// Telemetry is fire-and-forget: give the goroutine a short moment.
 	time.Sleep(100 * time.Millisecond)
-	if len(reports) == 0 {
+	mu.Lock()
+	reportCount := len(reports)
+	firstPath := ""
+	if reportCount > 0 {
+		firstPath = reports[0]
+	}
+	mu.Unlock()
+	if reportCount == 0 {
 		t.Fatalf("expected codebuddy-cn to emit telemetry, saw none")
 	}
-	if reports[0] != "/v2/report" {
-		t.Fatalf("first report path = %q, want /v2/report", reports[0])
+	if firstPath != "/v2/report" {
+		t.Fatalf("first report path = %q, want /v2/report", firstPath)
 	}
 
 	// intl passes through with nothing.
+	mu.Lock()
 	before := len(reports)
+	mu.Unlock()
 	req2 := &Request{
 		Provider: "codebuddy-intl",
 		APIKey:   "sk-intl-test",
@@ -78,8 +107,11 @@ func TestCodebuddyTelemetryOnlyForCN(t *testing.T) {
 		t.Fatalf("intl forward: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	if len(reports) != before {
-		t.Fatalf("codebuddy-intl emitted telemetry unexpectedly: %d → %d reports", before, len(reports))
+	mu.Lock()
+	after := len(reports)
+	mu.Unlock()
+	if after != before {
+		t.Fatalf("codebuddy-intl emitted telemetry unexpectedly: %d → %d reports", before, after)
 	}
 }
 

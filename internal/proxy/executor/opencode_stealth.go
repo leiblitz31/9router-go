@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -178,23 +177,24 @@ func newOpencodeStealthClient(reference *http.Client) (*opencodeStealthClient, e
 }
 
 // opencodeProxyFrom recovers the proxy configured in reference.Transport.
+// A plain pool client carries a *http.Transport; the poolless client wraps a
+// safe transport in a *FallbackTransport, so its Base — the leg the request
+// actually travels — is the one to inspect. Missing either means the dial is
+// ambient: the stealth client then builds without a proxy and Go's ambient
+// egress never applies to it (it does not use net/http), which silently
+// bypassed an operator's HTTP_PROXY/ALL_PROXY on the free lane.
 func opencodeProxyFrom(reference *http.Client) string {
+	// The egress is read from the transport registry (proxy.ProxyURLFor),
+	// not from t.Proxy: the uTLS transports keep t.Proxy nil by design —
+	// the dialer tunnels manually so the fingerprinted handshake survives
+	// (net/http ignores DialTLSContext for proxied requests, so a set
+	// t.Proxy would silently downgrade the stealth lane to a plain Go
+	// ClientHello). The registry answers the same question for both
+	// registry-built transports and plain t.Proxy transports.
 	if reference == nil {
 		return ""
 	}
-	transport, ok := reference.Transport.(*http.Transport)
-	if !ok || transport.Proxy == nil {
-		return ""
-	}
-	target, err := url.Parse("https://opencode.ai")
-	if err != nil {
-		return ""
-	}
-	proxyURL, err := transport.Proxy(&http.Request{URL: target})
-	if err != nil || proxyURL == nil {
-		return ""
-	}
-	return strings.TrimRight(proxyURL.String(), "/")
+	return strings.TrimRight(proxy.ProxyURLFor(reference), "/")
 }
 
 func getOpencodeStealthClient(reference *http.Client) (*opencodeStealthClient, error) {

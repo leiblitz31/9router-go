@@ -9,17 +9,20 @@ import (
 	"9router/proxy/internal/db"
 )
 
-// TestHandleModels_CompatibleNodeDisabledModels pins the claim that the
-// disabledModels gate already covers a custom (compatible) provider node, not
-// just registry providers.
+// TestHandleModels_CompatibleNodeDisabledModels pins two claims about a custom
+// (compatible) provider node whose connection predates the dashboard copying
+// the node prefix into providerSpecificData.
 //
-// The dashboard writes the disabled list under the node's storage alias, which
-// for a compatible node is the node id itself — GetProviderAlias returns the id
-// unchanged because a node id is not in RegistryAliases. So staticAlias,
-// outputAlias and providerID all collapse to the same string, and the existing
-// two-key check in appendConnectionModels covers it. This test exists so that
-// claim is verified rather than assumed: if a future change makes alias
-// resolution diverge for nodes, the gate silently stops hiding their models.
+// First, /v1/models must publish the node's public prefix, not the internal
+// node row id: the prefix is the alias the resolver and the dashboard agree
+// on, and clients cannot route `openai-compatible-chat-<uuid>/...`.
+//
+// Second, the disabledModels gate must still cover the node. The dashboard
+// writes that list under the node's storage alias, which for a compatible node
+// is the node id itself - GetProviderAlias returns the id unchanged because a
+// node id is not in RegistryAliases. The two-key check in appendConnectionModels
+// therefore has to keep consulting staticAlias even after outputAlias becomes
+// the public prefix.
 func TestHandleModels_CompatibleNodeDisabledModels(t *testing.T) {
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
@@ -80,15 +83,20 @@ func TestHandleModels_CompatibleNodeDisabledModels(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	// A node with no prefix on its connection publishes under the node id
-	// itself — GetProviderAlias returns the id unchanged for a node, because a
-	// node id is not in RegistryAliases. That is the spelling the disabled
-	// list has to match, and the one the dashboard's storageAlias writes.
-	if !strings.Contains(body, `"id":"`+nodeID+`/keep-me"`) {
-		t.Errorf("%s/keep-me must stay listed, got: %s", nodeID, body)
+	// The node row owns the public alias even when the connection has no
+	// providerSpecificData.prefix. Publishing the internal node id would give
+	// clients an id the resolver never accepts.
+	if !strings.Contains(body, `"id":"`+prefix+`/keep-me"`) {
+		t.Errorf("%s/keep-me must stay listed, got: %s", prefix, body)
 	}
-	if strings.Contains(body, `"id":"`+nodeID+`/hide-me"`) {
-		t.Errorf("%s/hide-me must be excluded after being disabled, got: %s", nodeID, body)
+	if strings.Contains(body, `"id":"`+nodeID+`/keep-me"`) {
+		t.Errorf("%s/keep-me must not leak the internal node id, got: %s", nodeID, body)
+	}
+	// The disabled list is keyed by node id, so the gate must still consult
+	// staticAlias after outputAlias becomes the public prefix.
+	if strings.Contains(body, `"id":"`+prefix+`/hide-me"`) ||
+		strings.Contains(body, `"id":"`+nodeID+`/hide-me"`) {
+		t.Errorf("hide-me must be excluded after being disabled, got: %s", body)
 	}
 }
 

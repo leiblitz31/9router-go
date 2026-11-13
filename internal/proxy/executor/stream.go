@@ -28,9 +28,23 @@ type CodexStreamState struct {
 	CurrentToolCallID string
 	ToolCallIdx       map[string]int
 	ToolCallNames     map[string]string
-	ToolCallArgs      map[string]string
+	ToolCallArgs      map[int]string
 	ItemIDToIdx       map[string]int
+	OutputIndexToIdx  map[int]int
+	AnnouncedToolIDs  map[int]string
 	ArgsEmitted       map[int]bool
+	Usage             *translator.OpenAIUsage
+}
+
+// Responses output indexes include non-tool items (e.g. reasoning), so they
+// must be mapped to chat tool indexes rather than used directly.
+func (state *CodexStreamState) toolIndexForOutput(event map[string]any) (int, bool) {
+	outputIndex, ok := event["output_index"].(float64)
+	if !ok {
+		return 0, false
+	}
+	idx, ok := state.OutputIndexToIdx[int(outputIndex)]
+	return idx, ok
 }
 
 func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, created int64) []string {
@@ -149,8 +163,18 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 			if itemID != "" {
 				state.ItemIDToIdx[itemID] = idx
 			}
+			if outputIndex, ok := event["output_index"].(float64); ok {
+				if state.OutputIndexToIdx == nil {
+					state.OutputIndexToIdx = make(map[int]int)
+				}
+				state.OutputIndexToIdx[int(outputIndex)] = idx
+			}
 			state.ToolCallNames[callID] = name
 			state.CurrentToolCallID = callID
+			if state.AnnouncedToolIDs == nil {
+				state.AnnouncedToolIDs = make(map[int]string)
+			}
+			state.AnnouncedToolIDs[idx] = callID
 
 			chunk := map[string]any{
 				"id":      responseID,
@@ -195,6 +219,9 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 			idx, ok = state.ToolCallIdx[callID]
 		}
 		if !ok {
+			idx, ok = state.toolIndexForOutput(event)
+		}
+		if !ok {
 			if callID == "" {
 				callID = state.CurrentToolCallID
 			}
@@ -211,11 +238,14 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 				state.ToolCallCount++
 			}
 		}
+		if announcedID := state.AnnouncedToolIDs[idx]; announcedID != "" {
+			callID = announcedID
+		}
 
 		if state.ToolCallArgs == nil {
-			state.ToolCallArgs = make(map[string]string)
+			state.ToolCallArgs = make(map[int]string)
 		}
-		state.ToolCallArgs[callID] += delta
+		state.ToolCallArgs[idx] += delta
 		if state.ArgsEmitted == nil {
 			state.ArgsEmitted = make(map[int]bool)
 		}
@@ -236,9 +266,11 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 		}
 		tcMap := map[string]any{
 			"index":    idx,
-			"id":       callID,
 			"type":     "function",
 			"function": fnMap,
+		}
+		if callID != "" && state.AnnouncedToolIDs[idx] == "" {
+			tcMap["id"] = callID
 		}
 
 		chunk := map[string]any{
@@ -272,6 +304,9 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 			idx, ok = state.ToolCallIdx[callID]
 		}
 		if !ok {
+			idx, ok = state.toolIndexForOutput(event)
+		}
+		if !ok {
 			if callID == "" {
 				callID = state.CurrentToolCallID
 			}
@@ -288,6 +323,9 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 				state.ToolCallCount++
 			}
 		}
+		if announcedID := state.AnnouncedToolIDs[idx]; announcedID != "" {
+			callID = announcedID
+		}
 		// If name wasn't captured before, use it now
 		if name == "" && state.ToolCallNames != nil {
 			name = state.ToolCallNames[callID]
@@ -297,25 +335,24 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 				state.ToolCallNames[callID] = name
 			}
 		}
-		// Avoid duplicating arguments already sent via delta
+		// Snapshots are not deltas. Correlate by the same tool index used for
+		// emission: Responses events commonly omit call_id and carry item_id.
 		if state.ToolCallArgs == nil {
-			state.ToolCallArgs = make(map[string]string)
+			state.ToolCallArgs = make(map[int]string)
 		}
-		if existing, ok := state.ToolCallArgs[callID]; ok && existing != "" {
-			if existing == args || strings.Contains(existing, args) {
-				// Already sent via delta, skip emitting done
+		if existing := state.ToolCallArgs[idx]; existing != "" {
+			if !strings.HasPrefix(args, existing) {
+				// Bytes already sent cannot be replaced. Never concatenate an
+				// incompatible snapshot to them and produce corrupt JSON.
 				return nil
 			}
-			if strings.HasPrefix(args, existing) {
-				// Only send the remaining suffix
-				args = strings.TrimPrefix(args, existing)
-				if args == "" {
-					return nil
-				}
+			args = strings.TrimPrefix(args, existing)
+			if args == "" {
+				return nil
 			}
 		}
 		if args != "" {
-			state.ToolCallArgs[callID] += args
+			state.ToolCallArgs[idx] += args
 		}
 		// Only include name if not already sent
 		fnMapDone := map[string]any{
@@ -332,6 +369,12 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 		if len(fnMapDone) == 1 && fnMapDone["arguments"] == "" {
 			return nil
 		}
+		toolCall := map[string]any{
+			"index": idx, "type": "function", "function": fnMapDone,
+		}
+		if callID != "" && state.AnnouncedToolIDs[idx] == "" {
+			toolCall["id"] = callID
+		}
 		chunk := map[string]any{
 			"id":      responseID,
 			"object":  "chat.completion.chunk",
@@ -339,12 +382,7 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 			"choices": []map[string]any{{
 				"index": 0,
 				"delta": map[string]any{
-					"tool_calls": []map[string]any{{
-						"index":    idx,
-						"id":       callID,
-						"type":     "function",
-						"function": fnMapDone,
-					}},
+					"tool_calls": []map[string]any{toolCall},
 				},
 			}},
 		}
@@ -376,18 +414,21 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 				if !ok && callID != "" && state.ToolCallIdx != nil {
 					idx, ok = state.ToolCallIdx[callID]
 				}
+				if !ok {
+					idx, _ = state.toolIndexForOutput(event)
+				}
 				fullArgs, _ := item["arguments"].(string)
 				if fullArgs != "" {
 					if state.ArgsEmitted != nil && state.ArgsEmitted[idx] {
 						return nil
 					}
-					if existing, ok := state.ToolCallArgs[callID]; ok && existing != "" {
+					if existing, ok := state.ToolCallArgs[idx]; ok && existing != "" {
 						return nil
 					}
 					if state.ToolCallArgs == nil {
-						state.ToolCallArgs = make(map[string]string)
+						state.ToolCallArgs = make(map[int]string)
 					}
-					state.ToolCallArgs[callID] = fullArgs
+					state.ToolCallArgs[idx] = fullArgs
 					if state.ArgsEmitted == nil {
 						state.ArgsEmitted = make(map[int]bool)
 					}
@@ -436,6 +477,9 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 			if chunkUsage := codexUsageMap(resp); len(chunkUsage) > 0 {
 				chunk["usage"] = chunkUsage
 			}
+		}
+		if u := translator.ParseResponsesUsage([]byte(data)); u != nil {
+			state.Usage = u
 		}
 		b, err := json.Marshal(chunk)
 		if err != nil {
@@ -545,11 +589,9 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 
 				out := ProcessCodexEvent(data, state, responseID, created)
 				for _, chunk := range out {
-					if req.TTFT != nil && *req.TTFT == 0 {
-						*req.TTFT = time.Since(req.StartTime).Milliseconds()
-					}
+					markTTFT(req, req.StartTime)
 					if req.ResponseBuf != nil {
-						req.ResponseBuf.Write([]byte(chunk))
+						_, _ = req.ResponseBuf.Write([]byte(chunk))
 					}
 					if _, werr := hw.Write([]byte(chunk)); werr != nil {
 						return
@@ -587,6 +629,13 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 		flusher := proxy.WriteSSEHeaders(hw)
 		sessionKey := translator.NewSessionKey("stream")
 		defer translator.ClearStreamState(sessionKey)
+		// Body-size input estimate seeded before the first chunk: the
+		// terminal usage block falls back to it when the upstream never
+		// reports usage, so the client's context meter still moves and
+		// auto-compact can fire.
+		if est := translator.PromptEstimateFromContext(req.Ctx); est > 0 {
+			translator.SeedStreamPromptEstimate(sessionKey, est)
+		}
 
 		doneSeen := false
 		err := proxy.ScanStream(upstream, func(payload []byte) {
@@ -610,11 +659,9 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 				if translated == nil {
 					continue
 				}
-				if req.TTFT != nil && *req.TTFT == 0 {
-					*req.TTFT = time.Since(req.StartTime).Milliseconds()
-				}
+				markTTFT(req, req.StartTime)
 				if req.ResponseBuf != nil {
-					req.ResponseBuf.Write(translated)
+					_, _ = req.ResponseBuf.Write(translated)
 				}
 				if _, werr := hw.Write(translated); werr != nil {
 					return
@@ -661,6 +708,8 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 
 		if usage := translator.GetStreamUsage(sessionKey); usage != nil {
 			translator.SetUsage(req.Ctx, usage)
+		} else if state.Usage != nil {
+			translator.SetUsage(req.Ctx, state.Usage)
 		} else {
 			translator.SetUsage(req.Ctx, &translator.OpenAIUsage{
 				CompletionTokens: state.OutputLength / 4,
@@ -708,6 +757,9 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 		// served empty turn and ended combo fallback on this model, so report
 		// the 502 and let the router move on.
 		return proxy.UpstreamFailure(http.StatusBadGateway, proxy.NoCompletionInStream)
+	}
+	if state.Usage != nil {
+		translator.SetUsage(req.Ctx, state.Usage)
 	}
 	return jsonResponse(req.Ctx, w, bytes.NewReader(converted), req.TranslateResp, req.ResponseBuf)
 }
@@ -802,9 +854,13 @@ func writeSSEFinish(w http.ResponseWriter, flusher http.Flusher, req *Request, s
 		flusher.Flush()
 	}
 
-	translator.SetUsage(req.Ctx, &translator.OpenAIUsage{
-		CompletionTokens: state.OutputLength / 4,
-	})
+	if state.Usage != nil {
+		translator.SetUsage(req.Ctx, state.Usage)
+	} else {
+		translator.SetUsage(req.Ctx, &translator.OpenAIUsage{
+			CompletionTokens: state.OutputLength / 4,
+		})
+	}
 	return nil
 }
 
@@ -900,6 +956,10 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 					"delta": map[string]any{"content": payload.Content},
 				}},
 			}
+			markTTFT(req, req.StartTime)
+			if req.ResponseBuf != nil {
+				_, _ = fmt.Fprintf(req.ResponseBuf, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"finish_reason\":null}]}\n\n", responseID, created, payload.Content)
+			}
 			if err := writeSSE(w, chunk); err != nil {
 				return err
 			}
@@ -925,6 +985,10 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 					"index": 0,
 					"delta": map[string]any{"reasoning_content": payload.Text},
 				}},
+			}
+			markTTFT(req, req.StartTime)
+			if req.ResponseBuf != nil {
+				_, _ = fmt.Fprintf(req.ResponseBuf, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":%q},\"finish_reason\":null}]}\n\n", responseID, created, payload.Text)
 			}
 			if err := writeSSE(w, chunk); err != nil {
 				return err
@@ -1003,6 +1067,7 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 		}
 		call.emitted = true
 		state.toolCallIndex++
+		markTTFT(req, req.StartTime)
 		if err := writeSSE(w, chunk); err != nil {
 			return err
 		}
@@ -1089,6 +1154,8 @@ type CommandcodeStreamState struct {
 	OutputLength  int
 	FinishReason  string
 	Finished      bool
+	// ErrorEvent is the raw mid-stream {"type":"error"} event; nil otherwise.
+	ErrorEvent map[string]any
 	// Usage is the upstream token usage (finish totalUsage, or the last
 	// finish-step usage); nil until one arrives.
 	Usage map[string]any
@@ -1162,6 +1229,27 @@ func ParseCommandCodeError(event map[string]any) (int, string) {
 	return statusCode, message
 }
 
+// handleCommandcodeNonStream answers a `stream:false` request. CommandCode's
+// /alpha/generate always returns NDJSON (the client's `stream` is ignored — the
+// build hardcode mimics upstream, whose executor forces body.stream = 1), so
+// the frames are produced exactly as they are for a streaming client and then
+// folded into one chat.completion. Without this a non-streaming client received
+// `Content-Type: text/event-stream` and a body its JSON.parse could not read,
+// and the dashboard's Test button reported "Provider returned no completion
+// choices for this model" (upstream forced-SSE → JSON semantics, executor
+// commandcode.js comment).
+func handleCommandcodeNonStream(w http.ResponseWriter, req *Request, upstream io.Reader, model string) error {
+	collect := &sseCollectWriter{}
+	if err := handleCommandcodeStream(collect, req, upstream, model); err != nil {
+		return err
+	}
+	folded, ok := sseToOpenAIJSON(collect.buf.Bytes())
+	if !ok {
+		return proxy.UpstreamFailure(http.StatusBadGateway, proxy.NoCompletionInStream)
+	}
+	return jsonResponse(req.Ctx, w, bytes.NewReader(folded), req.TranslateResp, req.ResponseBuf)
+}
+
 func handleCommandcodeStream(w http.ResponseWriter, req *Request, upstream io.Reader, model string) error {
 	state := &CommandcodeStreamState{
 		ResponseID: fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
@@ -1173,6 +1261,11 @@ func handleCommandcodeStream(w http.ResponseWriter, req *Request, upstream io.Re
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
 	var headersWritten bool
+	// semanticToken reports whether a chunk carries a real content or
+	// reasoning delta, rather than an empty role-only or finish frame.
+	semanticToken := func(chunk string) bool {
+		return strings.Contains(chunk, `"content"`) || strings.Contains(chunk, `"reasoning_content"`)
+	}
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -1203,6 +1296,26 @@ func handleCommandcodeStream(w http.ResponseWriter, req *Request, upstream io.Re
 		}
 
 		chunks := ProcessCommandcodeEvent(event, eventType, state)
+		if state.ErrorEvent != nil {
+			code, msg := ParseCommandCodeError(state.ErrorEvent)
+			frame, _ := json.Marshal(map[string]any{
+				"error": map[string]any{"message": msg, "type": "upstream_error", "code": code},
+			})
+			if !headersWritten {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.WriteHeader(http.StatusOK)
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", frame); err != nil {
+				return err
+			}
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			log.Warn("executor", "commandcode mid-stream error", "code", code, "message", msg)
+			return nil
+		}
 		if len(chunks) == 0 {
 			continue
 		}
@@ -1217,7 +1330,13 @@ func handleCommandcodeStream(w http.ResponseWriter, req *Request, upstream io.Re
 
 		flusher, _ := w.(http.Flusher)
 		for _, chunk := range chunks {
-			if _, err := w.Write([]byte(fmt.Sprintf("data: %s\n\n", chunk))); err != nil {
+			if semanticToken(chunk) {
+				markTTFT(req, req.StartTime)
+			}
+			if req.ResponseBuf != nil {
+				_, _ = fmt.Fprintf(req.ResponseBuf, "data: %s\n\n", chunk)
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
 				return err
 			}
 			if flusher != nil {
@@ -1248,25 +1367,33 @@ func handleCommandcodeStream(w http.ResponseWriter, req *Request, upstream io.Re
 		flusher.Flush()
 	}
 
-	translator.SetUsage(req.Ctx, &translator.OpenAIUsage{
-		CompletionTokens: state.OutputLength / 4,
-	})
+	translator.SetUsage(req.Ctx, commandcodeUsage(state))
 
 	return scanner.Err()
 }
 
-// cmdcodeFinishReason maps upstream AI-SDK finish reasons to OpenAI wire values.
-func cmdcodeFinishReason(r string) string {
-	switch r {
-	case "tool-calls", "tool_use":
-		return "tool_calls"
-	case "content-filter":
-		return "content_filter"
-	case "error", "":
-		return "stop"
-	default:
-		return r
+// commandcodeUsage builds the gateway's usage record: real upstream counts
+// (input, output, cache reads, reasoning) when Command Code reported them,
+// the output-length estimate otherwise.
+func commandcodeUsage(state *CommandcodeStreamState) *translator.OpenAIUsage {
+	if len(state.Usage) == 0 {
+		return &translator.OpenAIUsage{CompletionTokens: state.OutputLength / 4}
 	}
+	u := &translator.OpenAIUsage{}
+	if in, ok := commandcodeTokenField(state.Usage, "inputTokens", "promptTokens"); ok {
+		u.PromptTokens = int(in)
+	}
+	if out, ok := commandcodeTokenField(state.Usage, "outputTokens", "completionTokens"); ok {
+		u.CompletionTokens = int(out)
+	}
+	if c, ok := state.Usage["cachedInputTokens"].(float64); ok && c > 0 {
+		u.CachedTokens = int(c)
+		u.PromptTokensDetails = &translator.PromptTokensDetails{CachedTokens: int(c)}
+	}
+	if r, ok := state.Usage["reasoningTokens"].(float64); ok && r > 0 {
+		u.CompletionTokensDetails = &translator.CompletionTokensDetails{ReasoningTokens: int(r)}
+	}
+	return u
 }
 
 func ProcessCommandcodeEvent(event map[string]any, eventType string, state *CommandcodeStreamState) []string {
@@ -1398,17 +1525,17 @@ func ProcessCommandcodeEvent(event map[string]any, eventType string, state *Comm
 
 	case "finish-step":
 		if reason, ok := event["finishReason"].(string); ok {
-			state.FinishReason = cmdcodeFinishReason(reason)
+			state.FinishReason = mapCommandcodeFinishReason(reason)
 		}
 		if u, ok := event["usage"].(map[string]any); ok {
 			state.Usage = u
 		}
 
 	case "finish":
-		reason := cmdcodeFinishReason(state.FinishReason)
+		reason := mapCommandcodeFinishReason(state.FinishReason)
 		if reason == "" {
 			if r, ok := event["finishReason"].(string); ok {
-				reason = cmdcodeFinishReason(r)
+				reason = mapCommandcodeFinishReason(r)
 			}
 			if reason == "" {
 				reason = "stop"
@@ -1463,27 +1590,37 @@ func ProcessCommandcodeEvent(event map[string]any, eventType string, state *Comm
 		out = append(out, chunk)
 
 	case "error":
-		msg, _ := event["error"].(string)
-		if msg == "" {
-			if m, ok := event["message"].(string); ok {
-				msg = m
-			}
-		}
-		if msg == "" {
-			msg = "unknown error"
-		}
-		delta := map[string]any{"content": fmt.Sprintf("\n\n[CommandCode error: %s]", msg)}
-		out = append(out, BuildCommandcodeChunk(state, delta, ""))
-		out = append(out, BuildCommandcodeChunk(state, map[string]any{}, "stop"))
+		// Fail loudly instead of streaming the error text as fake content
+		// with finish_reason "stop" (upstream 092c84ea): the stream handler
+		// emits an in-band OpenAI error frame and ends the stream without a
+		// completion, so it reads as an error everywhere downstream.
+		state.ErrorEvent = event
 		state.Finished = true
 	}
 
 	return out
 }
 
-// commandcodeTokenField reads the first present numeric token field among
-// keys (Command Code spells them inputTokens/outputTokens; the gateway's
-// own spelling is promptTokens/completionTokens).
+// mapCommandcodeFinishReason converts the AI SDK finish reasons Command Code
+// emits ("tool-calls", "content-filter", …) to OpenAI finish_reason values;
+// passing them through raw makes OpenAI-shaped clients abort with
+// "unexpected finish reason 'tool-calls'" (upstream commandcode-to-openai.js).
+func mapCommandcodeFinishReason(reason string) string {
+	switch reason {
+	case "tool-calls", "tool_use":
+		return "tool_calls"
+	case "content-filter":
+		return "content_filter"
+	case "error", "":
+		return "stop"
+	default:
+		return reason
+	}
+}
+
+// commandcodeTokenField reads the first present numeric key; Command Code
+// emits AI SDK v5 names (inputTokens/outputTokens), older shapes used
+// promptTokens/completionTokens.
 func commandcodeTokenField(m map[string]any, keys ...string) (float64, bool) {
 	for _, k := range keys {
 		if v, ok := m[k].(float64); ok {
@@ -1491,42 +1628,4 @@ func commandcodeTokenField(m map[string]any, keys ...string) (float64, bool) {
 		}
 	}
 	return 0, false
-}
-
-// commandcodeUsage builds the gateway's usage record: real upstream counts
-// (input, output, cache reads, reasoning) when Command Code reported them,
-// the output-length estimate otherwise.
-func commandcodeUsage(state *CommandcodeStreamState) *translator.OpenAIUsage {
-	if len(state.Usage) == 0 {
-		return &translator.OpenAIUsage{CompletionTokens: state.OutputLength / 4}
-	}
-	u := &translator.OpenAIUsage{}
-	if in, ok := commandcodeTokenField(state.Usage, "inputTokens", "promptTokens"); ok {
-		u.PromptTokens = int(in)
-	}
-	if out, ok := commandcodeTokenField(state.Usage, "outputTokens", "completionTokens"); ok {
-		u.CompletionTokens = int(out)
-	}
-	if c, ok := state.Usage["cachedInputTokens"].(float64); ok && c > 0 {
-		u.CachedTokens = int(c)
-		u.PromptTokensDetails = &translator.PromptTokensDetails{CachedTokens: int(c)}
-	}
-	if r, ok := state.Usage["reasoningTokens"].(float64); ok && r > 0 {
-		u.CompletionTokensDetails = &translator.CompletionTokensDetails{ReasoningTokens: int(r)}
-	}
-	return u
-}
-
-// handleCommandcodeNonStream serves a non-streaming client by collecting
-// the SSE stream and folding it into a single OpenAI completion JSON.
-func handleCommandcodeNonStream(w http.ResponseWriter, req *Request, upstream io.Reader, model string) error {
-	collect := &sseCollectWriter{}
-	if err := handleCommandcodeStream(collect, req, upstream, model); err != nil {
-		return err
-	}
-	folded, ok := sseToOpenAIJSON(collect.buf.Bytes())
-	if !ok {
-		return proxy.UpstreamFailure(http.StatusBadGateway, proxy.NoCompletionInStream)
-	}
-	return jsonResponse(req.Ctx, w, bytes.NewReader(folded), req.TranslateResp, req.ResponseBuf)
 }
