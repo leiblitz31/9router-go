@@ -36,6 +36,9 @@ func TestTTS_EdgeTTS_Success(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer mockServer.Close()
+	// The Bing host is only reachable with real egress; point both calls at
+	// the stub so the test asserts routing, not the network.
+	t.Cleanup(SetBingEndpointsForTesting(mockServer.URL))
 
 	database, cleanup := setupMultimodalTestDB(t)
 	defer cleanup()

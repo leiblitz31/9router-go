@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,17 +80,21 @@ func TestHandleWebFetch_RejectsMissingURL(t *testing.T) {
 	}
 }
 
+// targetPrivateCase is one row of the targetPrivate table: whether private
+// networking is allowed, the host as the caller wrote it, and the verdict.
+type targetPrivateCase struct {
+	name  string
+	allow string
+	host  string
+	want  bool
+}
+
 // ALLOW_PRIVATE_NETWORKING is the operator's own switch; when it is on, the
 // pre-flight check must not override it. The two host shapes — a literal IP and
 // a name that resolves to the same address — must answer alike, which is what
 // the loopback row checks twice.
 func TestTargetPrivate_RespectsAllowPrivateNetworking(t *testing.T) {
-	tests := []struct {
-		name  string
-		allow string
-		host  string
-		want  bool
-	}{
+	tests := []targetPrivateCase{
 		{"allowed: public name", "true", "example.com", false},
 		{"allowed: public literal", "true", "8.8.8.8", false},
 		{"allowed: loopback literal", "true", "127.0.0.1", false},
@@ -110,10 +115,28 @@ func TestTargetPrivate_RespectsAllowPrivateNetworking(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("ALLOW_PRIVATE_NETWORKING", tt.allow)
+			// A name is resolved through this seam rather than real DNS: the
+			// table is about how a resolved address is classified, and a
+			// sandbox resolver that maps public names into benchmark space
+			// would decide the row instead of the predicate.
+			prevLookup := lookupIP
+			lookupIP = func(context.Context, string) ([]net.IP, error) {
+				return []net.IP{net.ParseIP(tt.wantIP())}, nil
+			}
+			t.Cleanup(func() { lookupIP = prevLookup })
 			if got := targetPrivate(context.Background(), tt.host); got != tt.want {
 				t.Errorf("targetPrivate(%q) with ALLOW_PRIVATE_NETWORKING=%s = %v, want %v",
 					tt.host, tt.allow, got, tt.want)
 			}
 		})
 	}
+}
+
+// wantIP is the address a name resolves to for this row: the loopback name
+// resolves to loopback, every other name to a public address.
+func (tt targetPrivateCase) wantIP() string {
+	if tt.want {
+		return "127.0.0.1"
+	}
+	return "93.184.216.34"
 }

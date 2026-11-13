@@ -896,6 +896,14 @@ func (h *MediaHandler) HandleWebFetch(w http.ResponseWriter, r *http.Request) {
 	h.forwardMediaRequest(w, r, body, h.defaultWebFetchModel(), "/v1/web/fetch")
 }
 
+// lookupIP resolves a name for targetPrivate. A var so the unit suite can
+// answer it without DNS: a host whose resolver maps public names into
+// 198.18.0.0/15 (RFC2544 benchmark space, which netguard refuses) would
+// otherwise make this table assert on the resolver rather than on the check.
+var lookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", host)
+}
+
 // targetPrivate reports whether host names an address the gateway must not
 // fetch on a caller's behalf. A literal IP is judged directly; a name is
 // resolved once, before dispatch. ALLOW_PRIVATE_NETWORKING is the operator's
@@ -917,7 +925,7 @@ func targetPrivate(ctx context.Context, host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return proxy.IsPrivateIP(ip)
 	}
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	ips, err := lookupIP(ctx, host)
 	if err != nil {
 		// Unresolvable is not this check's call to make: let the dispatch
 		// produce the transport error, which names the real problem.

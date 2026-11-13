@@ -80,9 +80,12 @@ func TestDispatch_DispatchesThroughPrefetch(t *testing.T) {
 	seedConnDB(t, database, "ollama", "conn-prefetch", "sk-test", upstream.URL)
 	handler := NewChatHandler(db.NewRepo(database))
 
-	reqBody := `{"model":"ollama/m","messages":[{"role":"user","content":[` +
+	reqBody := `{"model":"ollama/deepseek-v4.1-flash:cloud","messages":[{"role":"user","content":[` +
 		`{"type":"text","text":"what is this"},` +
 		`{"type":"image_url","image_url":{"url":"` + imageSrv.URL + `/a.png"}}]}]}`
+	// The model id has to be one ollama declares vision for: a text-only id
+	// makes the capacity adapter prepend an adapter pool model, and the request
+	// never reaches the ollama connection this test is about.
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

@@ -40,6 +40,24 @@ var directHTTPClient = &http.Client{
 	Timeout: 15 * time.Second,
 }
 
+// The Bing endpoints speak to www.bing.com in production. They are vars, not
+// consts, so the unit suite can point them at a local httptest server: the
+// test process has no business reaching the real host, and a machine without
+// egress hung on the dial rather than failing.
+var (
+	bingTranslatorURL = "https://www.bing.com/translator"
+	bingSpeechURL     = "https://www.bing.com/tfettts"
+)
+
+// SetBingEndpointsForTesting redirects both Bing calls at a stub and returns a
+// func that restores the real hosts.
+func SetBingEndpointsForTesting(base string) func() {
+	prevTranslator, prevSpeech := bingTranslatorURL, bingSpeechURL
+	bingTranslatorURL = base + "/translator"
+	bingSpeechURL = base + "/tfettts"
+	return func() { bingTranslatorURL, bingSpeechURL = prevTranslator, prevSpeech }
+}
+
 func doDirectOrClient(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
 	if client == nil {
 		client = directHTTPClient
@@ -66,7 +84,7 @@ func getBingToken(ctx context.Context, client *http.Client) (string, string, str
 		return bingKey, bingToken, bingCookie, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.bing.com/translator", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bingTranslatorURL, nil)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -136,7 +154,7 @@ func SynthesizeEdgeTTS(ctx context.Context, client *http.Client, text, voice str
 	form.Set("token", token)
 	form.Set("key", key)
 
-	reqURL := "https://www.bing.com/tfettts?isVertical=1&&IG=1&IID=translator.5023&SFX=1"
+	reqURL := bingSpeechURL + "?isVertical=1&&IG=1&IID=translator.5023&SFX=1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err

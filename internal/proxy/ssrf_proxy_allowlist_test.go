@@ -392,43 +392,45 @@ func TestProxyAllowlistIsBounded(t *testing.T) {
 	}
 }
 
-// TestRequestThroughAHostnameProxyReachesIt is #1078 end-to-end: the proxy URL
-// names its endpoint by hostname ("localhost:3128"), so the string allowlist
-// stores a name while the socket guard only ever sees the resolved dial
-// address ("127.0.0.1:3128"). Before the resolution match that mismatch made
-// every proxied dial die with
+// TestRequestThroughAHostnameProxyReachesIt is #1078 in the shape the fork can
+// actually exercise: the proxy URL names its endpoint by hostname
+// ("localhost:3128"), so the string allowlist stores a name while the socket
+// guard only ever sees the resolved dial address ("127.0.0.1:3128"). Before the
+// resolution match that mismatch made every proxied dial die with
 //
 //	proxyconnect tcp: dial tcp <proxy-ip>:3128: request to private/reserved IP
 //	blocked by SSRF protection ... (strictProxy=true)
 //
-// localhost resolves through the OS resolver on every platform, so this stays
-// deterministic where a made-up container name would need a DNS seam the
-// transport itself does not use.
+// The target is HTTPS, and the proxy is a real CONNECT proxy, for the reason
+// TestRequestThroughALoopbackProxyReachesIt documents: the fork's uTLS transport
+// keeps Transport.Proxy nil and tunnels TLS itself, so a plain-http target never
+// reaches the proxy at all — an http:// URL here would assert the fork's dial
+// path rather than the allowlist exemption.
 func TestRequestThroughAHostnameProxyReachesIt(t *testing.T) {
 	var seenPath string
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
-	})
+	}))
+	defer upstream.Close()
+
 	// The allowlist stores the port the operator configured, and a port the
 	// dial address does not carry is the signal that an address is a *target*
 	// rather than the proxy — that filter must stay. So the fake proxy has to
-	// listen on exactly 127.0.0.1:3128, the address the transport dials.
-	listener, err := net.Listen("tcp", "127.0.0.1:3128")
+	// listen on exactly the port the transport dials.
+	proxyAddr := startConnectProxy(t, upstream.Listener.Addr().String())
+	_, port, err := net.SplitHostPort(proxyAddr)
 	if err != nil {
-		t.Skipf("127.0.0.1:3128 is in use: %v", err)
+		t.Fatalf("split the fake proxy address: %v", err)
 	}
-	fakeProxy := &httptest.Server{
-		Listener: listener,
-		Config:   &http.Server{Handler: handler},
-	}
-	fakeProxy.Start()
-	defer fakeProxy.Close()
 
-	tr := NewSafeTransportForProxy("http://localhost:3128")
+	// The fork's NewSafeTransportForProxy is the one-argument spelling and
+	// always verifies; this case needs the insecure variant because the target
+	// is an httptest TLS server with a self-signed certificate.
+	tr := NewSafeTransportWithProxy("http://localhost:"+port, true)
 	client := &http.Client{Transport: tr, Timeout: 10 * time.Second}
-	resp, err := client.Get("http://upstream.invalid/v1/models")
+	resp, err := client.Get(upstream.URL + "/v1/models")
 	if err != nil {
 		if errors.Is(err, ErrSSRFBlocked) {
 			t.Fatalf("request through the hostname-named proxy = %v; the operator's own proxy must not be treated as an SSRF target", err)
@@ -438,10 +440,10 @@ func TestRequestThroughAHostnameProxyReachesIt(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200 from the fake proxy", resp.StatusCode)
+		t.Errorf("status = %d, want 200 from the fake upstream", resp.StatusCode)
 	}
 	if seenPath != "/v1/models" {
-		t.Errorf("proxy saw path %q, want /v1/models", seenPath)
+		t.Errorf("upstream saw path %q, want /v1/models", seenPath)
 	}
 }
 

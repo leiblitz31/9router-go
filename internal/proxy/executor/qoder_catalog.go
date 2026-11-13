@@ -149,10 +149,13 @@ func qoderModelConfig(ctx context.Context, do QoderDoer, creds QoderCosyCreds, r
 
 	refreshed, refreshErr := qoderFetchCatalog(ctx, do, creds, region, true)
 	if refreshErr != nil {
-		return nil, refreshErr
+		// Name the model even when the fetch itself failed: the caller sees a
+		// context deadline and has no idea which model it was asking for, and
+		// the answer is the same either way — that model has no config.
+		return nil, fmt.Errorf("qoder: model_config for %q unavailable: %w", modelKey, refreshErr)
 	}
 	if refreshed == nil {
-		return nil, fmt.Errorf("qoder: model catalogue unavailable for %s", region)
+		return nil, fmt.Errorf("qoder: model catalogue unavailable for %s (model %q)", region, modelKey)
 	}
 	if config := qoderDefensiveCopy(refreshed.rawConfigs[modelKey], modelKey); config != nil {
 		return config, nil
@@ -206,9 +209,18 @@ func qoderCachedModelConfigAny(creds QoderCosyCreds, region QoderRegion) *qoderC
 	return entry
 }
 
+// qoderModelListURLFor resolves the catalogue endpoint for one token kind. A
+// var, not an inline call, so the unit suite can point the fetch at a closed
+// local port: the catalogue is read on the chat path, and a cold cache in a
+// test process made every unknown-model case dial api3.qoder.sh and hang on the
+// egress proxy instead of failing (AGENTS.md §5.C).
+var qoderModelListURLFor = func(region QoderRegion, token string) string {
+	return QoderEndpointsFor(string(region)).ModelListURLForToken(token)
+}
+
 // qoderFetchCatalogOnce performs the COSY-signed GET of /algo/api/v2/model/list.
 func qoderFetchCatalogOnce(ctx context.Context, do QoderDoer, creds QoderCosyCreds, region QoderRegion) (*qoderCatalog, error) {
-	modelListURL := QoderEndpointsFor(string(region)).ModelListURLForToken(creds.AuthToken)
+	modelListURL := qoderModelListURLFor(region, creds.AuthToken)
 
 	headers, err := buildQoderCosyHeaders(nil, modelListURL, creds)
 	if err != nil {
