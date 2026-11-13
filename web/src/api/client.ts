@@ -2340,13 +2340,6 @@ export const api = {
         body: JSON.stringify({ selectionToken, idempotencyKey }),
       }
     ),
-    ),
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      }
-    ),
 
   // Tunnel & Tailscale
   getTunnelStatus: () =>
