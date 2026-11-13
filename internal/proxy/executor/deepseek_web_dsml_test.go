@@ -544,3 +544,54 @@ func TestDeepSeekDSMLInvokesRecoversMissingClose(t *testing.T) {
 		})
 	}
 }
+
+// Models also write the arguments as one JSON object in the invoke body
+// instead of parameter elements. Before the fallback existed, such a call
+// degraded to {} and the client rejected it for missing required properties —
+// the failure a live DSH session hit on a bash call on 2026-11-08.
+func TestDeepSeekDSMLJSONBodyArguments(t *testing.T) {
+	text := "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"read\">{\"path\":\"/tmp/from-json\"}</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
+	calls := deepSeekExtractToolCalls(text, []deepSeekToolSpec{readTool()})
+	if len(calls) != 1 {
+		t.Fatalf("extracted %d calls, want 1", len(calls))
+	}
+	if calls[0].Arguments != `{"path":"/tmp/from-json"}` {
+		t.Errorf("arguments = %s, want the JSON body", calls[0].Arguments)
+	}
+}
+
+// Parameter elements keep precedence when both forms appear: the JSON object
+// fallback exists only for bodies with no parameters at all.
+func TestDeepSeekDSMLParametersBeatJSONBody(t *testing.T) {
+	text := "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"read\">{\"path\":\"/tmp/json\"}<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">/tmp/param</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
+	calls := deepSeekExtractToolCalls(text, []deepSeekToolSpec{readTool()})
+	if len(calls) != 1 {
+		t.Fatalf("extracted %d calls, want 1", len(calls))
+	}
+	if calls[0].Arguments != `{"path":"/tmp/param"}` {
+		t.Errorf("arguments = %s, want the parameter element to win", calls[0].Arguments)
+	}
+}
+
+// A call the model abandons mid-value and restarts inside the unclosed
+// parameter: the recovered arguments must be the restarted call's clean
+// values, not the first fragment with the whole second block inside it.
+// This is the exact shape a mimo corrective retry produced live.
+func TestDeepSeekDSMLRestartedCallInsideParameter(t *testing.T) {
+	text := "<｜｜DSML｜｜ calls>\n" +
+		"<｜｜DSML｜｜ invoke name=\"read\">\n" +
+		"<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">/tmp/abandoned<｜｜DSML｜｜ calls>\n" +
+		"<｜｜DSML｜｜ invoke name=\"read\">\n" +
+		"<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">/tmp/clean</｜｜DSML｜｜ parameter>\n" +
+		"</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
+	calls := deepSeekExtractToolCalls(text, []deepSeekToolSpec{readTool()})
+	found := ""
+	for _, c := range calls {
+		if strings.Contains(c.Arguments, "/tmp/clean") && !strings.Contains(c.Arguments, "DSML") {
+			found = c.Arguments
+		}
+	}
+	if found == "" {
+		t.Fatalf("no clean call recovered: %+v", calls)
+	}
+}

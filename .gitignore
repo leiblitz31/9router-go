@@ -84,3 +84,7 @@ stitch-screenshots/
 # resolving without a second copy entering history. Add one here if you want it
 # kept; docs/screenshots/ is for the ones the site and README reference.
 /pr-*.png
+sitegen
+
+# Merge scratch dir (conflict classification, hunk decisions)
+.merge-work/

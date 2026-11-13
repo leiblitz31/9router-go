@@ -562,6 +562,28 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 			}
 		}
 
+		if len(resp.ByModel) > 0 && repo != nil {
+			cutoff := ""
+			if !window.since.IsZero() {
+				cutoff = window.since.UTC().Format("2006-01-02T15:04:05.000Z")
+			} else if window.days > 0 {
+				cutoff = time.Now().AddDate(0, 0, -window.days).UTC().Format("2006-01-02T15:04:05.000Z")
+			}
+			if tpsMap, err := repo.GetModelTPSSince(r.Context(), cutoff); err == nil && len(tpsMap) > 0 {
+				for key, item := range resp.ByModel {
+					if tps, ok := tpsMap[key]; ok && tps > 0 {
+						item.AvgTps = &tps
+						item.AvgSpeed = &tps
+						resp.ByModel[key] = item
+					} else if tps, ok := tpsMap[item.RawModel]; ok && tps > 0 {
+						item.AvgTps = &tps
+						item.AvgSpeed = &tps
+						resp.ByModel[key] = item
+					}
+				}
+			}
+		}
+
 		// Calculate total aggregates from byProvider
 		successfulRequests := 0
 		for _, p := range resp.ByProvider {

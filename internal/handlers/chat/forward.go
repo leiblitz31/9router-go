@@ -25,6 +25,7 @@ import (
 )
 
 // forwardRequest sends the request to the upstream provider and streams/pipes the response.
+//
 // upstreamClaude marks an upstream that answers in Claude Messages format (an
 // anthropic-compatible node, minimax-code); clientClaude marks a client whose
 // own wire is Claude Messages. Three combinations matter:

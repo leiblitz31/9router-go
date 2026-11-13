@@ -570,8 +570,81 @@ func buildCommandcodeBodyForSession(body []byte, model, sessionID string) ([]byt
 	if tools, ok := m["tools"].([]any); ok && len(tools) > 0 {
 		params["tools"] = commandcodeTools(convertOpenAIToolsToClaude(tools))
 	}
+	// The fork carries tool_choice through (converted to the Anthropic shape
+	// by the switch below) rather than dropping it: a client pinning a tool
+	// would otherwise lose the pin silently, and CommandCode takes the
+	// Anthropic shapes. The raw OpenAI value never survives — the switch
+	// rewrites or deletes it. It is only carried when the request actually
+	// has tools: without tools the key is meaningless, and upstream's
+	// whitelist pins its absence there.
+	if rawTools, ok := m["tools"].([]any); ok && len(rawTools) > 0 {
+		if tc, ok := m["tool_choice"]; ok && tc != nil {
+			params["tool_choice"] = tc
+		}
+	}
 	if effort, ok := m["reasoning_effort"]; ok && effort != nil {
 		params["reasoning_effort"] = effort
+	}
+
+	// Tools: upstream validates Anthropic-shaped definitions ({name, input_schema}).
+	// OpenAI's {"type":"function","function":{…}} is rejected with
+	// 400 "expected string, received undefined at params.tools[0].name".
+	if rawTools, ok := params["tools"].([]any); ok {
+		tools := make([]any, 0, len(rawTools))
+		for _, rt := range rawTools {
+			tm, ok := rt.(map[string]any)
+			if !ok {
+				continue
+			}
+			if fn, ok := tm["function"].(map[string]any); ok {
+				name, _ := fn["name"].(string)
+				if name == "" {
+					continue
+				}
+				out := map[string]any{"name": name}
+				if d, _ := fn["description"].(string); d != "" {
+					out["description"] = d
+				}
+				if p, ok := fn["parameters"]; ok && p != nil {
+					out["input_schema"] = p
+				} else {
+					out["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
+				}
+				tools = append(tools, out)
+				continue
+			}
+			if _, ok := tm["name"].(string); ok { // already Anthropic-shaped / provider tool
+				tools = append(tools, tm)
+			}
+		}
+		if len(tools) == 0 {
+			delete(params, "tools")
+			delete(params, "tool_choice")
+		} else {
+			params["tools"] = tools
+		}
+	}
+
+	// tool_choice: upstream takes Anthropic strings only ("auto"/"any"/{type:"tool",name}).
+	switch tc := params["tool_choice"].(type) {
+	case string:
+		switch tc {
+		case "required":
+			params["tool_choice"] = map[string]any{"type": "any"}
+		case "auto":
+			params["tool_choice"] = map[string]any{"type": "auto"}
+		default: // "none"/unknown
+			delete(params, "tool_choice")
+		}
+	case map[string]any:
+		if fn, ok := tc["function"].(map[string]any); ok {
+			name, _ := fn["name"].(string)
+			if name == "" {
+				delete(params, "tool_choice")
+			} else {
+				params["tool_choice"] = map[string]any{"type": "tool", "name": name}
+			}
+		}
 	}
 
 	// CommandCode messages require content as array of blocks (never raw string)

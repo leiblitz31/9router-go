@@ -64,6 +64,7 @@ var ProviderAliasMap = map[string]string{
 	"uc":             "uc-web",
 	"veo-free":       "veoaifree-web",
 	"hf":             "huggingface",
+	"hc":             "hcnsec",
 	"hyp":            "hyperbolic",
 	"if":             "iflow",
 	"jina":           "jina-ai",
@@ -145,7 +146,6 @@ var ProviderAliasMap = map[string]string{
 	"zd":       "zed",
 	"atmo":     "atmorouter",
 	"rc":       "runcrate",
-	"hc":       "hcnsec",
 }
 
 // ResolveAlias returns the canonical provider ID for an alias, or the alias itself if not found.

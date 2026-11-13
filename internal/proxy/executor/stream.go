@@ -25,6 +25,7 @@ type CodexStreamState struct {
 	ToolCallCount     int
 	Completed         bool   // response.completed seen — finish chunk already emitted
 	UpstreamErr       []byte // raw upstream {"type":"error",...} event, if any
+	Usage             *translator.OpenAIUsage
 	CurrentToolCallID string
 	ToolCallIdx       map[string]int
 	ToolCallNames     map[string]string
@@ -33,7 +34,6 @@ type CodexStreamState struct {
 	OutputIndexToIdx  map[int]int
 	AnnouncedToolIDs  map[int]string
 	ArgsEmitted       map[int]bool
-	Usage             *translator.OpenAIUsage
 }
 
 // Responses output indexes include non-tool items (e.g. reasoning), so they

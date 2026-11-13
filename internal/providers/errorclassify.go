@@ -122,6 +122,12 @@ var ErrorRules = []ErrorRule{
 	// fall through to the request-scoped 4xx path and the connection gets
 	// zero cooldown while its backoff level never moves.
 	//
+	// The ban rule must precede them: an account-level risk-control block
+	// (11140 "request illegal" with a restricted display message) does not
+	// clear on a short cooldown, and re-picking the banned credential every
+	// two minutes is what inflates the block. The wording is the only safe
+	// signal — 11140 also carries ordinary throttling, which stays on backoff.
+	{Provider: "codebuddy-intl", Text: "account restricted upstream", CooldownMs: cooldownAccountBan},
 	{Provider: "codebuddy-intl", Text: "request illegal", Backoff: true},
 	{Provider: "codebuddy-intl", Text: "conversation id missing", Backoff: true},
 	// DeepSeek web account-level refusals both arrive as 403, and they are

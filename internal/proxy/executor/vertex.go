@@ -356,6 +356,8 @@ func ForwardVertex(w http.ResponseWriter, req *Request) error {
 	}
 	proxy.UnwrapIdentityGzip(httpReq, resp)
 	defer func() { _ = resp.Body.Close() }()
+
+	forwardUpstreamResponseHeaders(w, resp.Header)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 		log.Warn("vertex", "upstream refused", "status", resp.StatusCode, "model", model)
@@ -364,7 +366,8 @@ func ForwardVertex(w http.ResponseWriter, req *Request) error {
 	// The response is Gemini-shaped for the Gemini lanes and OpenAI-shaped for
 	// the partner lane; the caller's translation layer reads it accordingly.
 	if req.IsStream {
-		return execSSEStream(w, resp.Body, req)
+		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, 0, "vertex")
+		return geminiStream(w, stallReader, req.Ctx, req)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 	if err != nil {

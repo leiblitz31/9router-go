@@ -695,8 +695,8 @@ func init() {
 	// so Tools stays false. Context windows are the Studio's own published
 	// figures (its /open-apis/bot/config) for the v2.6 line; the v2.5 line
 	// publishes none there, so it carries none here rather than a guess.
-	mimoWebCaps := Capabilities{Vision: true, Reasoning: true, Search: true, ContextWindow: 1000000}
-	mimoWebLegacyCaps := Capabilities{Vision: true, Reasoning: true, Search: true}
+	mimoWebCaps := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ContextWindow: 1000000}
+	mimoWebLegacyCaps := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}
 	providerCapabilities["mimo-web"] = map[string]Capabilities{
 		"mimo-v2.6-flash":                 mimoWebCaps,
 		"mimo-v2.6-pro":                   mimoWebCaps,
@@ -733,17 +733,6 @@ func init() {
 			ThinkingFormat: "claude-adaptive",
 			ContextWindow:  1000000, MaxOutput: 128000,
 		},
-	}
-
-	providerCapabilities["nous"] = map[string]Capabilities{
-		"meituan/longcat-2.0:free":         {Tools: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 1048756, MaxOutput: 262144},
-		"meituan/longcat-2.5-preview:free": {Tools: true, Vision: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 1048576, MaxOutput: 131072},
-		"stepfun/step-5-preview:free":      {Tools: true, Vision: true, VideoInput: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 1000000, MaxOutput: 64000},
-		"upstage/solar-mini4:free":         {Tools: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 524288, MaxOutput: 131072},
-		"stepfun/step-3.7-flash:free":      {Tools: true, Vision: true, VideoInput: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 262144, MaxOutput: 256000},
-		"poolside/laguna-s-2.1:free":       {Tools: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 262144, MaxOutput: 131072},
-		"poolside/laguna-xs-2.1:free":      {Tools: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 262144, MaxOutput: 32768},
-		"stealth/missingno":                {Tools: true, Reasoning: true, ThinkingFormat: "nous", ContextWindow: 262144, MaxOutput: 131072},
 	}
 
 	providerCapabilities["nous"] = map[string]Capabilities{

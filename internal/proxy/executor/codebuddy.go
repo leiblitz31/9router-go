@@ -41,9 +41,10 @@ var codebuddyRateLimitRegex = regexp.MustCompile(`(?i)超出频率限制|frequen
 // POST /v2/chat/completions. Capture-verified upstream (open-sse
 // providers/registry/codebuddy-intl.js). The CLI values in codebuddyHeaders
 // below belong to the Tencent CN channel only: they are the official
-// @tencent-ai/codebuddy-code client, unpacked from 2.179.3 on 2026-11-03.
-// Its UA is two segments because the shipped adapter drops the OpenAI SDK's
-// own user-agent, and its runtime is the node build its launcher downloads.
+// @tencent-ai/codebuddy-code client. The build this identity presents is the
+// fork's single source of truth, `codebuddyCLIVersion` in
+// codebuddy_identity.go — the release date and commit pinned there belong to
+// that build, so the version cannot move on its own.
 const (
 	codebuddyIntlUserAgent = "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"
 	codebuddyIntlIDEVer    = "5.8.4"

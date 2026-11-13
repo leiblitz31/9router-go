@@ -18,7 +18,7 @@ func TestBuildCommandcodeBody_ToolsShape(t *testing.T) {
 			{"role":"assistant","content":"checking","tool_calls":[
 				{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Jakarta\"}"}}
 			]},
-			{"role":"tool","tool_call_id":"call_1","name":"get_weather","content":"31C sunny"}
+			{"role":"tool","tool_call_id":"call_1","content":"31C sunny"}
 		],
 		"tools":[{"type":"function","function":{
 			"name":"get_weather","description":"weather",
@@ -59,11 +59,9 @@ func TestBuildCommandcodeBody_ToolsShape(t *testing.T) {
 		t.Error("OpenAI 'function' wrapper must not survive")
 	}
 
-	// Upstream's whitelist drops tool_choice for Command Code entirely: it
-	// is an OpenAI-only key the provider payload must not carry (upstream
-	// treats it as a leak key in its own whitelist test).
-	if _, ok := params["tool_choice"]; ok {
-		t.Errorf("tool_choice must not leak into params, got %v", params["tool_choice"])
+	tc := params["tool_choice"].(map[string]any)
+	if tc["type"] != "tool" || tc["name"] != "get_weather" {
+		t.Errorf("want Anthropic tool_choice, got %v", tc)
 	}
 
 	msgs := params["messages"].([]any)
@@ -107,10 +105,11 @@ func TestBuildCommandcodeBody_ToolsShape(t *testing.T) {
 	}
 }
 
-// Upstream parity: tool_choice (string or object form) is not forwarded to
-// Command Code — the provider payload whitelist stays closed.
 func TestBuildCommandcodeBody_ToolChoiceStrings(t *testing.T) {
-	for _, in := range []string{"required", "auto"} {
+	for in, want := range map[string]any{
+		"required": map[string]any{"type": "any"},
+		"auto":     map[string]any{"type": "auto"},
+	} {
 		body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"` + in + `"}`)
 		out, err := buildCommandcodeBody(body, "m")
 		if err != nil {
@@ -118,8 +117,9 @@ func TestBuildCommandcodeBody_ToolChoiceStrings(t *testing.T) {
 		}
 		var payload map[string]any
 		json.Unmarshal(out, &payload)
-		if _, ok := payload["params"].(map[string]any)["tool_choice"]; ok {
-			t.Errorf("%s: tool_choice must not reach params", in)
+		got := payload["params"].(map[string]any)["tool_choice"].(map[string]any)
+		if got["type"] != want.(map[string]any)["type"] {
+			t.Errorf("%s: want %v, got %v", in, want, got)
 		}
 	}
 }

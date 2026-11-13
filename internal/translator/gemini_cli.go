@@ -14,6 +14,10 @@ import (
 // it is the project, the model, and the request, which is all the backend
 // accepts. Upstream builds it in transformRequest
 // (open-sse/executors/gemini-cli.js:28-34).
+//
+// Only the identity helpers live here: the fork builds the CLI envelope on its
+// own path, but the header injection in internal/proxy (upstream #1089) keys
+// off the same UA and api-client values the CLI itself sends.
 
 const (
 	// GeminiCLIApiClient is the X-Goog-Api-Client value the CLI sends.
