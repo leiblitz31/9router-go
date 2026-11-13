@@ -419,6 +419,11 @@ func (h *DashboardHandler) probeHTTPClient(data connectionProbeData, raw map[str
 		return nil, ""
 	}
 	tr := proxy.NewSafeTransportWithProxy(parsed.String(), false)
+	if strings.HasPrefix(parsed.Scheme, "socks") {
+		// SOCKS pools (#1120): the uTLS dialer speaks HTTP CONNECT only,
+		// so the probe rides the plain SOCKS transport.
+		tr = proxy.NewSafeTransportForSocksProxy(parsed.String())
+	}
 	return &http.Client{
 		Transport: tr,
 		Timeout:   connectionProbeTimeout,
@@ -454,6 +459,11 @@ func probeProxyURL(ctx context.Context, proxyURLStr string) error {
 	defer cancel()
 
 	tr := proxy.NewSafeTransportWithProxy(parsed.String(), false)
+	if strings.HasPrefix(parsed.Scheme, "socks") {
+		// SOCKS pools (#1120): the uTLS dialer speaks HTTP CONNECT only,
+		// so the probe rides the plain SOCKS transport.
+		tr = proxy.NewSafeTransportForSocksProxy(parsed.String())
+	}
 	client := &http.Client{
 		Transport: tr,
 		Timeout:   connectionProxyProbeTimeout,
