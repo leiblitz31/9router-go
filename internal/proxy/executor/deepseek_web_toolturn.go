@@ -55,7 +55,6 @@ func deepSeekToolTurnToClient(
 	nonce string,
 	reissue deepSeekToolReissue,
 ) (*deepSeekStreamAccumulator, error) {
-
 	if err := deepSeekDrain(upstream, accumulator); err != nil {
 		return accumulator, deepSeekFailure(http.StatusBadGateway, "deepseek-web: "+err.Error())
 	}
@@ -120,24 +119,20 @@ func deepSeekToolTurnToClient(
 
 		if !req.IsStream {
 			return accumulator, deepSeekWriteToolCalls(w, req, envelope.Model, calls, preamble)
-
 		}
 		return accumulator, deepSeekWriteStreamedToolCalls(w, req, envelope.Model, calls, preamble)
 	}
 	// A DSML block that named a tool the client never declared, or that named one
 	// at all, is markup rather than an answer. Leaving it in shows the user a wall
 	// of `parameter>` tags for something that was meant to be a tool call.
-	// The strip is applied unconditionally: a malformed block whose strip comes
-	// back empty is markup only, and keeping the original text in that case is
-	// exactly how such a turn leaked into Telegram. An empty answer is honest
-	// about a turn that contained no prose.
 	if deepSeekHasDSML(text) {
-		text = deepSeekStripDSML(text)
+		if stripped := deepSeekStripDSML(text); stripped != "" {
+			text = stripped
+		}
 	}
 
 	if !req.IsStream {
 		return accumulator, deepSeekWritePlainAnswer(w, req, envelope.Model, accumulator, text)
-
 	}
 	return accumulator, deepSeekWriteStreamedAnswer(w, req, envelope.Model, accumulator, text)
 }
@@ -184,38 +179,31 @@ func deepSeekToolPlainText(accumulator *deepSeekStreamAccumulator) string {
 
 // deepSeekWriteToolCall answers with an OpenAI tool_calls message, keeping any
 // text the model wrote around the calls.
-func deepSeekWriteToolCall(w http.ResponseWriter, req *Request, model string, call deepSeekToolRequest, preamble string, prompt string) error {
-	return deepSeekWriteToolCalls(w, req, model, []deepSeekToolRequest{call}, preamble, prompt)
+func deepSeekWriteToolCall(w http.ResponseWriter, req *Request, model string, call deepSeekToolRequest, preamble string) error {
+	return deepSeekWriteToolCalls(w, req, model, []deepSeekToolRequest{call}, preamble)
 }
 
 // deepSeekWriteToolCalls answers with an OpenAI tool_calls message.
-func deepSeekWriteToolCalls(w http.ResponseWriter, req *Request, model string, calls []deepSeekToolRequest, preamble string, prompt string) error {
-	return deepSeekWriteJSON(w, req, model, deepSeekToolCallMessage(calls, preamble), prompt)
+func deepSeekWriteToolCalls(w http.ResponseWriter, req *Request, model string, calls []deepSeekToolRequest, preamble string) error {
+	return deepSeekWriteJSON(w, req, model, deepSeekToolCallMessage(calls, preamble))
 }
 
 // deepSeekWritePlainAnswer answers with the model's text when no declared tool
 // was called.
-func deepSeekWritePlainAnswer(w http.ResponseWriter, req *Request, model string, accumulator *deepSeekStreamAccumulator, text string, prompt string) error {
+func deepSeekWritePlainAnswer(w http.ResponseWriter, req *Request, model string, accumulator *deepSeekStreamAccumulator, text string) error {
 	message := map[string]any{"role": "assistant", "content": text}
 	if thinking := accumulator.thinkingText(); thinking != "" {
 		message["reasoning_content"] = thinking
 	}
-	return deepSeekWriteJSON(w, req, model, message, prompt)
+	return deepSeekWriteJSON(w, req, model, message)
 }
 
 // deepSeekWriteJSON writes one chat.completion.
-func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, message map[string]any, prompt string) error {
+func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, message map[string]any) error {
 	content, _ := message["content"].(string)
 	if content != "" && req.ResponseBuf != nil {
 		req.ResponseBuf.Write([]byte(content))
 	}
-	answer := content
-	if calls, ok := message["tool_calls"]; ok {
-		if encoded, err := json.Marshal(calls); err == nil {
-			answer += string(encoded)
-		}
-	}
-	reasoning, _ := message["reasoning_content"].(string)
 
 	payload := map[string]any{
 		"id":      deepSeekResponseID(),
@@ -227,7 +215,7 @@ func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, messag
 			"message":       message,
 			"finish_reason": deepSeekFinishReason(message),
 		}},
-		"usage": deepSeekBuildUsage(prompt, answer, reasoning),
+		"usage": map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
 	}
 
 	encoded, err := json.Marshal(payload)
