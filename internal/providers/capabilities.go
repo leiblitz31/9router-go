@@ -328,6 +328,7 @@ var modelCapabilities = map[string]Capabilities{
 	// which produced thinking{type:"enabled"} and a 400 on the real API.
 	"claude-fable-5":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	"claude-fable-5-1": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
+	"claude-fable-5-2": {Vision: true, PDF: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
 	"glm-5.2":          {Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingEffortSupported: true, ThinkingCanDisable: new(false)},
 	// Upstream b6a9ca43: the exact glm-5.2 entry shadows the *glm-5.2*
 	// pattern completely, so it must repeat the pattern's
@@ -566,6 +567,14 @@ var providerCapabilities = map[string]map[string]Capabilities{
 		"laguna-s-2.1":  {Reasoning: true, Tools: true, ThinkingFormat: "openai"},
 		"laguna-xs-2.1": {Reasoning: true, Tools: true, ThinkingFormat: "openai"},
 	},
+	// sensenova-intl serves the same OpenAI wire as the China lane; the 6.8 pair
+	// mirrors the sensenova rows above and u1.5-lite is the image-gen id served
+	// through the image lane (upstream registry/sensenova-intl.js, 14b27dc7).
+	"sensenova-intl": {
+		"sensenova-6.8-flash":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"sensenova-6.8-flash-lite": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"sensenova-u1.5-lite":      {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	},
 	// Devin CLI's registry declares 200k for these GPT variants; the generic
 	// gpt-5.4/5.5 rows now publish the 1.05M API window, so the gateway's own
 	// number has to be recorded here (upstream decolua/9router 89ffac5a).
@@ -604,6 +613,26 @@ var providerCapabilities = map[string]map[string]Capabilities{
 	// table guesses.
 	"zed": {
 		"claude-haiku-5-5": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ContextWindow: 1000000, MaxOutput: 128000},
+	},
+	// GitHub Copilot routes Claude to its Anthropic-native /v1/messages shim,
+	// which applies Anthropic's per-model thinking rules: claude-haiku-5.5 is
+	// adaptive-only there too, and the budget shape the global *claude*haiku*
+	// pattern sends comes back 400 "thinking.type.enabled" is not supported
+	// (live probe). Limits are stated because this override short-circuits the
+	// catalog overlay; they match the synced catalog's github entry. Port of
+	// upstream decolua/9router open-sse/providers/capabilities.js (8aef7480).
+	"github": {
+		"claude-haiku-5.5": {Vision: true, PDF: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ContextWindow: 1000000, MaxOutput: 128000},
+	},
+	// commandcode pins haiku-5-5 to the catalog values: the generic commandcode
+	// fallback (200000/8192 for every claude-haiku id) understates the real
+	// window — GET https://api.commandcode.ai/provider/v1/models reports
+	// context_length 1000000 for this id (claude-haiku-4-5-20251001 stays 200000,
+	// so the 1M is per-model, not gateway-wide) and maxOutput 128000. Thinking
+	// stays the lane's commandcode format with effort. Port of upstream
+	// decolua/9router open-sse/providers/capabilities.js (8aef7480).
+	"commandcode": {
+		"claude-haiku-5-5": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "commandcode", ThinkingEffortSupported: true, ContextWindow: 1000000, MaxOutput: 128000},
 	},
 }
 
@@ -733,6 +762,7 @@ func init() {
 			ThinkingFormat: "claude-adaptive",
 			ContextWindow:  1000000, MaxOutput: 128000,
 		},
+
 	}
 
 	providerCapabilities["nous"] = map[string]Capabilities{

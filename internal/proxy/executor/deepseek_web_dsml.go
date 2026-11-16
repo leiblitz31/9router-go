@@ -80,7 +80,11 @@ func deepSeekHasDSML(text string) bool {
 // invents a tool name is passed over — the same conservative rule the JSON path
 // follows, for the same reason: guessing produces an invocation the client then
 // acts on.
-func deepSeekExtractDSML(text string, tools []deepSeekToolSpec) []deepSeekToolRequest {
+func deepSeekExtractDSML(text string, tools []deepSeekToolSpec, nonce ...string) []deepSeekToolRequest {
+	binding := ""
+	if len(nonce) > 0 {
+		binding = nonce[0]
+	}
 	invokes := deepSeekDSMLInvokes(text)
 	if len(invokes) == 0 {
 		return nil
@@ -88,7 +92,7 @@ func deepSeekExtractDSML(text string, tools []deepSeekToolSpec) []deepSeekToolRe
 
 	calls := make([]deepSeekToolRequest, 0, len(invokes))
 	for _, invoke := range invokes {
-		call, ok := deepSeekParseDSMLInvoke(invoke, tools)
+		call, ok := deepSeekParseDSMLInvoke(invoke, tools, binding)
 		if !ok {
 			continue
 		}
@@ -155,7 +159,13 @@ func deepSeekDSMLInvokes(text string) []string {
 }
 
 // deepSeekParseDSMLInvoke turns one invoke element into a call.
-func deepSeekParseDSMLInvoke(invoke string, tools []deepSeekToolSpec) (deepSeekToolRequest, bool) {
+//
+// A DSML invoke is the one dialect that reaches for a tool without being asked
+// in the prompt, so it is held to the full contract: when it carries a `_nonce`
+// parameter the value must match this request's, and its arguments must
+// validate against the declared schema. Upstream does the same in
+// parseFullWidthDsmlCalls.
+func deepSeekParseDSMLInvoke(invoke string, tools []deepSeekToolSpec, nonce string) (deepSeekToolRequest, bool) {
 	attributes, body, found := strings.Cut(invoke, ">")
 	if !found {
 		return deepSeekToolRequest{}, false
@@ -166,11 +176,68 @@ func deepSeekParseDSMLInvoke(invoke string, tools []deepSeekToolSpec) (deepSeekT
 		return deepSeekToolRequest{}, false
 	}
 
+	params := deepSeekDSMLParameters(body)
+	args, ok := deepSeekDSMLBoundArguments(params, name, tools, nonce)
+	if !ok {
+		return deepSeekToolRequest{}, false
+	}
 	return deepSeekToolRequest{
 		Name:      name,
-		Arguments: deepSeekDSMLArguments(body),
+		Arguments: args,
 		Raw:       invoke,
 	}, true
+}
+
+// deepSeekDSMLBoundArguments builds the argument object from the parameter
+// elements and holds it to the binding contract.
+//
+// `_nonce` is a binding parameter rather than an argument: when the model emits
+// one it must match the request's, and it never reaches the client. A missing
+// binding is tolerated, matching upstream's backward-compatibility rule.
+func deepSeekDSMLBoundArguments(params map[string]string, name string, tools []deepSeekToolSpec, nonce string) (string, bool) {
+	bound := params["_nonce"]
+	if bound != "" {
+		if nonce == "" || bound != nonce {
+			return "", false
+		}
+	}
+	trimmed := make(map[string]string, len(params))
+	for key, value := range params {
+		if key == "_nonce" {
+			continue
+		}
+		trimmed[key] = value
+	}
+	args := deepSeekDSMLArgumentsFrom(trimmed)
+	var object map[string]any
+	if err := json.Unmarshal([]byte(args), &object); err != nil {
+		return "", false
+	}
+	if !deepSeekValidateToolArguments(tools, name, object) {
+		return "", false
+	}
+	return args, true
+}
+
+// deepSeekDSMLArgumentsFrom renders an argument object from already-collected
+// parameter elements.
+func deepSeekDSMLArgumentsFrom(params map[string]string) string {
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	var b strings.Builder
+	b.WriteString("{")
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, "%q:%s", name, deepSeekDSMLValue(params[name]))
+	}
+	b.WriteString("}")
+	return b.String()
 }
 
 // deepSeekDSMLAttribute reads one quoted attribute value.
@@ -217,33 +284,8 @@ func isDSMLAttrBreak(c byte) bool {
 // That keeps the result byte-identical across identical turns, which matters
 // because the arguments string is compared when deciding whether a call repeats.
 func deepSeekDSMLArguments(body string) string {
-	params := deepSeekDSMLParameters(body)
-	if len(params) == 0 {
-		// Models regularly write the arguments as one JSON object in the invoke
-		// body instead of parameter elements, especially for structured or long
-		// values. Without this fallback such a call degraded silently to {} and
-		// the client rejected it for missing required properties.
-		if obj := deepSeekDSMLJSONBody(body); obj != "" {
-			return obj
-		}
-	}
+	return deepSeekDSMLArgumentsFrom(deepSeekDSMLParameters(body))
 
-	names := make([]string, 0, len(params))
-	for name := range params {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-
-	var b strings.Builder
-	b.WriteString("{")
-	for i, name := range names {
-		if i > 0 {
-			b.WriteString(",")
-		}
-		fmt.Fprintf(&b, "%q:%s", name, deepSeekDSMLValue(params[name]))
-	}
-	b.WriteString("}")
-	return b.String()
 }
 
 // deepSeekDSMLJSONBody interprets an invoke body as a single JSON object and

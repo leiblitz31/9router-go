@@ -58,6 +58,8 @@ export interface Combo {
   updatedAt: string
   /** Raw JSON of the combo's smart rules. Absent means the combo has none. */
   matchRules?: string
+  /** Combo-specific system prompt; unset falls back to the global custom prompt. */
+  customPrompt?: string
   /** Derived server-side: the members the rules currently own. */
   autoMembers?: string[]
 }
@@ -1664,7 +1666,7 @@ export const api = {
     const res = await request<any>('/api/combos')
     return Array.isArray(res) ? res : (res.combos || [])
   },
-  createCombo: (payload: { id?: string; name: string; kind?: string; models: string | string[]; strategy?: string; matchRules?: SmartRule[] }) =>
+  createCombo: (payload: { id?: string; name: string; kind?: string; models: string | string[]; strategy?: string; matchRules?: SmartRule[]; customPrompt?: string }) =>
     request<{ success: boolean; id: string }>('/api/combos', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -2290,6 +2292,26 @@ export const api = {
     }>(`/api/free-pi/ad?connectionId=${encodeURIComponent(connectionId)}`),
   freePiImpression: (connectionId: string, adId: string) =>
     request<{ recorded: boolean }>('/api/free-pi/ad/impression', {
+      method: 'POST',
+      body: JSON.stringify({ connectionId, adId }),
+    }),
+  freebuffAd: (connectionId: string) =>
+    request<{
+      ad: {
+        adId: string
+        clickUrl?: string
+        creative: {
+          title?: string
+          body?: string
+          cta?: string
+          imageUrl?: string
+          sponsorName?: string
+          brandColor?: string
+        }
+      } | null
+    }>(`/api/freebuff/ad?connectionId=${encodeURIComponent(connectionId)}`),
+  freebuffImpression: (connectionId: string, adId: string) =>
+    request<{ recorded: boolean }>('/api/freebuff/ad/impression', {
       method: 'POST',
       body: JSON.stringify({ connectionId, adId }),
     }),

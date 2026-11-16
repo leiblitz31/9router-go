@@ -697,6 +697,22 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 		ImageURL:   "https://token.sensenova.cn/v1/images/generations",
 	},
+	"sensenova-intl": {
+		// International site host (upstream registry/sensenova-intl.js
+		// transport + imageConfig). China keys answer 401 here and vice versa.
+		BaseURL:    "https://token.sensenova.ai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+		ImageURL:   "https://token.sensenova.ai/v1/images/generations",
+	},
+	"synthetic": {
+		// Upstream registry/synthetic.js transport. /openai/v1/models is public,
+		// so validation must hit /v2/quotas (validate.go case "synthetic"), not
+		// the derived /models URL.
+		BaseURL:    "https://api.synthetic.new/openai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	"cloudflare-ai": {
 		BaseURL:        "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
 		AuthHeader:     "Authorization",
@@ -885,6 +901,11 @@ var KnownProviders = map[string]ProviderConfig{
 		ThinkingFormat: "openai",
 		Hidden:         true,
 	},
+	"kenari": {
+		BaseURL:    "https://kenari.id/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	"alitp-intl": {
 		// Token Plan is served from the .maas host under the compatible-mode
 		// path, not the bare /v1 path (upstream registry/alitp-intl.js:23).
@@ -1022,7 +1043,7 @@ var KnownProviders = map[string]ProviderConfig{
 			"anthropic-version":                         "2023-06-01",
 			"Anthropic-Beta":                            "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28,extended-cache-ttl-2025-04-11,thinking-display-updates-2026-08-18",
 			"Anthropic-Dangerous-Direct-Browser-Access": "true",
-			"User-Agent":                                "claude-cli/2.1.280 (external, sdk-cli)",
+			"User-Agent":                                "claude-cli/2.1.322 (external, sdk-cli)",
 			"X-App":                                     "cli",
 			"X-Stainless-Helper-Method":                 "stream",
 			"X-Stainless-Retry-Count":                   "0",

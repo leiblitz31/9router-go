@@ -148,7 +148,7 @@ var usageSupportedProviders = []string{
 	"commandcode", "commandcode-goat", "deepseek", "gemini-cli", "gemini-web", "github", "glm", "glm-cn",
 	"grok-cli", "groq", "kimi", "kiro", "minimax", "minimax-cn", "minimax-code",
 	"minimax-code-global", "ollama",
-	"free-pi", "opencode-go", "opencode-zen", "qoder", "qoder-cn", "trae",
+	"free-pi", "freebuff", "opencode-go", "opencode-zen", "qoder", "qoder-cn", "trae",
 	"vercel-ai-gateway", "xiaomi-mimo", "zed",
 	"zcode",
 }
@@ -158,7 +158,7 @@ var usageSupportedProviders = []string{
 var usageApikeyProviders = []string{
 	"codebuddy-cn", "codebuddy-intl", "commandcode", "commandcode-goat", "deepseek", "gemini-web", "glm",
 	"glm-cn", "groq", "kimi", "kiro", "minimax", "minimax-cn", "ollama",
-	"free-pi", "opencode-go", "opencode-zen", "qoder", "qoder-cn",
+	"free-pi", "freebuff", "opencode-go", "opencode-zen", "qoder", "qoder-cn",
 	"vercel-ai-gateway", "xiaomi-mimo",
 }
 
@@ -1537,6 +1537,107 @@ func (h *DashboardHandler) writeConnectionModels(w http.ResponseWriter, r *http.
 			"provider":     conn.Provider,
 			"connectionId": conn.ID,
 			"models":       cv,
+		})
+		return
+	}
+
+	if conn.Provider == "claude" {
+		token := connData.AccessToken
+		if token == "" {
+			token = connData.APIKey
+		}
+		if token == "" {
+			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no valid token found")
+			return
+		}
+		headers := map[string]string{
+			"Authorization":     "Bearer " + token,
+			"Anthropic-Version": "2023-06-01",
+			"Anthropic-Beta":    "oauth-2025-04-20",
+			"Content-Type":      "application/json",
+		}
+		status, body, err := validateProbeDo(r.Context(), http.MethodGet, "https://api.anthropic.com/v1/models?limit=1000", headers, nil)
+		if err != nil {
+			statusCode, _, errMsg := ClassifyUpstreamNetworkError(err)
+			handlerutil.WriteJSONError(w, statusCode, "failed to fetch models: "+errMsg)
+			return
+		}
+		if status != http.StatusOK {
+			handlerutil.WriteJSONError(w, status, fmt.Sprintf("failed to fetch models: %d", status))
+			return
+		}
+		var listResp struct {
+			Data []struct {
+				ID          string `json:"id"`
+				DisplayName string `json:"display_name"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(body, &listResp)
+		models := make([]map[string]string, 0, len(listResp.Data))
+		for _, m := range listResp.Data {
+			name := m.DisplayName
+			if name == "" {
+				name = m.ID
+			}
+			models = append(models, map[string]string{
+				"id":   m.ID,
+				"name": name,
+			})
+		}
+		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+			"provider":     conn.Provider,
+			"connectionId": conn.ID,
+			"models":       models,
+		})
+		return
+	}
+
+	if conn.Provider == "anthropic" {
+		token := connData.APIKey
+		if token == "" {
+			token = connData.AccessToken
+		}
+		if token == "" {
+			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no API key configured")
+			return
+		}
+		headers := map[string]string{
+			"x-api-key":         token,
+			"Anthropic-Version": "2023-06-01",
+			"Content-Type":      "application/json",
+		}
+		status, body, err := validateProbeDo(r.Context(), http.MethodGet, "https://api.anthropic.com/v1/models", headers, nil)
+		if err != nil {
+			statusCode, _, errMsg := ClassifyUpstreamNetworkError(err)
+			handlerutil.WriteJSONError(w, statusCode, "failed to fetch models: "+errMsg)
+			return
+		}
+		if status != http.StatusOK {
+			handlerutil.WriteJSONError(w, status, fmt.Sprintf("failed to fetch models: %d", status))
+			return
+		}
+		var listResp struct {
+			Data []struct {
+				ID          string `json:"id"`
+				DisplayName string `json:"display_name"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(body, &listResp)
+		models := make([]map[string]string, 0, len(listResp.Data))
+		for _, m := range listResp.Data {
+			name := m.DisplayName
+			if name == "" {
+				name = m.ID
+			}
+			models = append(models, map[string]string{
+				"id":   m.ID,
+				"name": name,
+			})
+		}
+		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+			"provider":     conn.Provider,
+			"connectionId": conn.ID,
+			"models":       models,
 		})
 		return
 	}

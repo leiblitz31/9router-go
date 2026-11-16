@@ -21,7 +21,7 @@ import (
 // block as system[0] and a metadata.user_id. Without them the API returns
 // 429 rate_limit_error ("Error") even though auth and the body are valid.
 
-const defaultClaudeCLIVersion = "2.1.280"
+const defaultClaudeCLIVersion = "2.1.322"
 
 var (
 	claudeVersionMu      sync.RWMutex
@@ -29,21 +29,9 @@ var (
 	claudeVersionRegex   = regexp.MustCompile(`(?i)version\s+(\d+\.\d+\.\d+)\s+or\s+newer\s+is\s+required`)
 )
 
-// ClaudeCLIVersion returns the active Claude Code CLI version. An env override
-// CLAUDE_CODE_VERSION wins; otherwise any adopted version from a
-// claude_code_version_too_old upstream rejection; otherwise defaultClaudeCLIVersion.
-// Mirrors OMP getClaudeCodeVersion() in claude-code-fingerprint.ts.
-func ClaudeCLIVersion() string {
-	if env := os.Getenv("CLAUDE_CODE_VERSION"); env != "" {
-		return env
-	}
-	claudeVersionMu.RLock()
-	defer claudeVersionMu.RUnlock()
-	if adoptedClaudeVersion != "" {
-		return adoptedClaudeVersion
-	}
-	return defaultClaudeCLIVersion
-}
+// ClaudeCLIVersion is defined in claude_cli_version.go: the env pin
+// CLAUDE_CODE_VERSION, then an adopted claude_code_version_too_old rejection,
+// then the npm-resolved live version, then defaultClaudeCLIVersion.
 
 // AdoptRequiredClaudeCodeVersion parses an Anthropic 400 rejection for
 // claude_code_version_too_old and adopts the required version for the rest

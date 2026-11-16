@@ -1,5 +1,310 @@
 # Changelog
 
+## [v1.9.17-exp.4] - 2026-11-15
+
+### fix(deepseek-web): bound the compiled-schema cache
+
+- `deepSeekSchemaCache` was a package-level map keyed by the client-supplied schema bytes and never evicted, so a client varying its tool schemas grew it without bound (#1167 item 1).
+- The cache now caps at 200 entries — the same cap as the repo's session caches (`pplxSessionMaxEntries`) — and evicts the oldest entry on insert, mirroring `pplxSessionStore` and `deepSeekSessionStore.evictOldestLocked`. Entries carry a store timestamp; a nil validator (a cached compile failure) counts against the cap like any other entry. Lookup behaviour is unchanged.
+- New test `TestDeepSeekSchemaCacheBounded` pins the bound: cap+25 distinct schemas leave exactly the cap, the newest schema still validates, and a failed compile stays bounded. Verified with Go 1.27.4: `go build`, `go vet`, and the executor package's DeepSeek tests pass.
+
+### perf(combo): cut per-candidate health and lock queries
+
+- The combo failure loop health-checked every candidate model (`IsProviderAvailable`) and then checked the picked connection's model lock again by ID (`IsConnectionModelLocked`) — on an N-connection pool that was 1 list query + N single-row data fetches + N full-blob JSON unmarshals per candidate per pass, and the connection selector repeated the same health scan a second time just to log it. Measured: 77 µs and 225 allocations for one health check on an eight-connection pool.
+- `IsProviderAvailable` now answers from one statement over the provider's active rows, parsing the `modelLock_<model>` field in Go with the same tolerant rules as before (missing, empty, unparseable or malformed ⇒ unlocked) — not `json_extract`, which turns a malformed blob into a SQL error and would have flipped the fail-open semantics. An empty pool still reports available; a pool whose every row is locked still does not. "No connections" and "all locked" are kept distinct deliberately.
+- The rotation loop, the pinned-connection ineligibility check and both combo lock-skip sites already hold the connection's data blob in memory; they now read the lock fields from it (`db.ConnectionModelLockedData`) instead of re-fetching and re-parsing the same row from SQLite — the per-pass rotation cost drops from 2N queries to zero.
+- New permanent benchmark pins the health-check cost (`internal/handlers/chat` bench: 16 µs / 28 allocs after, from 77 µs / 225 before).
+- No schema, wire or dashboard change: the blob format, lock write path (`json_set`), and every read shared with the Next.js dashboard are untouched. Verified with the `db` and `chat` unit suites plus the integration suite.
+
+### perf(stream): skip ~99% of per-event allocations on the SSE relay path
+
+- A streamed turn used to allocate on every step of the relay: `scanEvents.emit` called `bytes.Join` even when an event carried a single `data:` line (pprof put `bytes.Join` at 99.2% of the scanner's allocations — 504 allocs for a 500-event stream), the handler path ran two full `json.Unmarshal` passes per content chunk hunting for a usage object, and the executor passthrough re-ran a complete `ScanStream` — a fresh 64 KB scanner buffer each time — on every 4 KB read to find the one chunk that reports usage.
+- All three are now gated by what the parsers actually need: every usage parser (`ParseClaudeUsage`, `ParseResponseUsage`, `ParseResponsesUsage`, `AccumulateClaudeStreamUsage`) unmarshals a struct with a `json:"usage"` field, so a chunk without the `"usage"` substring cannot yield usage. Single-line events hand their slice through instead of joining a one-element slice. Multi-line events keep the join; nothing about the wire protocol changes.
+- Measured on a 500-event (~65 KB) stream: `ScanStream` 88 µs → 52 µs, 129.6 KB → 65.6 KB per op, **504 → 3 allocs per op**. Guarded usage capture over a 200-event stream drops from a nested scan per read to one scan on the single read that carries usage. No single-turn latency change — the relay was already µs-scale between tokens — but per-stream garbage falls by ~1 MB, which cuts GC frequency on the small deployment target where several streams run concurrently.
+- New permanent benchmarks pin the paths (`internal/proxy/sse_stream_bench_test.go`, `internal/proxy/executor/usage_guard_bench_test.go`): passthrough copy, event scan, the multi-line join fallback (so a fast-path regression cannot hide the join path), the guarded usage capture, and the parser-miss fallback.
+- Verified: `go test ./internal/proxy/... ./internal/handlers/chat/` and the integration suite (`-tags=integration`, real router, real DB, fake upstreams) pass.
+
+## [v1.9.17-exp.3] - 2026-11-15
+
+### Parity: upstream decolua/9router v0.5.116..v0.5.119 (issue #1139)
+
+- fix(claude): retire `claude-fable-5.1` from the GitHub Copilot catalogs and `claude-fable-5-1` from `ocz`/`opencode-zen` (upstream 12e7930e); pin `claude-haiku-5-5` to claude-adaptive on the opencode-go and github lanes and to the commandcode format on commandcode (8aef7480).
+- feat(claude): resolve the Claude Code CLI fingerprint from the npm feed (`@anthropic-ai/claude-code/latest`, 6 h TTL, CLAUDE_CODE_VERSION pin, never below the bundled fallback) and rewrite `claude-cli/x.y.z` header values per request — chat lane and the usage tracker (upstream 43bc940e).
+- feat(provider): add `sensenova-intl` (token.sensenova.ai) registry entry, transport, image lane, and model catalog (upstream 14b27dc7).
+- feat(provider): add `synthetic` (synthetic.new) registry entry, transport, model catalog, key validation through `/v2/quotas` (the public `/models` cannot reject a bad key), and a subscription-quota usage handler (upstream ebe398a9 + 402230ed).
+- fix(dashboard): validate new fal-ai keys through `GET /v1/models?limit=1` with `Key <key>` auth instead of a paid generation (upstream 0cf07ccf).
+- feat(opencode): write effort `variants` built from `GetThinkingLevels` into `~/.config/opencode/opencode.json`, keeping variants the user already tuned; expose `thinking_levels` on `/v1/models` entries (upstream 7abc190d).
+- feat(dashboard): shift-click range selection on the proxy-pool list, filtered to visible rows (upstream 12256f72).
+
+Verified: `go build ./internal/...`, targeted `go test` suites (providers, pricing, translator, clientconfig, media, dashboard, chat), `bun test src` (827 pass), `bun run build`, and the svelte-check ratchet at baseline (74, 0 unresolved identifiers). Two pre-existing failures on clean main (`TestLoadConfigFromDotEnv`, `TestRecordConnectionAccountBanFailure_EscalatesAndClears`) are unrelated.
+
+## [v1.9.17-exp.3] - 2026-11-15
+
+### fix(claude): drop caller from blocks that do not define it
+- Claude Code attaches `caller` (agent attribution) to content blocks, and Anthropic defines it on the `tool_use` block only. On a `text` block — or a `text` nested in a `tool_result` — the API answers `messages.<n>.content.<m>.text.caller: Extra inputs are not permitted` and refuses the whole request, so the turn stays in history and every later turn fails too.
+- `SanitizeClaudePassthrough` now drops `caller` from every block that is not a `tool_use`, walking into the blocks nested in a `tool_result`. The valid `tool_use` field is preserved, and a body with nothing to clean is still forwarded byte for byte.
+
+### Documentation
+
+- **scope:** two web-fetch comments (`internal/handlers/media/media.go`, `internal/handlers/media/webfetch_ssrf_test.go`) that called the dialer's socket-level guard the thing that actually stops a private-address fetch. That guard is skipped while `ALLOW_PRIVATE_NETWORKING` is on (the default), so the `targetPrivate` pre-flight is the only check on that path; both comments now say so. Comment-only, no behaviour change.
+
+### docs(ssrf): correct the dial-guard record left by #1171
+
+- The dial-time socket guard is skipped while `ALLOW_PRIVATE_NETWORKING` is on (the default), so it refuses no address class on any dial. The provider-node write-gate comments, the create-gate test comment, and the provider-share-url spec no longer describe it as a backstop.
+- `.env.example` documents `ALLOW_PRIVATE_NETWORKING`, the strict opt-out.
+
+### feat(ssrf): allow private/LAN upstreams by default
+
+- `ALLOW_PRIVATE_NETWORKING` now defaults to on: a self-hosted or LAN provider (ollama on loopback, a second gateway on the LAN, a Tailscale peer) is a normal deployment, so the SSRF guard no longer refuses it out of the box. Set `ALLOW_PRIVATE_NETWORKING=false` to restore the strict refusal.
+- Creating a provider node from a LAN dashboard peer no longer fails with `Base URL is not allowed` when the node points at a private/LAN host. Cloud-metadata URLs are still refused at the provider-node write gate.
+- The media web-fetch pre-flight follows the same switch, so `/v1/web/fetch` dials private targets while private networking is on.
+
+### Fixed
+
+- DeepSeek web tool rendering is now byte-stable: the bound schema text and the nonce-stripped arguments use the deterministic marshaling helper, so identical requests produce identical bytes and keep prefix-cache hits (#1167).
+
+### Mobile dashboard layout: thumb-sized targets, readable values, tighter shell
+
+Dashboard on a phone kept the desktop register: 16px toggle switches, 28px
+buttons, and every long value (API keys, skill URLs, model ids) truncated
+mid-glyph. The changes below make the narrow viewport a designed state, not a
+squeezed desktop.
+
+**Shell**
+- `TopBar`: the breadcrumb crumb ("Providers ›") and the page icon only render
+  from `sm:` up; on a 390px screen the title now gets the whole row instead of
+  wrapping into the truncated "Providers & En…" the before screenshots show.
+- `Sidebar`: the three fake macOS traffic-light dots are hidden below `lg:` —
+  a drawer on a phone has no window around it, so the dots read as broken UI.
+- `App.svelte`: canvas padding steps `px-4 py-4 sm:p-6 lg:p-10`, and the
+  scroll canvas carries `pb-safe`; `index.html` gets `viewport-fit=cover` so
+  the iOS home indicator never covers the last control.
+- Group accordions in the sidebar are full-height tap rows on mobile.
+
+**Tap targets (44px thumb minimum, antislop-layoutmobile R-03)**
+- `ui/Toggle.svelte`: every switch in the app (settings, providers, quota)
+  keeps its 28×16 visual but gains an 8px invisible halo via a new
+  `tap-target` utility (`index.css`), hit-tested in the browser.
+- `ui/Button.svelte`: `size="sm"` is 40px tall below `sm:`, 28px from `sm:` up.
+  This lifts the Wrap/Copy/Export console toolbar, Reconcile rules, and every
+  modal footer button at once.
+- `QuotaTrackerView`: the 13 `h-8` filter/stepper controls are `h-11 sm:h-8`;
+  the per-connection ARN copy pill gets `py-2 sm:py-0.5`.
+- `ApiKeysTable`: reveal/copy icon buttons and the enable/disable/expire pills
+  reach 44px on a phone.
+- `ComboCard`: the Test/Copy/Edit/Delete icon grid rows are 44px, the strategy
+  select is taller, and the two checkboxes carry the `tap-target` halo.
+- `ConsoleLogStream`: level-filter chips are `h-11 sm:h-6`.
+- `Sidebar` drawer nav rows: `py-2.5 sm:py-1.5`.
+
+**Readable values (truncation where the value is the point)**
+- Skills prompt instruction and skill URLs wrap (`break-all`) on mobile.
+- API key tokens (`ApiKeysTable`), bulk-created keys, and the tunnel URL in
+  `EndpointView` wrap on mobile, truncate from `sm:` up.
+- Model ids and proxy URLs in `ProviderDetailView` likewise.
+
+**KPI grids**
+- Usage summary and `SummaryKpiCards` drop from a 1-column phone stack (6 cards
+  ≈ 700px of scrolling) to 2 columns; Cache/Compression analytics keep their
+  existing 2-col base with a tightened gap.
+
+**Token Saver**
+- The "Optimal Setup" header stacks on mobile (icon row, then buttons), so the
+  previously cut-off "Apply Recommended" button and the squeezed title render
+  in full; the guide-toggle chevron no longer overflows the viewport.
+
+**Verification**
+- Before/after screenshots at 390×844 across all 16 dashboard routes
+  (endpoint, providers, combos, usage, quota, token-saver, cli-tools,
+  proxy-pools, plans, persona, security, settings, skills, console, media);
+  DOM audit before: 155+ sub-34px controls, one off-viewport icon; after:
+  zero horizontal overflow on every route and every remaining small control
+  carries the tap-target halo (hit-test verified).
+- `bun run build`, `bun run ratchet:svelte -- --tsconfig tsconfig.app.json`
+  (74 = baseline, 0 unresolved), `bun test src scripts` (835 pass),
+  `go test ./web/...`, `bunx oxlint --deny-warnings`, CGO-disabled builds for
+  all `CROSS_TARGETS` pairs.
+
+### fix(combo): stop failover on in-band error frames while maintaining connection lockout
+
+- In combo streaming, treat verified in-band SSE error frames (`event: error` or non-null `error` payloads) as immediate failure signals: stop the combo chain to avoid masking upstream errors, while recording the connection cooldown/lockout so subsequent client retries route to healthy candidates.
+- Fixes false-positive in-band detection by requiring authoritative `DetectInbandSSEError` match rather than substring matching `"error":null`.
+
+### fix(translator): preserve DeepSeek reasoning_content across message conversions
+
+- Preserves `reasoning_content` on assistant message turns across request translations and Gemini thought mappings, preventing DeepSeek HTTP 400 multi-turn errors.
+- Parity with upstream `decolua/9router#1099`.
+
+### Combos: per-combo custom system prompt with global fallback
+
+Add a `customPrompt` field to combos, letting operators set a combo-specific
+system prompt that overrides the global custom prompt prefix/suffix when set.
+When unset, requests routed through the combo fall back to the global custom
+prompt settings unchanged.
+
+Port of upstream decolua/9router PR #5433 / Issue #5376.
+
+**Backend:**
+- `Combo` model gains `CustomPrompt` (`json:"customPrompt,omitempty"`).
+- `combos` table gains an additive `customPrompt TEXT DEFAULT ''` column.
+- Combo execution injects the combo's custom prompt as the system prompt before
+  any model attempt; when unset, the global prompt prefix/suffix applies.
+- When set, the global prompt is not stacked on top — the combo prompt replaces
+  it.
+
+**Dashboard:**
+- `CreateComboModal` gains an optional "Custom System Prompt" textarea for
+  create and edit.
+- `customPrompt` is threaded through `createCombo`/`updateCombo`.
+
+**Verification:**
+- `go test ./internal/handlers/chat/ -run "Combo" -count=1` — green
+- `go vet ./internal/...` — clean
+- `gofmt -l internal/models internal/db internal/handlers/chat` — clean
+
+Closes #1109
+
+## [v1.9.17-exp.2] - 2026-11-13
+
+### deepseek-web parity with upstream (nonce binding, schema validation, citations, done-terminator)
+
+Closes the behavioural gaps between the Go deepseek-web executor and upstream
+`decolua/9router` (`open-sse/executors/deepseek-web.js`,
+`open-sse/translator/deepseekWebTools.js` / `deepseekWebToolBinding.js`).
+
+**Tool calls**
+
+- Per-request `_nonce` binding: the tool prompt now renders every schema with a
+  `_nonce` const property (plus `required`) and requires the binding in the
+  reply; the parser rejects a call whose binding mismatches and never forwards
+  the `_nonce` argument to the client. The nonce is minted once per request in
+  `ForwardDeepSeekWeb` and threaded through prompt + parser, matching
+  `serializeDeepSeekToolPrompt` / `getToolNonce` (`_nonce` upstream).
+- JSON-Schema argument validation via `github.com/santhosh-tekuri/jsonschema/v5`
+  (pure Go, draft 2020-12, mirrors upstream's Ajv2020 with `strict:false`,
+  `validateFormats:false`). A bound call violating its declared schema is
+  rejected; DSML invokes are always schema-validated, matching
+  `finalizeParsedToolCalls`; the JSON envelope path validates calls that carry
+  `_nonce` (missing binding tolerated, as upstream).
+- Malformed-envelope repair retry once: an answer that carries tool markup or a
+  declared-tool envelope that failed to parse triggers one fresh-session
+  completion with the contract restated (upstream's
+  `hasMalformedDeepSeekToolIntent` → repair flow). A second malformed answer
+  fails the turn with 502. `deepSeekToolTurnToClient` now returns the
+  accumulator to settle with, so a repaired turn settles against the fresh
+  session.
+
+**Search/citations**
+
+- Citation block rewritten to upstream's format: `[N]: [title](url)` lines
+  ascending by `cite_index`, blank-line separated (was `\n[N] title (url)`).
+  Results without a `cite_index` are filtered.
+- `[citation:N]` markers rewritten to `[N]` on search models, removed entirely
+  on `search-silent` models; `FINISHED` and a leading `SEARCH|WEB_SEARCH|SEARCHING`
+  transport token are stripped from content (`formatStreamContent` /
+  `cleanDeepSeekToken`).
+- `fold` model ids are treated as search models (`isSearchModel`).
+
+**Stream / prompt**
+
+- 750ms post-FINISHED drain: the upstream sometimes holds the completion body
+  open past `FINISHED` (search results still in flight) and clients hung on it.
+  The stream scan now bounds the tail like upstream's done-terminator and
+  answers the turn instead of waiting for the close.
+- Markdown image references (`![alt](url)`) are stripped from the rendered
+  prompt — the web API has no image slot and the syntax degrades the model's
+  answer.
+
+**Verification**
+
+- `go test ./internal/proxy/executor/` (new `deepseek_web_parity_test.go` pins
+  every behaviour above: citation format/silent/filter, marker rewrite, fold,
+  token cleaning, image strip, nonce mint/bind/reject/strip, schema rejection,
+  DSML binding, malformed detection, repair once/give-up/no-nonce).
+- Portability gate: all five `CROSS_TARGETS` build with `CGO_ENABLED=0` after
+  the new dependency.
+
+### Gemini parity (upstream decolua/9router ef2af4def, 60a1b3657)
+
+- Gemini SDK client requests: every `functionResponse` in one content block now becomes its own `role:"tool"` message, and all of them are emitted before any co-located follow-up text or `functionCall` message. Previously only the last result survived and follow-up parts were dropped, leaving parallel tool_call ids unanswered — providers reject that with a 400. Port of upstream `open-sse/translator/request/gemini-to-openai.js` (ef2af4def).
+- Tool result payloads now unwrap `response.result` like upstream (`response?.result || response || {}`): a truthy result is stringified as-is, a response without a usable result falls back to the whole response object, and a missing response degrades to `{}`. Keys beside `result` survive the decode (verbatim `raw` capture on `GeminiFuncResp`).
+- Command Code (CLI lane, `commandcode`/`cmc`): added `google/gemini-4-carbon` and `claude-fable-5-2` to the static model catalog (upstream 60a1b3657). Pricing for `google/gemini-4-carbon` already resolves through the `gemini-4-*` pattern; `claude-fable-5-2` already had Fable-tier pricing. The `commandcode-goat` feed catalog already carried both ids.
+- Covered by `TestGeminiClientPreservesAllToolResults` (table-driven, mirrors upstream `tests/unit/gemini-request-tool-results.test.js` cases) and `TestGeminiClientToolResultWithoutResponse`.
+
+### Features & Improvements
+
+- **Antigravity**: Add Gemini 4 Carbon models (`gemini-4-carbon`, `gemini-4-carbon-high`, `gemini-4-carbon-medium`, `gemini-4-carbon-low`) with reasoning effort tier resolution and dashboard quota tracking (upstream `decolua/9router#8aef7480` parity).
+- **Antigravity**: Bump IDE / Hub version to 2.24.0 across client identity and MITM handlers (upstream `decolua/9router#f172c3c4` parity).
+- **Antigravity**: Support Gemini 4 Argon quota fallback to shared Gemini weekly/session pools for Ultra plans without dedicated Argon quota summary buckets (upstream `decolua/9router#8a833631` parity).
+- **Antigravity**: Resolve Claude 5.5 and Gemini 4 Carbon models in quota checks to inspect tiered variants (`claude-sonnet-5-5-high`, `gemini-4-carbon-high`).
+- **Antigravity**: Harmonize Argon weekly and session quota keys (`gemini_argon_weekly` and `gemini_argon_session`) with legacy alias backward compatibility across backend and UI.
+
+### Fixed
+- Preserve name-addressed native Responses function results without inventing a `call_id`. The Codex backend accepts these results by name; adding an ID makes it reject them with `No tool call found for function call output with call_id call_0`.
+- Verified against merged decolua/9router master at `1855aa44473e88feac9d3f131b9c0c5fc9706b68`, which passes native input arrays through unchanged; regression coverage includes the body converter and production router in classic and Lite modes.
+
+### feat(freebuff): full Freebuff CLI spoofing and dashboard ad banner integration
+
+- Upgrade Freebuff CLI spoofing to modern `Freebuff-CLI/0.2.36` parity:
+  - Update User-Agent across session, OAuth, probe, and run calls from legacy `codebuff-cli/0.0.138` to `Freebuff-CLI/0.2.36`.
+  - Expand model-to-root-agent mapping to `base3` harness models (`base3-free-deepseek`, `base3-free-deepseek-flash`, `base3-fast`, `base3-free-luna-6`, `base3-free-solar-mini4`, `base3-free-muse-spark-1-3`, `base3-free-gemini-3-8-flash`, etc.).
+  - Add all 6 canonical system prompt openings from upstream Freebuff catalog models.
+  - Send `surface: "cli"` and `freebuff_multi_session: "1"` in `codebuff_metadata`, and generate CLI-shaped `codebuff-cli-<8char>` fallback fingerprints.
+  - Send `x-freebuff-wallet-spend-limit: session`, `x-freebuff-multi-session: 1`, and `x-freebuff-purchase-continuity: 1` on session requests.
+- Add Freebuff ad surface matching the `free-pi` model:
+  - Serve Freebuff ads via `GET /api/freebuff/ad` and report paint impressions via `POST /api/freebuff/ad/impression` (`internal/handlers/dashboard/freebuff_ads*.go`).
+  - Add `FreebuffAdBanner.svelte` in dashboard connection view, reporting impressions only once the banner is painted on screen.
+- Integrate Freebuff quota into Quota Tracker (`/api/usage/connections` and `/api/usage/{connectionId}`):
+  - Register `freebuff` in `usageSupportedProviders` and `usageApikeyProviders`.
+  - Fetch account quotas from `/api/v1/freebuff/session`, mapping daily Freebucks (spent, total, remaining, refill time), wallet balance, and active session countdown to the Quota Tracker table.
+- Verified with unit tests (`freebuff_ads_test.go`, `usage_freebuff_test.go`, `freebuff_test.go`, `freebuff_session_test.go`), `bun run build`, and `make vet-svelte`.
+
+### fix(claude): upstream flow parity for bare model resolution, live catalog, and CLI fingerprint
+
+- Route bare `claude-*` model requests to Claude OAuth connection when no Anthropic API key connection is active (upstream `decolua/9router` commit `29f3db11` parity).
+- Add live `/models` catalog enumeration for `claude` and `anthropic` connections in dashboard with OAuth beta header and display name parsing (upstream commit `43bc940e` parity).
+- Update base Claude CLI fingerprint floor from `2.1.280` to `2.1.322` and update static model catalogs to include `claude-fable-5-2`, `claude-sonnet-5-5`, and `claude-haiku-5-5` (upstream commits `12e7930e` and `8aef7480` parity).
+
+### fix(combo): remove duplicate connection accounts from model picker list
+
+- Clean up model picker groups in Combo creator to list only genuine catalog providers and provider nodes (`provider/model`), eliminating redundant duplicate groups for each active connection account (`connectionName/model`).
+- Account management, rotation, and priority remain configured via the provider detail settings.
+
+### feat(providers): add Kenari provider support (kenari.id)
+
+- Adds built-in support for Kenari (`kenari.id`, alias `ki`) with standard OpenAI-compatible API endpoints, model catalog, and dashboard artwork.
+
+### chore(deps): bump Go toolchain to 1.27.4
+
+- `go.mod` pins `toolchain go1.27.4` (was `go1.27.3`), the latest patch release of the 1.27 line. The `go 1.27` language directive is unchanged, so no source change is needed.
+- CI, the release workflow and the site generator now set `go-version: "1.27.4"` instead of the floating `1.27`, so every job runs the exact pinned toolchain rather than whatever the floating tag currently resolves to.
+- The Docker builder stage uses `golang:1.27.4-alpine`, so release images are built with the same pinned toolchain.
+
+### Bug Fixes
+
+- Stop advertising `br, zstd` in `Accept-Encoding` headers across DeepSeek Web executor, attest, and Grok dashboard validation to prevent receiving compressed payloads the runtime cannot decode (upstream `decolua/9router#5539` commit `97b2c545` parity).
+
+### Chores
+
+- Bump Codex CLI advertised client identity from `0.159.0` to `0.167.1` in `internal/providers/client_identity.go` (upstream `decolua/9router` commit `aaf9b65f` parity).
+
+### Bug Fixes
+
+- Add missing flat canonical pricing rows for `claude-fable-5-2`, `claude-fable-5-1`, `claude-haiku-5-5`, and `gpt-6.1-terra`, and reconcile `commandcode` / `commandcode-goat` `claude-fable-5-1` cached rate with upstream (upstream `decolua/9router` commits `8aef7480` and `acb3c080` parity).
+
+### Bug Fixes
+
+- Add `gemini-4-*` pattern pricing ($2.00 input, $10.00 output, $0.10 cached, $10.00 reasoning, $0.1875 cache creation) and correct `gemini-4-argon*` cache creation pricing from $2.00 to $0.1875 (upstream `decolua/9router` commit `4c7804ef` parity).
+
+### Bug Fixes
+
+- Strip `~optional` from tool parameters schemas during Gemini and Antigravity translation, preventing HTTP 400 `INVALID_ARGUMENT: Unknown name "~optional"` from Google Protobuf validation (upstream `decolua/9router#5573` parity).
+
+### feat(providers): add DeepSeek V4 Pro effort aliases (-max and -none)
+
+- Adds Cursor-friendly `deepseek-v4-pro-max` and `deepseek-v4-pro-none` model aliases, mapping to `deepseek-v4-pro` with explicit max or disabled thinking configuration.
+- Parity with upstream `decolua/9router#950` (closes `#926`).
+
 ## [v1.9.17-exp.1] - 2026-11-13
 
 ### Changed

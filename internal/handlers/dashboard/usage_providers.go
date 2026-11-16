@@ -103,12 +103,16 @@ func fetchProviderUsage(ctx context.Context, provider string, data map[string]an
 		// tool reads. free-pi reports credits, not dollars, so the handler maps
 		// credits and tokens and leaves cost out rather than inventing a figure.
 		return fetchFreePiUsage(ctx, firstNonEmptyStr(accessToken, apiKey), connectionBaseURL(data)), true
+	case "freebuff":
+		return fetchFreebuffUsage(ctx, firstNonEmptyStr(accessToken, apiKey, psdStr(psd, "authToken")), connectionBaseURL(data)), true
 	case "minimax-code", "minimax-code-global":
 		return fetchMiniMaxCodeUsage(ctx, provider, accessToken, psdStr(psd, "realUserID")), true
 	case "zcode":
 		return fetchZcodeUsage(ctx, firstNonEmptyStr(accessToken, apiKey), psdStr(psd, "deviceId")), true
 	case "glm", "glm-cn":
 		return fetchGLMUsage(ctx, provider, firstNonEmptyStr(apiKey, accessToken)), true
+	case "synthetic":
+		return fetchSyntheticUsage(ctx, apiKey), true
 	default:
 		return usageResult{}, false
 	}
@@ -422,6 +426,58 @@ func firstNonEmptyAny(vals ...any) any {
 		}
 	}
 	return nil
+}
+
+// ---------- synthetic: subscription quota on GET /v2/quotas ----------
+
+// fetchSyntheticUsage ports upstream open-sse/services/usage/synthetic.js:
+// GET https://api.synthetic.new/v2/quotas with Bearer auth; the call itself
+// does not count against the quota. Response shape:
+// { subscription: { limit, requests, renewsAt } }.
+func fetchSyntheticUsage(ctx context.Context, apiKey string) usageResult {
+	if strings.TrimSpace(apiKey) == "" {
+		return usageResult{message: "Synthetic API key not available. Add a key to view usage."}
+	}
+	status, _, out, err := usageGet(ctx, "https://api.synthetic.new/v2/quotas", map[string]string{
+		"Authorization": "Bearer " + strings.TrimSpace(apiKey),
+		"Accept":        "application/json",
+	})
+	if err != nil {
+		return usageResult{plan: "Synthetic", message: fmt.Sprintf("Synthetic error: %v", err)}
+	}
+	if status == 401 || status == 403 {
+		return usageResult{plan: "Synthetic", message: "Synthetic authentication failed. Check the API key."}
+	}
+	if status < 200 || status >= 300 {
+		return usageResult{plan: "Synthetic", message: fmt.Sprintf("Synthetic usage API error (%d)", status)}
+	}
+	data := usageJSON(out)
+	if data == nil {
+		return usageResult{plan: "Synthetic", message: "Synthetic returned no subscription quota."}
+	}
+	sub, _ := data["subscription"].(map[string]any)
+	if sub == nil {
+		return usageResult{plan: "Synthetic", message: "Synthetic returned no subscription quota."}
+	}
+	total := usageNum(sub["limit"], 0)
+	if total <= 0 {
+		return usageResult{plan: "Synthetic", message: "No Synthetic subscription quota found for this key."}
+	}
+	used := math.Max(0, usageNum(sub["requests"], 0))
+	remaining := math.Max(0, total-used)
+	return usageResult{plan: "Synthetic", quotas: map[string]any{
+		"Requests": map[string]any{
+			"name":             "Subscription requests",
+			"used":             used,
+			"total":            total,
+			"remaining":        remaining,
+			"percentage":       math.Round(used / total * 100),
+			"colorPercentage":  math.Round(remaining / total * 100),
+			"percentageIsUsed": true,
+			"unlimited":        false,
+			"resetAt":          usageResetTime(sub["renewsAt"]),
+		},
+	}}
 }
 
 // ---------- groq: rate-limit headers on GET /openai/v1/models ----------
@@ -1720,6 +1776,8 @@ var antigravityDailyBaseURL = "https://daily-cloudcode-pa.googleapis.com"
 const antigravityDashboardUA = providers.AntigravityCLIUserAgent
 
 var antigravityImportantModels = map[string]bool{
+	"gemini-4-carbon-high": true, "gemini-4-carbon-medium": true, "gemini-4-carbon-low": true,
+	"gemini-4-carbon":     true,
 	"gemini-4-argon-high": true, "gemini-4-argon-medium": true, "gemini-4-argon-low": true,
 	"gemini-4-argon":        true,
 	"gemini-3.8-flash-high": true, "gemini-3.8-flash-medium": true, "gemini-3.8-flash-low": true,
@@ -1842,7 +1900,7 @@ func fetchAntigravityDashboardUsage(ctx context.Context, accessToken, projectID 
 		for key, wq := range weekly {
 			if key == "gemini_weekly" {
 				antigravityReconcileFamily(quotas, "gemini-", "image", wq)
-			} else if key == "argon_weekly" {
+			} else if key == "gemini_argon_weekly" || key == "argon_weekly" {
 				antigravityReconcileFamily(quotas, "gemini-4-argon", "", wq)
 			} else if key == "claude_gpt_weekly" {
 				antigravityReconcileFamily(quotas, "claude-", "", wq)
@@ -1915,8 +1973,8 @@ func fetchAntigravityDashboardWeekly(ctx context.Context, accessToken, projectID
 	configs := []familyConfig{
 		{
 			pattern: "argon",
-			weekly:  familyTarget{"argon_weekly", "Gemini 4 Argon (Weekly)", "weekly"},
-			session: familyTarget{"argon_session", "Gemini 4 Argon (5h)", "5h"},
+			weekly:  familyTarget{"gemini_argon_weekly", "Gemini 4 Argon (Weekly)", "weekly"},
+			session: familyTarget{"gemini_argon_session", "Gemini 4 Argon (5h)", "5h"},
 		},
 		{
 			pattern: "gemini",
@@ -1976,7 +2034,7 @@ func fetchAntigravityDashboardWeekly(ctx context.Context, accessToken, projectID
 					total := 100.0
 					remPct := math.Round(frac * 100)
 					used := math.Max(0, math.Round((1.0-frac)*100))
-					result[target.key] = map[string]any{
+					entry := map[string]any{
 						"used":                used,
 						"total":               total,
 						"resetAt":             usageResetTime(b["resetTime"]),
@@ -1984,6 +2042,13 @@ func fetchAntigravityDashboardWeekly(ctx context.Context, accessToken, projectID
 						"unlimited":           false,
 						"displayName":         target.displayName,
 						"window":              target.window,
+					}
+					result[target.key] = entry
+					switch target.key {
+					case "gemini_argon_weekly":
+						result["argon_weekly"] = entry
+					case "gemini_argon_session":
+						result["argon_session"] = entry
 					}
 					break
 				}
