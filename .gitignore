@@ -88,3 +88,4 @@ sitegen
 
 # Merge scratch dir (conflict classification, hunk decisions)
 .merge-work/
+

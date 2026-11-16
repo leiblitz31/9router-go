@@ -26,6 +26,7 @@ import (
 // executor does not pretend one: requests are answered as plain chat
 // (thinking and web search included). Tool synthesis, if it is ever
 // wanted, belongs in its own module like the other web providers'.
+
 func ForwardMimoWeb(w http.ResponseWriter, req *Request) error {
 	ctx := req.Ctx
 	if ctx == nil {

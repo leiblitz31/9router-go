@@ -229,6 +229,7 @@ func commandcodeConvertMessages(rawMsgs []any) (messages []any, system string) {
 			}
 		}
 	}
+
 	for _, raw := range rawMsgs {
 		msg, ok := raw.(map[string]any)
 		if !ok {
@@ -253,6 +254,7 @@ func commandcodeConvertMessages(rawMsgs []any) (messages []any, system string) {
 				}
 			}
 			converted = append(converted, convertedMsg)
+
 		case "assistant":
 			converted = append(converted, map[string]any{
 				"role":    "assistant",

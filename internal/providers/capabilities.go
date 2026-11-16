@@ -726,6 +726,7 @@ func init() {
 	// publishes none there, so it carries none here rather than a guess.
 	mimoWebCaps := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ContextWindow: 1000000}
 	mimoWebLegacyCaps := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}
+
 	providerCapabilities["mimo-web"] = map[string]Capabilities{
 		"mimo-v2.6-flash":                 mimoWebCaps,
 		"mimo-v2.6-pro":                   mimoWebCaps,

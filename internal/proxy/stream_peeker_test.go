@@ -112,6 +112,7 @@ func TestStreamContentPeeker_ErrorNullDoesNotTriggerInbandError(t *testing.T) {
 	}
 }
 
+
 func TestStreamContentPeeker_ReasoningContentCommits(t *testing.T) {
 	tests := []struct {
 		name         string

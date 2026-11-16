@@ -285,6 +285,7 @@ func (h *ChatHandler) disabledModelIndex() map[string]map[string]bool {
 				disabled[nodeID] = set
 			}
 		}
+
 	}
 	return disabled
 }

@@ -645,6 +645,7 @@ func buildCommandcodeBodyForSession(body []byte, model, sessionID string) ([]byt
 				params["tool_choice"] = map[string]any{"type": "tool", "name": name}
 			}
 		}
+
 	}
 
 	// CommandCode messages require content as array of blocks (never raw string)

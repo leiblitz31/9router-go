@@ -128,6 +128,7 @@ var ErrorRules = []ErrorRule{
 	// two minutes is what inflates the block. The wording is the only safe
 	// signal — 11140 also carries ordinary throttling, which stays on backoff.
 	{Provider: "codebuddy-intl", Text: "account restricted upstream", CooldownMs: cooldownAccountBan},
+
 	{Provider: "codebuddy-intl", Text: "request illegal", Backoff: true},
 	{Provider: "codebuddy-intl", Text: "conversation id missing", Backoff: true},
 	// DeepSeek web account-level refusals both arrive as 403, and they are

@@ -305,6 +305,7 @@ Closes the behavioural gaps between the Go deepseek-web executor and upstream
 - Adds Cursor-friendly `deepseek-v4-pro-max` and `deepseek-v4-pro-none` model aliases, mapping to `deepseek-v4-pro` with explicit max or disabled thinking configuration.
 - Parity with upstream `decolua/9router#950` (closes `#926`).
 
+
 ## [v1.9.17-exp.1] - 2026-11-13
 
 ### Changed

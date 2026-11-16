@@ -19,6 +19,7 @@ import (
 // own path, but the header injection in internal/proxy (upstream #1089) keys
 // off the same UA and api-client values the CLI itself sends.
 
+
 const (
 	// GeminiCLIApiClient is the X-Goog-Api-Client value the CLI sends.
 	GeminiCLIApiClient = "google-genai-sdk/1.41.0 gl-node/v22.19.0"

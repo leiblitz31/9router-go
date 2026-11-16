@@ -33,6 +33,7 @@ import (
 // Default fallback is read from version.json at init if not overridden.
 var CurrentVersion = "1.9.17-exp.4"
 
+
 // DefaultUpdateURL is the primary remote version manifest URL.
 var DefaultUpdateURL = "https://raw.githubusercontent.com/luqman-v1/9router-go/main/version.json"
 

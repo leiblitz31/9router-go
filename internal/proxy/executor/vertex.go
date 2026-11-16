@@ -358,6 +358,7 @@ func ForwardVertex(w http.ResponseWriter, req *Request) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	forwardUpstreamResponseHeaders(w, resp.Header)
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 		log.Warn("vertex", "upstream refused", "status", resp.StatusCode, "model", model)
@@ -368,6 +369,7 @@ func ForwardVertex(w http.ResponseWriter, req *Request) error {
 	if req.IsStream {
 		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, 0, "vertex")
 		return geminiStream(w, stallReader, req.Ctx, req)
+
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 	if err != nil {
