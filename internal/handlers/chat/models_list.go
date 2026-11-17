@@ -1054,19 +1054,42 @@ func (h *ChatHandler) declaredTokenLimitsFor(provider, modelID string) (contextW
 	if h.Repo == nil || modelID == "" || provider == "" {
 		return 0, 0
 	}
-	bare := modelID
+	// A custom row stores the id the way it was registered, which may carry its
+	// own namespace ("baidu/ernie-…:free"), while the client asks for
+	// "<alias>/<id>" ("kc/baidu/ernie-…:free"). Comparing one spelling alone
+	// missed every namespaced id, so the row read as "no limits declared" and
+	// the substring table answered 128000/4096 for an endpoint that declared
+	// 1M/921k.
+	names := []string{modelID}
+	if _, after, ok := strings.Cut(modelID, "/"); ok {
+		names = append(names, after)
+	}
 	if _, after, ok := strings.CutLast(modelID, "/"); ok {
-		bare = after
+		names = append(names, after)
 	}
 	customs := h.customModelsByProvider()
+	// A custom row is filed under the alias the operator picked ("kc"), while
+	// resolveModel hands back the canonical provider id ("kilocode"). Looking up
+	// only the id therefore found no row and fell through to the substring
+	// table, which answered 128000/4096 for endpoints that declared far more.
 	keys := []string{provider}
+	if alias := providers.GetProviderAlias(provider); alias != provider {
+		keys = append(keys, alias)
+	}
+	for alias, canonical := range providers.ProviderAliasMap {
+		if canonical == provider {
+			keys = append(keys, alias)
+		}
+	}
 	if node, _, err := h.Repo.GetProviderNodeByPrefix(provider); err == nil && node != nil {
 		keys = append(keys, node.ID)
 	}
 	for _, key := range keys {
 		for _, cm := range customs[key] {
-			if cm.ID == bare {
-				return declaredTokenLimits(cm)
+			for _, name := range names {
+				if cm.ID == name {
+					return declaredTokenLimits(cm)
+				}
 			}
 		}
 	}
