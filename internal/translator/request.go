@@ -389,6 +389,12 @@ func claudeDisablesParallelToolUse(choiceRaw jsontext.Value) bool {
 
 // TranslateClaudeToOpenAI converts a Claude request payload to an OpenAI request payload.
 func TranslateClaudeToOpenAI(claudeBody []byte) ([]byte, error) {
+	// The passthrough lane drops argumentless tool calls in
+	// SanitizeClaudePassthrough; a converted lane needs the same rule before the
+	// history is reshaped, or the model keeps reading its own bare call.
+	claudeBody = DropArgumentlessToolCalls(claudeBody)
+	claudeBody = applyInlineToolEdits(claudeBody)
+
 	var creq ClaudeRequest
 	if err := json.Unmarshal(claudeBody, &creq); err != nil {
 		return nil, fmt.Errorf("unmarshal Claude request body: %w", err)
@@ -573,28 +579,26 @@ func sanitizeClaudeToolIDs(messages []any) bool {
 // answers "messages.<n>.content.<m>.text.caller: Extra inputs are not
 // permitted" and refuses the whole request, so the turn poisons every later
 // one. tool_use keeps it — the field is valid there.
-func dropForeignBlockKeys(messages []any) bool {
-	changed := false
+func dropForeignBlockKeys(messages []any) int {
+	removed := 0
 	for _, mRaw := range messages {
 		msg, ok := mRaw.(map[string]any)
 		if !ok {
 			continue
 		}
-		if scrubBlockCallers(msg["content"]) {
-			changed = true
-		}
+		removed += scrubBlockCallers(msg["content"])
 	}
-	return changed
+	return removed
 }
 
 // scrubBlockCallers walks one message's content array, including the blocks
-// nested in a tool_result, and reports whether a caller was removed.
-func scrubBlockCallers(content any) bool {
+// nested in a tool_result, and reports how many callers were removed.
+func scrubBlockCallers(content any) int {
 	blocks, ok := content.([]any)
 	if !ok {
-		return false
+		return 0
 	}
-	changed := false
+	removed := 0
 	for _, bRaw := range blocks {
 		block, ok := bRaw.(map[string]any)
 		if !ok {
@@ -603,14 +607,46 @@ func scrubBlockCallers(content any) bool {
 		if bType, _ := block["type"].(string); bType != "tool_use" {
 			if _, has := block["caller"]; has {
 				delete(block, "caller")
-				changed = true
+				removed++
 			}
 		}
-		if scrubBlockCallers(block["content"]) {
-			changed = true
-		}
+		removed += scrubBlockCallers(block["content"])
 	}
-	return changed
+	return removed
+}
+
+// sanitizeDropSink, when non-nil, receives the drop line instead of log.Debug.
+// Tests set it to see what one body lost.
+var sanitizeDropSink func(string)
+
+// sanitizeDrops collects what one sanitize pass removed, as key:<name> /
+// block:<type> tokens, and reports them once. A nil collector discards.
+type sanitizeDrops struct {
+	seen  map[string]bool
+	items []string
+}
+
+func (d *sanitizeDrops) add(item string) {
+	if d == nil || d.seen[item] {
+		return
+	}
+	if d.seen == nil {
+		d.seen = map[string]bool{}
+	}
+	d.seen[item] = true
+	d.items = append(d.items, item)
+}
+
+func (d *sanitizeDrops) report() {
+	if d == nil || len(d.items) == 0 {
+		return
+	}
+	line := strings.Join(d.items, ",")
+	if sanitizeDropSink != nil {
+		sanitizeDropSink(line)
+		return
+	}
+	log.Debug("translator", "claude sanitize removed", "items", line)
 }
 
 func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
@@ -624,12 +660,35 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 	}
 	droppedIDs := make(map[string]bool)
 	changed := false
+	var drops sanitizeDrops
+
+	// A system turn is only valid at the head, or as the directive form (empty
+	// content plus output_config) which the API accepts anywhere. Clients and
+	// harnesses do inject reminders mid-history, and Anthropic then refuses the
+	// whole request — "role 'system' must precede an 'assistant' message" — so
+	// fold that text into the top-level system field instead.
+	if kept, moved := liftMidArraySystemTurns(req, messagesRaw); moved {
+		messagesRaw = kept
+		changed = true
+	}
+
+	// A tool call that carries no arguments is never answerable: the client
+	// rejects it for missing required fields and resends the whole history, so
+	// the model reads its own bare call and repeats it. Dropping it here — and
+	// the tool_result paired with it, which the second pass removes through
+	// droppedIDs — stops the pattern instead of feeding it back.
+	dropArgumentlessToolUses(messagesRaw, droppedIDs, &changed, &drops)
 
 	// First pass: drop foreign server_tool_use and collect their ids
 	// Wrap bare content block objects into single-element array (parity with decolua/9router v0.5.75 #8a81085)
 	for _, mRaw := range messagesRaw {
 		if msgMap, ok := mRaw.(map[string]any); ok {
 			normalizeMessageContent(msgMap)
+			for k := range foreignMessageKeys {
+				if _, ok := msgMap[k]; ok {
+					drops.add("key:" + k)
+				}
+			}
 			if dropForeignMessageKeys(msgMap) {
 				changed = true
 			}
@@ -660,6 +719,7 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 			if bType == "server_tool_use" {
 				id, _ := block["id"].(string)
 				if !serverToolUseIDRegex.MatchString(id) {
+					drops.add("block:server_tool_use")
 					droppedIDs[id] = true
 					changed = true
 					continue
@@ -669,6 +729,7 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 			// contentful rule decides whether the whole message survives below,
 			// so both read it from one place.
 			if (bType == "text" || bType == "thinking") && !isContentfulBlock(block) {
+				drops.add("block:" + bType)
 				changed = true
 				continue
 			}
@@ -680,41 +741,8 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 	}
 
 	// Second pass: drop tool_result referencing dropped server_tool_use ids
-	if len(droppedIDs) > 0 {
-		for _, mRaw := range messagesRaw {
-			msgMap, ok := mRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			contentRaw, ok := msgMap["content"]
-			if !ok {
-				continue
-			}
-			blocks, ok := contentRaw.([]any)
-			if !ok {
-				continue
-			}
-			var kept []any
-			for _, bRaw := range blocks {
-				block, ok := bRaw.(map[string]any)
-				if !ok {
-					kept = append(kept, bRaw)
-					continue
-				}
-				bType, _ := block["type"].(string)
-				if bType == "tool_result" || bType == "web_search_tool_result" {
-					toolUseID, _ := block["tool_use_id"].(string)
-					if droppedIDs[toolUseID] {
-						changed = true
-						continue
-					}
-				}
-				kept = append(kept, bRaw)
-			}
-			if len(kept) != len(blocks) {
-				msgMap["content"] = kept
-			}
-		}
+	if dropToolResultsForIDs(messagesRaw, droppedIDs, &drops) {
+		changed = true
 	}
 
 	// Third pass: drop messages whose content carries nothing Anthropic accepts
@@ -723,7 +751,10 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 	// — see DropNonContentfulClaudeMessages for the emptiness rule and the
 	// trailing-turn repair (upstream #4316, ensureTrailingUserTurn
 	// open-sse/translator/formats/claude.js:345-349).
-	if filtered, dropped := DropNonContentfulClaudeMessages(messagesRaw, intentionalPrefill); dropped {
+	if filtered, removed, dropped := dropNonContentfulClaudeMessages(messagesRaw, intentionalPrefill); dropped {
+		for _, label := range removed {
+			drops.add(label)
+		}
 		messagesRaw = filtered
 		changed = true
 	}
@@ -751,12 +782,14 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 	if sanitizeClaudeToolIDs(messagesRaw) {
 		changed = true
 	}
-	if dropForeignBlockKeys(messagesRaw) {
+	if dropForeignBlockKeys(messagesRaw) > 0 {
+		drops.add("key:caller")
 		changed = true
 	}
 	if !changed {
 		return body
 	}
+	drops.report()
 	req["messages"] = messagesRaw
 
 	if out, err := json.Marshal(req, json.Deterministic(true)); err == nil {
@@ -788,6 +821,13 @@ func dropClaudeIdentitySystemBlock(system any) any {
 	switch s := system.(type) {
 	case string:
 		if isClaudeIdentityBanner(s) {
+			// Cut the banner paragraph only. Returning "" here would also cut
+			// whatever was appended after it — a system turn lifted out of the
+			// middle of the history lands in this same string — and silently
+			// losing that reminder is the failure this lane exists to prevent.
+			if i := strings.Index(s, "\n"); i >= 0 {
+				return strings.TrimSpace(s[i+1:])
+			}
 			return ""
 		}
 		return system
@@ -889,25 +929,31 @@ func LastCacheableToolIndex(tools []any) int {
 	return -1
 }
 
-// AnchorClaudeCache ensures prompt-caching breakpoint lands on the last non-deferred tool.
-// Port of open-sse/translator/formats/claude.js#lastCacheableToolIndex / anchorClaudeCache (#3567).
-// claudeMessageKeys are the only keys a Messages API message object accepts.
-// Anthropic answers anything else with
+// foreignMessageKeys are the message keys known not to belong to a Messages API
+// message object. Anthropic answers them with
 // "messages.<n>.<key>: Extra inputs are not permitted" and refuses the whole
-// request, so a foreign key that reaches history poisons every later turn.
-var claudeMessageKeys = map[string]struct{}{
-	"role":    {},
-	"content": {},
+// request, so one that reaches history poisons every later turn.
+//
+// This is a denylist on purpose: a key it does not name is forwarded. A newer
+// CLI adding a field must not have it deleted silently here.
+var foreignMessageKeys = map[string]struct{}{
+	"reasoning_content": {},
+	"output_config":     {},
+	"tool_calls":        {},
+	"function_call":     {},
+	"reasoning":         {},
 }
 
-// dropForeignMessageKeys removes keys Anthropic would reject from one message
-// and reports whether anything was dropped. The usual offender is
+// dropForeignMessageKeys removes the known-foreign keys from one message and
+// reports whether anything was dropped. The usual offender is
 // `reasoning_content`, which OpenAI-shaped clients echo back on assistant turns
-// and which passes through untouched when a combo mixes lanes.
+// and which passes through untouched when a combo mixes lanes. `output_config`
+// is another: it is a request-level field, and on a message the API answers
+// "messages.<n>.output_config: Extra inputs are not permitted".
 func dropForeignMessageKeys(msgMap map[string]any) bool {
 	dropped := false
-	for k := range msgMap {
-		if _, ok := claudeMessageKeys[k]; ok {
+	for k := range foreignMessageKeys {
+		if _, ok := msgMap[k]; !ok {
 			continue
 		}
 		delete(msgMap, k)
@@ -1039,7 +1085,9 @@ func claudeCacheAnchor(ttl string) map[string]any {
 	return map[string]any{"type": "ephemeral"}
 }
 
-// AnchorClaudeCache is AnchorClaudeCacheWithTTL at the default 5-minute window.
+// AnchorClaudeCache ensures prompt-caching breakpoint lands on the last non-deferred tool.
+// Port of open-sse/translator/formats/claude.js#lastCacheableToolIndex / anchorClaudeCache (#3567).
+// It is AnchorClaudeCacheWithTTL at the default 5-minute window.
 func AnchorClaudeCache(body []byte) []byte { return AnchorClaudeCacheWithTTL(body, "") }
 
 // AnchorClaudeCacheWithTTL ensures prompt-caching breakpoints land on system/tool head anchors,
@@ -1121,4 +1169,371 @@ func AnchorClaudeCacheWithTTL(body []byte, ttl string) []byte {
 		return body
 	}
 	return out
+}
+
+// emptyToolInput reports whether a tool_use block carries no arguments. A call
+// with none cannot be answered: Claude clients validate the call against the
+// tool schema and reject a missing required field.
+func emptyToolInput(input any) bool {
+	switch v := input.(type) {
+	case nil:
+		return true
+	case map[string]any:
+		return len(v) == 0
+	case string:
+		switch strings.TrimSpace(v) {
+		case "", "{}", "null":
+			return true
+		}
+	}
+	return false
+}
+
+// dropArgumentlessToolUses removes tool_use blocks that carry no arguments when
+// another call to the same tool in this conversation does carry them, recording
+// each removed id in droppedIDs so the paired tool_result goes with it.
+//
+// A tool that is only ever called bare — TodoWrite with an empty list, a
+// list-everything helper — never matches, so its calls survive untouched.
+func dropArgumentlessToolUses(messages []any, droppedIDs map[string]bool, changed *bool, drops *sanitizeDrops) {
+	withArgs := make(map[string]bool)
+	for _, mRaw := range messages {
+		msgMap, ok := mRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		blocks, ok := msgMap["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, bRaw := range blocks {
+			block, ok := bRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if bType, _ := block["type"].(string); bType != "tool_use" {
+				continue
+			}
+			name, _ := block["name"].(string)
+			if name != "" && !emptyToolInput(block["input"]) {
+				withArgs[name] = true
+			}
+		}
+	}
+	if len(withArgs) == 0 {
+		return
+	}
+
+	for _, mRaw := range messages {
+		msgMap, ok := mRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		blocks, ok := msgMap["content"].([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(blocks))
+		for _, bRaw := range blocks {
+			block, ok := bRaw.(map[string]any)
+			if !ok {
+				kept = append(kept, bRaw)
+				continue
+			}
+			if bType, _ := block["type"].(string); bType == "tool_use" {
+				name, _ := block["name"].(string)
+				if withArgs[name] && emptyToolInput(block["input"]) {
+					if id, _ := block["id"].(string); id != "" {
+						droppedIDs[id] = true
+					}
+					drops.add("block:tool_use")
+					*changed = true
+					continue
+				}
+			}
+			kept = append(kept, bRaw)
+		}
+		if len(kept) != len(blocks) {
+			msgMap["content"] = kept
+		}
+	}
+}
+
+// dropToolResultsForIDs removes tool_result blocks whose tool_use_id names a
+// call that is no longer in the conversation. Returns whether anything changed.
+func dropToolResultsForIDs(messages []any, droppedIDs map[string]bool, drops *sanitizeDrops) bool {
+	if len(droppedIDs) == 0 {
+		return false
+	}
+	changed := false
+	for _, mRaw := range messages {
+		msgMap, ok := mRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		blocks, ok := msgMap["content"].([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(blocks))
+		for _, bRaw := range blocks {
+			block, ok := bRaw.(map[string]any)
+			if !ok {
+				kept = append(kept, bRaw)
+				continue
+			}
+			if bType, _ := block["type"].(string); bType == "tool_result" || bType == "web_search_tool_result" {
+				toolUseID, _ := block["tool_use_id"].(string)
+				if droppedIDs[toolUseID] {
+					drops.add("block:" + bType)
+					changed = true
+					continue
+				}
+			}
+			kept = append(kept, bRaw)
+		}
+		if len(kept) != len(blocks) {
+			msgMap["content"] = kept
+		}
+	}
+	return changed
+}
+
+// DropArgumentlessToolCalls applies the argumentless-call rule to a Claude body
+// headed for a non-Claude lane, where SanitizeClaudePassthrough does not run.
+func DropArgumentlessToolCalls(body []byte) []byte {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	messagesRaw, ok := req["messages"].([]any)
+	if !ok || len(messagesRaw) == 0 {
+		return body
+	}
+	droppedIDs := make(map[string]bool)
+	changed := false
+	dropArgumentlessToolUses(messagesRaw, droppedIDs, &changed, nil)
+	if dropToolResultsForIDs(messagesRaw, droppedIDs, nil) {
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	if filtered, dropped := DropNonContentfulClaudeMessages(messagesRaw, ClaudeIntentionalPrefill(body)); dropped {
+		messagesRaw = filtered
+		req["messages"] = messagesRaw
+	}
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// liftMidArraySystemTurns moves system turns that sit anywhere past the head
+// into the top-level system field, and reports whether it changed anything.
+//
+// Anthropic reads a system turn, wherever it appears, as a directive it must be
+// able to place: "role 'system' must precede an 'assistant' message or end the
+// array; the directive-only form (content: [] with output_config) is accepted
+// at any position." A harness that injects a reminder mid-history therefore
+// fails the whole request, and the turn stays in history so every later turn
+// fails too. Folding the text into the system field keeps the words and the
+// conversation.
+//
+// The directive form is left untouched — the API already places it. A turn with
+// nothing to say is dropped rather than moved.
+func liftMidArraySystemTurns(req map[string]any, messages []any) ([]any, bool) {
+	var kept []any
+	var moved []string
+	changed := false
+	for i, mRaw := range messages {
+		msg, ok := mRaw.(map[string]any)
+		if !ok {
+			kept = append(kept, mRaw)
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "system" || i == 0 {
+			kept = append(kept, mRaw)
+			continue
+		}
+		if _, directive := msg["output_config"]; directive {
+			kept = append(kept, mRaw)
+			continue
+		}
+		changed = true
+		if text := claudePlainText(msg["content"]); strings.TrimSpace(text) != "" {
+			moved = append(moved, text)
+		}
+	}
+	if !changed || len(kept) == 0 {
+		return messages, false
+	}
+	if len(moved) > 0 {
+		appendClaudeSystemText(req, strings.Join(moved, "\n\n"))
+	}
+	return kept, true
+}
+
+// claudePlainText joins the text carried by a message's content, which is a
+// string or an array of blocks.
+func claudePlainText(content any) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []any:
+		var parts []string
+		for _, bRaw := range c {
+			block, ok := bRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := block["type"].(string); t != "text" {
+				continue
+			}
+			if text, ok := block["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n\n")
+	}
+	return ""
+}
+
+// appendClaudeSystemText adds text to the top-level system field whatever shape
+// the client sent it in: absent, a string, or a block array.
+func appendClaudeSystemText(req map[string]any, text string) {
+	switch system := req["system"].(type) {
+	case nil:
+		req["system"] = text
+	case string:
+		if strings.TrimSpace(system) == "" {
+			req["system"] = text
+			return
+		}
+		req["system"] = system + "\n\n" + text
+	case []any:
+		req["system"] = append(system, map[string]any{"type": "text", "text": text})
+	default:
+		req["system"] = text
+	}
+}
+
+// applyInlineToolEdits replays a client's mid-conversation tool changes
+// (inline-tools: tool_addition / tool_removal blocks) into the outgoing tool
+// list, then removes those blocks from the history.
+//
+// A Chat-format upstream reads tools only from the `tools` field. Without this
+// replay a tool the client loaded later reaches the model as a bare name: it
+// answers with an empty call — {"command"} missing — and the client rejects the
+// turn ("The required parameter command is missing") and retries the same
+// request, so the loop costs a full prompt each round.
+func applyInlineToolEdits(body []byte) []byte {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	msgs, ok := req["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body
+	}
+	tools, _ := req["tools"].([]any)
+	added := make(map[string]map[string]any)
+	var addedOrder []string
+	removed := make(map[string]bool)
+	changed := false
+	kept := make([]any, 0, len(msgs))
+	for _, mRaw := range msgs {
+		msg, ok := mRaw.(map[string]any)
+		if !ok {
+			kept = append(kept, mRaw)
+			continue
+		}
+		blocks, ok := msg["content"].([]any)
+		if !ok {
+			kept = append(kept, mRaw)
+			continue
+		}
+		keptBlocks := make([]any, 0, len(blocks))
+		for _, bRaw := range blocks {
+			block, ok := bRaw.(map[string]any)
+			if !ok {
+				keptBlocks = append(keptBlocks, bRaw)
+				continue
+			}
+			switch bType, _ := block["type"].(string); bType {
+			case "tool_addition":
+				changed = true
+				def, _ := block["tool"].(map[string]any)
+				name, _ := def["name"].(string)
+				if name == "" {
+					continue
+				}
+				// Claude shape: the typed conversion that follows wraps these
+				// into the Chat `{type:"function",function:{…}}` form.
+				claudeTool := map[string]any{"name": name}
+				if desc, _ := def["description"].(string); desc != "" {
+					claudeTool["description"] = desc
+				}
+				params := def["input_schema"]
+				if params == nil {
+					params = map[string]any{"type": "object", "properties": map[string]any{}}
+				}
+				claudeTool["input_schema"] = params
+				if _, seen := added[name]; !seen {
+					addedOrder = append(addedOrder, name)
+				}
+				added[name] = claudeTool
+			case "tool_removal":
+				changed = true
+				if name, _ := block["name"].(string); name != "" {
+					removed[name] = true
+				}
+			default:
+				keptBlocks = append(keptBlocks, bRaw)
+			}
+		}
+		if len(keptBlocks) == 0 {
+			continue
+		}
+		msg["content"] = keptBlocks
+		kept = append(kept, msg)
+	}
+	if !changed {
+		return body
+	}
+	out := make([]any, 0, len(tools)+len(added))
+	for _, tRaw := range tools {
+		tool, ok := tRaw.(map[string]any)
+		if !ok {
+			out = append(out, tRaw)
+			continue
+		}
+		name, _ := tool["name"].(string)
+		if removed[name] {
+			continue
+		}
+		if repl, ok := added[name]; ok {
+			out = append(out, repl)
+			delete(added, name)
+			continue
+		}
+		out = append(out, tRaw)
+	}
+	for _, name := range addedOrder {
+		if repl, ok := added[name]; ok {
+			out = append(out, repl)
+		}
+	}
+	req["messages"] = kept
+	if len(out) > 0 {
+		req["tools"] = out
+	} else {
+		delete(req, "tools")
+	}
+	updated, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return updated
 }

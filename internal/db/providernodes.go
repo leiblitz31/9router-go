@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"9router/proxy/internal/models"
@@ -88,7 +90,15 @@ func (r *Repo) GetProviderNodeByID(id string) (*models.ProviderNode, *ProviderNo
 
 // GetProviderNodeByPrefix searches providerNodes for one whose data JSON "prefix" field matches.
 // Returns nil, nil when no row matches.
+//
+// An empty prefix never matches: a chat-compatible node may store one (the
+// create/update paths allow it), and letting "" resolve would make every
+// prefixless lookup — a split of "/model", an unset provider — land on
+// whichever prefixless node the scan reaches first.
 func (r *Repo) GetProviderNodeByPrefix(prefix string) (*models.ProviderNode, *ProviderNodeData, error) {
+	if prefix == "" {
+		return nil, nil, nil
+	}
 	rows, err := r.db.Query("SELECT " + providerNodeColumns + " FROM providerNodes")
 	if err != nil {
 		return nil, nil, err
@@ -224,12 +234,17 @@ func (r *Repo) DeleteProviderNode(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM providerNodes WHERE id = ?`, id).Scan(&exists); err != nil {
+	var rawData sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT data FROM providerNodes WHERE id = ?`, id).Scan(&rawData)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("delete provider node %s: check existence: %w", id, err)
 	}
-	if exists == 0 {
-		return nil
+	var nodePrefix string
+	if nd := parseProviderNodeData(rawData.String); nd != nil {
+		nodePrefix = nd.Prefix
 	}
 
 	if _, err := tx.ExecContext(ctx, "DELETE FROM providerNodes WHERE id = ?", id); err != nil {
@@ -242,10 +257,20 @@ func (r *Repo) DeleteProviderNode(ctx context.Context, id string) error {
 	if err := pruneCustomModels(ctx, tx, id); err != nil {
 		return fmt.Errorf("delete provider node %s: prune custom models: %w", id, err)
 	}
+	if _, err := pruneComboModelsTx(ctx, tx, func(entry string) bool {
+		prov, _, ok := strings.Cut(entry, "/")
+		if !ok {
+			return false
+		}
+		return prov == id || (nodePrefix != "" && prov == nodePrefix)
+	}); err != nil {
+		return fmt.Errorf("delete provider node %s: prune combos: %w", id, err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete provider node %s: commit: %w", id, err)
 	}
+	r.InvalidateCustomModelExtraBody()
 	return nil
 }
 

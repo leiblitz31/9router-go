@@ -110,6 +110,11 @@
   let systemPromptSuffix = $state('')
   let appName = $state('')
   let appLogoUrl = $state('')
+  let appDescription = $state('')
+  let appTagline = $state('')
+  let loginLogo = $state('')
+  let trayAppName = $state('')
+  let trayIcon = $state('')
   let isUploadingLogo = $state(false)
   let logoUploadError = $state('')
   let logoFileInput = $state<HTMLInputElement | null>(null)
@@ -240,6 +245,8 @@
   let stickyRoundRobinLimit = $state(3)
   let comboStrategy = $state('first-model')
   let forceFallback = $state(false)
+  let qoderCheckin = $state(false)
+  let minimaxCheckin = $state(false)
 
   // Feature Visibility: ids of the sidebar entries this deployment hides. The
   // entry list itself lives in web/src/lib/nav.ts, shared with the sidebar.
@@ -316,6 +323,8 @@
       if (typeof settings.stickyRoundRobinLimit === 'number') stickyRoundRobinLimit = settings.stickyRoundRobinLimit
       if (typeof settings.comboStrategy === 'string') comboStrategy = settings.comboStrategy
       if (typeof settings.forceFallback === 'boolean') forceFallback = settings.forceFallback
+      if (typeof settings.qoderCheckin === 'boolean') qoderCheckin = settings.qoderCheckin
+      if (typeof settings.minimaxCheckin === 'boolean') minimaxCheckin = settings.minimaxCheckin
 
       // Global system prompt
       enableSystemPrompt = !!settings.systemPromptEnabled
@@ -337,6 +346,16 @@
       // Feature Visibility
       hiddenNav = orderHiddenNav(settings.navVisibility)
       navOrder = normalizeNavOrder(settings.navVisibility)
+
+      // Whitelabel branding
+      if (typeof settings.appName === 'string') appName = settings.appName
+      if (typeof settings.appLogoUrl === 'string') appLogoUrl = settings.appLogoUrl
+      if (typeof settings.appDescription === 'string') appDescription = settings.appDescription
+      if (typeof settings.appTagline === 'string') appTagline = settings.appTagline
+      if (typeof settings.loginLogo === 'string') loginLogo = settings.loginLogo
+      if (typeof settings.trayAppName === 'string') trayAppName = settings.trayAppName
+      if (typeof settings.trayIcon === 'string') trayIcon = settings.trayIcon
+
       // Currency
       applyCurrency(settings.displayCurrency)
     }
@@ -361,6 +380,11 @@
         if (typeof s.systemPromptSuffix === 'string') systemPromptSuffix = s.systemPromptSuffix
         if (typeof s.appName === 'string') appName = s.appName
         if (typeof s.appLogoUrl === 'string') appLogoUrl = s.appLogoUrl
+        if (typeof s.appDescription === 'string') appDescription = s.appDescription
+        if (typeof s.appTagline === 'string') appTagline = s.appTagline
+        if (typeof s.loginLogo === 'string') loginLogo = s.loginLogo
+        if (typeof s.trayAppName === 'string') trayAppName = s.trayAppName
+        if (typeof s.trayIcon === 'string') trayIcon = s.trayIcon
 
         if (s.authMode === 'oidc' || s.authMode === 'saml') authMode = s.authMode
         if (s.oidcIssuerUrl) oidcIssuerUrl = String(s.oidcIssuerUrl)
@@ -529,11 +553,18 @@
         stickyRoundRobinLimit,
         comboStrategy,
         forceFallback,
+        qoderCheckin,
+        minimaxCheckin,
         systemPromptEnabled: enableSystemPrompt,
         systemPromptPrefix,
         systemPromptSuffix,
         appName: appName.trim(),
         appLogoUrl: appLogoUrl.trim(),
+        appDescription: appDescription.trim(),
+        appTagline: appTagline.trim(),
+        loginLogo: loginLogo.trim(),
+        trayAppName: trayAppName.trim(),
+        trayIcon: trayIcon.trim(),
         authMode,
         oidcIssuerUrl,
         oidcClientId,
@@ -1141,6 +1172,28 @@
           frees up first instead of failing. Requests can still be rejected upstream.
         </p>
 
+        <Toggle
+          checked={qoderCheckin}
+          size="sm"
+          label="Qoder daily credit check-in"
+          onChange={(v: boolean) => (qoderCheckin = v)}
+        />
+        <p class="text-[11px] text-text-subtle">
+          Claim Qoder and Qoder CN daily credits automatically every 30 minutes.
+          Last result per account is available at <code>GET /api/qoder/checkins</code>.
+        </p>
+
+        <Toggle
+          checked={minimaxCheckin}
+          size="sm"
+          label="MiniMax Code daily check-in"
+          onChange={(v: boolean) => (minimaxCheckin = v)}
+        />
+        <p class="text-[11px] text-text-subtle">
+          Claim MiniMax Code daily check-in credits automatically every 30 minutes.
+          Last result per account is available at <code>GET /api/minimax/checkins</code>.
+        </p>
+
       </div>
     </Card>
 
@@ -1414,6 +1467,35 @@
           <span class="text-xs text-text-muted">Preview</span>
         </div>
       {/if}
+      <label class="block space-y-1">
+        <span class="text-xs font-medium text-text-main">Application description</span>
+        <textarea
+          bind:value={appDescription}
+          placeholder="A short description shown in the dashboard footer."
+          rows="3"
+          class="w-full px-3 py-2 rounded-lg bg-bg border border-border text-xs text-text-main focus:outline-none focus:border-brand-500"
+        ></textarea>
+      </label>
+      <label class="block space-y-1">
+        <span class="text-xs font-medium text-text-main">Tagline</span>
+        <Input bind:value={appTagline} placeholder="Your gateway, your rules" />
+        <span class="text-[11px] text-text-subtle">Shown on the login screen beneath the app name.</span>
+      </label>
+      <label class="block space-y-1">
+        <span class="text-xs font-medium text-text-main">Login logo URL</span>
+        <Input bind:value={loginLogo} placeholder="https://example.com/login-logo.png" />
+        <span class="text-[11px] text-text-subtle">An HTTPS URL, or a local absolute path such as /login-logo.png</span>
+      </label>
+      <label class="block space-y-1">
+        <span class="text-xs font-medium text-text-main">Tray app name</span>
+        <Input bind:value={trayAppName} placeholder="9router-go" />
+        <span class="text-[11px] text-text-subtle">Name shown in the system tray companion.</span>
+      </label>
+      <label class="block space-y-1">
+        <span class="text-xs font-medium text-text-main">Tray icon URL</span>
+        <Input bind:value={trayIcon} placeholder="https://example.com/tray-icon.ico" />
+        <span class="text-[11px] text-text-subtle">An HTTPS URL for the tray companion icon (.ico, .png).</span>
+      </label>
     </Card>
     <!-- SECTION: Display. Unit abbreviation, the usage-detail default, an
          advanced-settings disclosure that unfolds the currency rates, the

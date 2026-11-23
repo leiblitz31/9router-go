@@ -404,14 +404,23 @@ func proxyAllowlistHosts(u *url.URL) []string {
 // endpoints exempted from the private-IP guard. A nil allowlist behaves exactly
 // like NewSafeDialer.
 func newSafeDialerForProxy(allow *proxyAllowlist) *net.Dialer {
+	return newSafeDialerForProxyOpt(allow, false)
+}
+
+// newSafeDialerForProxyOpt is newSafeDialerForProxy with an explicit strict
+// flag: strict refuses a private/reserved target even when
+// ALLOW_PRIVATE_NETWORKING is on and even when the request carries the
+// per-connection opt-in. The proxy allowlist still applies — the guard exists
+// to stop a *request target*, and the operator's egress proxy is not one.
+func newSafeDialerForProxyOpt(allow *proxyAllowlist, strict bool) *net.Dialer {
 	return &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 		ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
-			if IsPrivateNetworkingAllowed() {
+			if !strict && IsPrivateNetworkingAllowed() {
 				return nil
 			}
-			if IsPrivateNetworkingAllowedFor(ctx) {
+			if !strict && IsPrivateNetworkingAllowedFor(ctx) {
 				return nil
 			}
 			host, _, err := net.SplitHostPort(address)
@@ -510,13 +519,49 @@ func NewDirectSafeTransport() *http.Transport {
 	return NewSafeTransportDirect()
 }
 
+// NewStrictSafeTransport is NewSafeTransport with an unconditional private-IP
+// guard: a target on loopback / RFC1918 / link-local / metadata is refused no
+// matter how ALLOW_PRIVATE_NETWORKING is set, so a caller-supplied URL (the
+// vision bridge's remote image fetch) cannot walk the gateway into the
+// internal network. The operator's egress proxy is still dialable — only the
+// private *target* is refused — and the uTLS ClientHello is kept.
+func NewStrictSafeTransport() *http.Transport {
+	return newTransportWithUTLS(&utlsDialer{useEnvProxy: true, strictPrivate: true}, proxyKindEnv, "")
+}
+
+// DialableProxyScheme reports whether scheme names a proxy protocol the
+// standard transport can dial: HTTP CONNECT (http/https) and, natively,
+// socks5/socks5h. An unrecognised scheme is refused where the pool URL is read
+// rather than surfacing as a dial-time failure.
+func DialableProxyScheme(scheme string) bool {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http", "https", "socks5", "socks5h":
+		return true
+	}
+	return false
+}
+
+// ProxyURLDialable reports whether proxyURL names a scheme the standard
+// transport can dial.
+func ProxyURLDialable(proxyURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(proxyURL))
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return DialableProxyScheme(u.Scheme)
+}
+
 // NewSafeTransportWithProxy returns a transport identical to NewSafeTransport
 // but pinned to an explicit proxy URL (e.g. a per-connection
 // connectionProxyUrl) instead of the environment. An empty proxyURL means
 // direct. insecure disables certificate verification, mirroring
 // InsecureSkipVerify.
 func NewSafeTransportWithProxy(proxyURL string, insecure bool) *http.Transport {
-	if proxyURL == "" {
+	// An undialable scheme installs no proxy: registering it explicit would only
+	// surface as a dial-time failure after the connection committed, and a
+	// silent fall-back to the ambient path would send traffic the operator did
+	// not ask for.
+	if proxyURL == "" || !ProxyURLDialable(proxyURL) {
 		return newTransportWithUTLS(&utlsDialer{insecureSkipVerify: insecure}, proxyKindNone, "")
 	}
 	return newTransportWithUTLS(

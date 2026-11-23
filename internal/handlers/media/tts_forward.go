@@ -96,8 +96,17 @@ func (h *MediaHandler) forwardTTSRequest(w http.ResponseWriter, r *http.Request,
 		h.forwardNvidiaTTS(w, r, body, modelInfo, req.Input, req.Voice, req.ResponseFormat)
 		return
 	}
+	// 4. ollama-local (phonon): OpenAI-compatible /v1/audio/speech on the
+	// local daemon. The body is forwarded verbatim to the configured Ollama
+	// host; the registry kind (ProviderModelKinds) keeps the phonon ids out of
+	// the LLM list and publishes AudioOutput (upstream ollama-local.js
+	// ttsConfig, commit 31a9d262).
+	if modelInfo.Provider == "ollama-local" {
+		h.forwardMediaRequest(w, r, body, "phonon", "/v1/audio/speech")
+		return
+	}
 
-	// 4. Default OpenAI-compatible TTS
+	// 5. Default OpenAI-compatible TTS
 	h.forwardMediaRequest(w, r, body, "tts-1", "/v1/audio/speech")
 }
 
@@ -221,7 +230,7 @@ func (h *MediaHandler) tryNvidiaTTSConn(w http.ResponseWriter, r *http.Request, 
 		log.Warn("media", "nvidia tts upstream error", "status", resp.StatusCode, "body", errText)
 		if h.Repo != nil {
 			backoff := h.Repo.GetConnectionBackoffLevel(conn.ID)
-			if classification := providers.ClassifyError(resp.StatusCode, errText, backoff); classification.ShouldFallback {
+			if classification := providers.ClassifyError(resp.StatusCode, errText, backoff, errBytes); classification.ShouldFallback {
 				cooldownSec := max(classification.CooldownMs/1000, 1)
 				if !handlerutil.IsProbeContext(r.Context()) {
 					_ = h.Repo.LockConnectionModel(conn.ID, modelInfo.Model, cooldownSec, classification.NewBackoffLevel)

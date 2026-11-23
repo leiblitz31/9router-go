@@ -31,7 +31,7 @@ import (
 // CurrentVersion is the active 9router-go application version.
 // Can be overridden at build time via -ldflags "-X 9router/proxy/internal/updater.CurrentVersion=1.8.8"
 // Default fallback is read from version.json at init if not overridden.
-var CurrentVersion = "1.9.17-exp.4"
+var CurrentVersion = "1.9.17-exp.13"
 
 
 // DefaultUpdateURL is the primary remote version manifest URL.
@@ -381,6 +381,12 @@ func matchReleaseAsset(assets []releaseAsset, targetOS, targetArch string) strin
 
 	for _, asset := range assets {
 		name := strings.ToLower(asset.Name)
+		// The tray companion (9router-go-tray-…) carries the same OS and
+		// arch substrings as the server binary; it must never be picked
+		// as the self-update payload (#1229).
+		if strings.Contains(name, "tray") {
+			continue
+		}
 		// Check OS match
 		if !strings.Contains(name, osKey) {
 			continue
@@ -396,6 +402,9 @@ func matchReleaseAsset(assets []releaseAsset, targetOS, targetArch string) strin
 	// Fallback to first non-checksum asset
 	for _, asset := range assets {
 		name := strings.ToLower(asset.Name)
+		if strings.Contains(name, "tray") {
+			continue
+		}
 		if !strings.HasSuffix(name, ".sha256") && !strings.HasSuffix(name, ".md5") && !strings.HasSuffix(name, ".txt") {
 			return asset.BrowserDownloadURL
 		}

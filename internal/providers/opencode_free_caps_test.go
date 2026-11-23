@@ -54,10 +54,11 @@ func TestOpencodeGoHaiku55Overrides(t *testing.T) {
 		t.Errorf("modalities: reasoning=%v vision=%v search=%v, want all true", c.Reasoning, c.Vision, c.Search)
 	}
 
-	// The global pattern (any provider) must not claim adaptive for this id.
+	// The global row is upstream's now (Anthropic's Haiku 5.5 takes adaptive), so
+	// this test only pins that the provider-scoped override still applies.
 	InvalidateCapabilitiesCache()
-	if g := GetCapabilitiesForModel("claude", "claude-haiku-5-5"); g.ThinkingFormat == "claude-adaptive" {
-		t.Error("the global claude pattern must not be overridden by the opencode-go entry")
+	if g := GetCapabilitiesForModel("opencode-go", "claude-haiku-5-5"); g.ThinkingFormat != "claude-adaptive" {
+		t.Errorf("opencode-go lane lost its override: %q", g.ThinkingFormat)
 	}
 }
 

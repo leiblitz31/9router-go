@@ -67,3 +67,25 @@ func rotateOpencodeStableSession(stableKey, failed string, install func(session 
 		}
 	}
 }
+
+// opencodeSessionRotation returns the spent-session rotation hook when the
+// stable session has already served prior requests. A freshly minted session's
+// 429 is an egress-IP refusal rather than a spent budget, so skipping the second
+// round-trip lets the proxy-pool walk advance immediately.
+func opencodeSessionRotation(req *Request, free bool, failed string, install func(session string)) func() {
+	stableKey := opencodeStableSessionKey(req, free)
+	if stableKey == "" || !proxy.StableOpenCodeSessionEstablished(stableKey, failed) {
+		return nil
+	}
+	return rotateOpencodeStableSession(stableKey, failed, install)
+}
+
+// forgetOpencodeStableSession retires the stable session a refused request
+// travelled on, so the next attempt mints a fresh one.
+func forgetOpencodeStableSession(req *Request, free bool, failed string) func() {
+	stableKey := opencodeStableSessionKey(req, free)
+	if stableKey == "" {
+		return nil
+	}
+	return func() { proxy.ExpireStableOpenCodeSession(stableKey, failed) }
+}

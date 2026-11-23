@@ -158,11 +158,17 @@ func (h *ChatHandler) resolveLiveCatalog(ctx context.Context, conn *models.Provi
 		// Nous /models is public, so the Portal catalogue is read even for a
 		// connection that carries only a refresh token.
 		fetch = func(ctx context.Context, token string) []LiveModel {
-			return h.fetchNousLiveCatalog(ctx, token)
+			return h.fetchNousLiveCatalog(ctx, token, connData.BaseURL)
 		}
 	case providerID == "zed":
 		fetch = func(ctx context.Context, token string) []LiveModel {
 			return h.fetchZedLiveCatalog(ctx, conn, connData, token)
+		}
+	case providers.ResolveAlias(providerID) == commandcodeCatalogProvider:
+		// The CLI feed, not the public /v1/models list: only it carries the
+		// per-model `hidden` flag and the windows the provider enforces.
+		fetch = func(ctx context.Context, token string) []LiveModel {
+			return h.fetchCommandcodeLiveCatalog(ctx, conn, token)
 		}
 	case isCompatibleProviderID(providerID):
 		// Upstream fetchCompatibleModelIds: custom nodes publish whatever their
@@ -173,6 +179,14 @@ func (h *ChatHandler) resolveLiveCatalog(ctx context.Context, conn *models.Provi
 	case providerID == "anthropic":
 		fetch = func(ctx context.Context, token string) []LiveModel {
 			return h.fetchAnthropicLiveCatalog(ctx, conn, connData, token)
+		}
+	case providers.ModelsListURL(providerID) != "" || providerHasModelsFetcher(providerID):
+		// Providers that publish an OpenAI-style models feed with per-model
+		// limits (nous, openrouter, tokenharbor, opencode zen/go, …). The feed
+		// is the provider's own declaration of each window, so it outranks the
+		// static tables.
+		fetch = func(ctx context.Context, token string) []LiveModel {
+			return h.fetchModelsFeedLiveCatalog(ctx, conn, connData, providerID, token)
 		}
 	default:
 		return nil
@@ -315,10 +329,14 @@ func kiroFingerprintHeaders(seed, accessToken string) map[string]string {
 	}
 }
 
+// kiroRegion returns the region the q.* host is queried in. The ARN's region
+// is only used when the host actually serves it; anything else falls back to
+// us-east-1, because splicing an unserved region into the hostname makes the
+// catalog request NXDOMAIN.
 func kiroRegion(profileArn string) string {
 	parts := strings.Split(profileArn, ":")
 	if len(parts) >= 4 && parts[3] != "" {
-		return parts[3]
+		return providers.KiroCatalogRegion(parts[3])
 	}
 	return kiroDefaultRegion
 }
@@ -495,6 +513,9 @@ func (h *ChatHandler) fetchGrokCLILiveCatalog(ctx context.Context, conn *models.
 // fetchCompatibleNodeModels ports upstream fetchCompatibleModelIds: a custom
 // node without configured models is asked directly (`GET <baseUrl>/models`),
 // which is how a node can publish models its custom-model rows do not cover.
+// The node's own feed is the authoritative source for its windows — the same
+// parser the provider feeds use keeps context_length/limit.context, so a custom
+// endpoint never budgets against the static family guess when it stated a limit.
 func (h *ChatHandler) fetchCompatibleNodeModels(ctx context.Context, conn *models.ProviderConnection, connData *shared.ConnectionData, providerID string) []LiveModel {
 	apiKey := connData.APIKey
 	if apiKey == "" {
@@ -559,35 +580,7 @@ func (h *ChatHandler) fetchCompatibleNodeModels(ctx context.Context, conn *model
 	if err != nil {
 		return nil
 	}
-	return parseOpenAIStyleModelIDs(body)
-}
-
-// parseOpenAIStyleModelIDs reads the `data`/`models` array every OpenAI-style
-// upstream returns, keeping the first occurrence of each id.
-func parseOpenAIStyleModelIDs(body []byte) []LiveModel {
-	var payload struct {
-		Data   []map[string]any `json:"data"`
-		Models []map[string]any `json:"models"`
-	}
-	if json.Unmarshal(body, &payload) != nil {
-		return nil
-	}
-	entries := payload.Data
-	if len(entries) == 0 {
-		entries = payload.Models
-	}
-
-	seen := make(map[string]bool, len(entries))
-	out := make([]LiveModel, 0, len(entries))
-	for _, entry := range entries {
-		id := firstNonEmptyString(entry, "id", "name", "model")
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		out = append(out, LiveModel{ID: id})
-	}
-	return out
+	return parseModelsFeedLiveModels(body)
 }
 
 // CompatibleNodeModelsURL derives a compatible node's catalogue endpoint from

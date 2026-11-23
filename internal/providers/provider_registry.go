@@ -9,9 +9,23 @@ package providers
 
 // ProviderMeta is the display metadata for one provider.
 type ProviderMeta struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Alias       string   `json:"alias,omitempty"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Alias is the provider's upstream alias (the registry entry's
+	// `uiAlias || alias`).
+	Alias string `json:"alias,omitempty"`
+	// ModelPrefix is the prefix this provider's model ids are PUBLISHED
+	// under — what /v1/models serves and what a client pastes. It is
+	// GetProviderAlias(id), which for most providers is the alias but not
+	// for all: `freebuff` publishes as "freebuff" while its upstream alias
+	// is "fb", and `sumopod` publishes as "sp" while its upstream alias is
+	// "sumopod".
+	//
+	// The dashboard's copy button used the provider id, so it handed out
+	// "opencode/<model>" where the gateway serves "oc/<model>" — an id the
+	// router does not resolve. The published prefix is the only value that
+	// is guaranteed to round-trip.
+	ModelPrefix string   `json:"modelPrefix,omitempty"`
 	Category    Category `json:"category"`
 	AuthType    string   `json:"authType"`
 	Color       string   `json:"color,omitempty"`
@@ -477,7 +491,10 @@ var ProviderRegistry = map[string]ProviderMeta{
 		Icon:         "psychology_alt",
 		ServiceKinds: []string{"llm"},
 		Website:      "https://kiro.dev",
-		Notice:       &Notice{SignupURL: "https://kiro.dev"},
+		Notice: &Notice{
+			Text:      "Risk Notice: This provider drives AWS CodeWhisperer by presenting itself as the Kiro IDE client, and speaks for a personal or corporate Kiro session that is not officially licensed for proxy gateways. Account, quota or seat access may be restricted or suspended by your AWS organization or by Kiro. Use at your own risk.",
+			SignupURL: "https://kiro.dev",
+		},
 	},
 	"mimo-free": {
 		ID:            "mimo-free",
@@ -1082,6 +1099,18 @@ var ProviderRegistry = map[string]ProviderMeta{
 		Website:      "https://deepseek.com",
 		Notice:       &Notice{APIKeyURL: "https://platform.deepseek.com/api_keys"},
 	},
+	"agy-acp": {
+		ID:           "agy-acp",
+		Name:         "Antigravity CLI (ACP)",
+		Alias:        "agcpy",
+		Category:     CategoryOAuth,
+		Color:        "#F59E0B",
+		Icon:         "terminal",
+		Priority:     21,
+		ServiceKinds: []string{"llm"},
+		Website:      "https://antigravity.google",
+		Notice:       &Notice{Text: "Risk Notice: This provider drives the official `agy` CLI over Agent Client Protocol. Google's Antigravity Additional Terms of Service section 6 and FAQ state that wrapping agy in third-party tools and automating account rotation are not supported and may suspend your account. Multi-account failover is OFF by default. Install agy >= 1.5.0 (AGY_PATH overrides the binary), then either reference an existing Antigravity OAuth connection or import a refresh token. Use at your own risk.", SignupURL: "https://antigravity.google"},
+	},
 	"devin-cli": {
 		ID:           "devin-cli",
 		Name:         "Devin CLI",
@@ -1452,7 +1481,7 @@ var ProviderRegistry = map[string]ProviderMeta{
 		Category:     CategoryAPIKey,
 		Color:        "#ffffffff",
 		Icon:         "cloud",
-		ServiceKinds: []string{"llm"},
+		ServiceKinds: []string{"llm", "tts"},
 		Website:      "https://ollama.com",
 	},
 	"ollama-search": {
@@ -1482,15 +1511,16 @@ var ProviderRegistry = map[string]ProviderMeta{
 		Notice:       &Notice{APIKeyURL: "https://platform.openai.com/api-keys"},
 	},
 	"opencode-go": {
-		ID:           "opencode-go",
-		Name:         "OpenCode Go",
-		Alias:        "ocg",
-		Category:     CategoryAPIKey,
-		Color:        "#E87040",
-		Icon:         "terminal",
-		ServiceKinds: []string{"llm", "image", "video", "embedding"},
-		Website:      "https://opencode.ai/auth",
-		Notice:       &Notice{Text: "OpenCode Go subscription: $5/mo (then 10/mo). Access to Kimi, GLM, Qwen, MiMo, MiniMax models.", APIKeyURL: "https://opencode.ai/auth"},
+		ID:            "opencode-go",
+		Name:          "OpenCode Go",
+		Alias:         "ocg",
+		Category:      CategoryAPIKey,
+		Color:         "#E87040",
+		Icon:          "terminal",
+		ServiceKinds:  []string{"llm", "image", "video", "embedding"},
+		Website:       "https://opencode.ai/auth",
+		Notice:        &Notice{Text: "OpenCode Go subscription: $5/mo (then 10/mo). Access to Kimi, GLM, Qwen, MiMo, MiniMax models.", APIKeyURL: "https://opencode.ai/auth"},
+		ModelsFetcher: &Fetcher{URL: "https://opencode.ai/inference/go/v1/models", Type: "opencode-go"},
 	},
 	"opencode-zen": {
 		ID:                "opencode-zen",
@@ -1506,6 +1536,26 @@ var ProviderRegistry = map[string]ProviderMeta{
 		Website:           "https://opencode.ai/auth",
 		Notice:            &Notice{Text: "OpenCode Zen PAYG: pay-as-you-go, key from https://opencode.ai/auth. Same models as Zen: paid + free tiers on the fast lane.", APIKeyURL: "https://opencode.ai/auth"},
 		ModelsFetcher:     &Fetcher{URL: "https://opencode.ai/zen/v1/models", Type: "opencode-free"},
+	},
+	// Open Design OpenDesign Cloud (open-design.ai) / AMR:
+	// https://open-design.ai/amr. Dual-plane provider: runtime key at
+	// amr-link.open-design.ai/v1 for model traffic; control key at
+	// amr-api.open-design.ai for plan/wallet/allowance. Its usage fetcher is
+	// fetched from the control host explicitly (fetchOpenDesignUsage).
+	"opendesign": {
+		ID:                "opendesign",
+		Name:              "OpenDesign Cloud",
+		Alias:             "od",
+		Category:          CategoryAPIKey,
+		AuthType:          "apikey",
+		Color:             "#E87040",
+		Icon:              "flare",
+		Usage:             true,
+		PassthroughModels: true,
+		ServiceKinds:      []string{"llm"},
+		Website:           "https://open-design.ai/amr",
+		Notice:            &Notice{Text: "Open Design Cloud: two keys per account — a runtime key (`sk-amr-…`) answers model requests at amr-link.open-design.ai/v1, a control key (`vela_ctrl_…`) reads the Design Plan allowance at amr-api.open-design.ai.", APIKeyURL: "https://open-design.ai/amr"},
+		ModelsFetcher:     &Fetcher{URL: "https://amr-link.open-design.ai/v1/models", Type: "openai"},
 	},
 	"perplexity": {
 		ID:           "perplexity",
@@ -1723,6 +1773,19 @@ var ProviderRegistry = map[string]ProviderMeta{
 		ServiceKinds: []string{"webSearch", "webFetch"},
 		Website:      "https://www.tinyfish.ai/",
 		Notice:       &Notice{APIKeyURL: "https://agent.tinyfish.ai/api-keys"},
+	},
+	"keenable": {
+		ID:           "keenable",
+		Name:         "Keenable",
+		Alias:        "keenable",
+		Category:     CategoryFreeTier,
+		AuthType:     "apikey",
+		Color:        "#3B82F6",
+		Icon:         "search",
+		Priority:     999,
+		ServiceKinds: []string{"webSearch", "webFetch"},
+		Website:      "https://keenable.ai/",
+		Notice:       &Notice{Text: "Keyless web search and fetch with optional API key.", APIKeyURL: "https://app.keenable.ai/api-keys"},
 	},
 	"together": {
 		ID:           "together",
@@ -2009,5 +2072,22 @@ var ProviderRegistry = map[string]ProviderMeta{
 		NoAuth:       true,
 		ServiceKinds: []string{"embedding"},
 		Website:      "https://github.com/ggml-org/llama.cpp",
+	},
+	// DeepRelay — pay-per-token inference. One /v1 lane serves chat,
+	// embeddings, image and video, and the wallet lives on
+	// GET /v1/billing/balance (see dashboard usage fetcher + key probe).
+	"deeprelay": {
+		ID:           "deeprelay",
+		Name:         "DeepRelay",
+		Alias:        "dr",
+		Category:     CategoryAPIKey,
+		AuthType:     "apikey",
+		Color:        "#6C5CE7",
+		Icon:         "relay",
+		Priority:     50,
+		Usage:        true,
+		ServiceKinds: []string{"llm"},
+		Website:      "https://deeprelay.ai",
+		Notice:       &Notice{APIKeyURL: "https://deeprelay.ai/dashboard"},
 	},
 }

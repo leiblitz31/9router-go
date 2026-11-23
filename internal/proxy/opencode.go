@@ -94,6 +94,10 @@ var (
 type opencodeStableEntry struct {
 	id       string
 	lastUsed time.Time
+	// uses counts the requests that travelled on this session. A 429 on the
+	// very first use is an egress refusal, not a spent budget, so rotation is
+	// only armed from the second use on.
+	uses int
 }
 
 // StableOpenCodeSessionID returns one long-lived canonical session per key,
@@ -117,11 +121,12 @@ func StableOpenCodeSessionID(key string) string {
 	defer opencodeStableMu.Unlock()
 	if entry, ok := opencodeStableSessions[key]; ok && now.Sub(entry.lastUsed) < opencodeStableSessionTTL {
 		entry.lastUsed = now
+		entry.uses++
 		opencodeStableSessions[key] = entry
 		return entry.id
 	}
 	id := GenerateOpenCodeSessionID()
-	opencodeStableSessions[key] = opencodeStableEntry{id: id, lastUsed: now}
+	opencodeStableSessions[key] = opencodeStableEntry{id: id, lastUsed: now, uses: 1}
 	opencodeStableOrder = append(opencodeStableOrder, key)
 	for len(opencodeStableOrder) > opencodeStableSessionLimit {
 		oldest := opencodeStableOrder[0]
@@ -150,6 +155,19 @@ func ExpireStableOpenCodeSession(key, id string) bool {
 		}
 	}
 	return true
+}
+
+// StableOpenCodeSessionEstablished reports whether key still holds id and that
+// session has already served a request. A freshly minted session's 429 is an
+// egress-IP refusal rather than a spent budget, so no rotation is attempted.
+func StableOpenCodeSessionEstablished(key, id string) bool {
+	if key == "" || id == "" {
+		return false
+	}
+	opencodeStableMu.Lock()
+	defer opencodeStableMu.Unlock()
+	entry, ok := opencodeStableSessions[key]
+	return ok && entry.id == id && entry.uses > 1
 }
 
 // descendingTimeHex renders the 12-hex session prefix: the low 48 bits of

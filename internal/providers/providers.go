@@ -604,6 +604,27 @@ var KnownProviders = map[string]ProviderConfig{
 			"User-Agent":        "opencode/1.19.4",
 		},
 	},
+	// Open Design OpenDesign Cloud (open-design.ai) / AMR:
+	// https://open-design.ai/amr. Two planes on two hosts: model traffic rides
+	// the runtime key (`sk-amr-…`) at https://amr-link.open-design.ai/v1 on the
+	// lane each model declares (chat completions default; Responses for
+	// claude-haiku-5.5 / deepseek-v4-pro; Claude Messages for glm-5.3-flash),
+	// while plan/wallet/allowance read from https://amr-api.open-design.ai on the
+	// control key (`vela_ctrl_…`). ConnectionData.APIKey holds whichever
+	// credential was pasted; a pasted `vela_ctrl_…` value is a control key and
+	// rides no model request. The control key (PSD `controlKey`) and the read
+	// workspace id travel in ProviderSpecificData.
+	"opendesign": {
+		BaseURL:    "https://amr-link.open-design.ai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+		// Quota reads live on the control plane, not the model plane: the
+		// dashboard fetcher builds it from the control host explicitly (it is
+		// never derived from this BaseURL).
+		StaticHeaders: map[string]string{
+			"User-Agent": "9router-go",
+		},
+	},
 	"gemini": {
 		BaseURL:    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
 		AuthHeader: "Authorization",
@@ -980,7 +1001,11 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader:    "Authorization",
 		AuthScheme:    "bearer",
 		LocalByDesign: true,
-		SystemoneURL:  "http://localhost:11434/v1/systemone",
+		// Phonon speech synthesis: the OpenAI-compatible /v1/audio/speech
+		// endpoint on the local daemon (upstream ollama-local.js ttsConfig,
+		// commit 31a9d262). Used when the connection has no custom base URL.
+		TTSURL:       "http://localhost:11434/v1/audio/speech",
+		SystemoneURL: "http://localhost:11434/v1/systemone",
 		// Saved host (providerSpecificData.baseUrl) is joined with this path.
 		SystemonePath: "/v1/systemone",
 	},
@@ -1040,7 +1065,7 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "raw",
 		StaticHeaders: map[string]string{
 			"anthropic-version":                         "2023-06-01",
-			"Anthropic-Beta":                            "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28,extended-cache-ttl-2025-04-11,thinking-display-updates-2026-08-18",
+			"Anthropic-Beta":                            "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28,extended-cache-ttl-2025-04-11,thinking-display-updates-2026-08-18,inline-tools-2026-09-15,context-1m-2025-08-07,web-search-2025-03-05,tool-search-tool-2025-10-19,task-budgets-2026-03-13,cache-keepalive-2026-09-03,thinking-resumption-2026-07-17,thinking-token-count-2026-05-13,afk-mode-2026-01-31,advisor-tool-2026-03-01,cache-diagnosis-2026-04-07,files-api-2025-04-14,environments-2025-11-01,tool-provenance-2026-10-26,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,server-side-fallback-2026-06-01,program-use-case-ids-2026-09-17,server-side-fallback-2026-07-01,fallback-credit-2026-06-01,auto-mode-classifier-2026-07-16,claude-code-side-query-2026-09-29,dangerous-tool-use-2026-09-03,thinking-binding-controls-2026-08-01,message-threads-2026-08-12,mid-conversation-system-clear-at-2026-08-21",
 			"Anthropic-Dangerous-Direct-Browser-Access": "true",
 			"User-Agent":                                "claude-cli/2.1.322 (external, sdk-cli)",
 			"X-App":                                     "cli",
@@ -1251,6 +1276,16 @@ var KnownProviders = map[string]ProviderConfig{
 		FetchMethod:  "POST",
 		SearchURL:    "https://api.search.tinyfish.ai",
 		SearchMethod: "GET",
+	},
+	"keenable": {
+		BaseURL:      "https://api.keenable.ai",
+		AuthHeader:   "X-API-Key",
+		AuthScheme:   "raw",
+		NoAuth:       true,
+		FetchURL:     "https://api.keenable.ai/v1/fetch",
+		FetchMethod:  "GET",
+		SearchURL:    "https://api.keenable.ai/v1/search",
+		SearchMethod: "POST",
 	},
 	"runwayml": {
 		BaseURL:    "https://api.dev.runwayml.com/v1",
@@ -1474,6 +1509,13 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 		NoAuth:     true,
 	},
+	// agy-acp: no HTTP endpoint — the executor spawns the official agy CLI
+	// and speaks ACP over stdio. Kept separate from antigravity (HTTP).
+	"agy-acp": {
+		BaseURL:    "agy-acp://acp/stdio",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	"kilo-gateway": {
 		BaseURL:    "https://api.kilo.ai/api/gateway/chat/completions",
 		AuthHeader: "Authorization",
@@ -1582,6 +1624,15 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	// DeepRelay — pay-per-token serverless inference (api.deeprelay.ai/v1).
+	// Chat completions, embeddings, image and video are all OpenAI-shaped on
+	// /v1, so ForwardOpenAI serves them. The wallet sits on
+	// GET /v1/billing/balance (used by the usage fetcher and the key probe).
+	"deeprelay": {
+		BaseURL:    "https://api.deeprelay.ai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 }
 
 // RetryableStatusCodes are HTTP status codes that trigger account fallback.
@@ -1593,6 +1644,19 @@ var RetryableStatusCodes = map[int]bool{
 	http.StatusBadGateway:         true, // 502
 	http.StatusServiceUnavailable: true, // 503
 	http.StatusGatewayTimeout:     true, // 504
+}
+
+// RetryModelScopedError reports whether a failure outside
+// RetryableStatusCodes still carries a model-scoped verdict that the caller
+// must act on: lock this provider/model pair and leave the credential alone.
+// NVIDIA NIM answers 400 "degraded" for an unhealthy cluster behind one model
+// (upstream decolua@2275bc0d) — a 400 is otherwise request-scoped, so without
+// this the degraded model is re-dialled on every request and the account is
+// never told the cluster is sick. Keyed off the rule table, not off a
+// provider literal, so any provider-scoped modelScoped rule gets the same
+// handling.
+func RetryModelScopedError(statusCode int, errorText, provider string) bool {
+	return ClassifyErrorForProvider(statusCode, errorText, 0, provider).ModelScoped
 }
 
 // PreservesCacheControl reports whether a provider keeps the cache_control
@@ -1634,4 +1698,25 @@ func (c *ProviderConfig) ResolveStallTimeout(defaultTimeout time.Duration) time.
 		return time.Duration(c.StallTimeoutMs) * time.Millisecond
 	}
 	return defaultTimeout
+}
+
+// WithAnthropicBeta sets the beta header under a single canonical key, dropping
+// any case variant already in the map.
+//
+// Two keys for one header is not a harmless duplicate: the map is copied into
+// http.Header by iterating it, so whichever key lands last wins, and an
+// "anthropic-beta" left beside "Anthropic-Beta" can silently discard the flags
+// merged into the other one — including every flag the client asked for.
+func WithAnthropicBeta(headers map[string]string, value string) map[string]string {
+	res := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		if strings.EqualFold(k, "Anthropic-Beta") {
+			continue
+		}
+		res[k] = v
+	}
+	if value != "" {
+		res["Anthropic-Beta"] = value
+	}
+	return res
 }

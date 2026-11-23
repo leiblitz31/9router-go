@@ -335,7 +335,7 @@ func (r *Repo) IsProviderAvailable(ctx context.Context, provider, model string) 
 		return true
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT data FROM providerConnections WHERE provider = ? AND isActive = 1`,
+		`SELECT data FROM providerConnections WHERE provider = ? AND isActive = TRUE`,
 		provider,
 	)
 	if err != nil {
@@ -442,8 +442,8 @@ func (r *Repo) clearSpecificModelLock(provider, model string) error {
 			continue
 		}
 		if _, err := r.db.Exec(
-			`UPDATE providerConnections SET data = json_set(data, ?, json('null'), '$.backoffLevel', 0), updatedAt = datetime('now') WHERE id = ?`,
-			key, p.id,
+			`UPDATE providerConnections SET data = json_set(data, ?, json('null'), '$.backoffLevel', 0), updatedAt = ? WHERE id = ?`,
+			key, nowUTC(), p.id,
 		); err != nil {
 			return fmt.Errorf("clear lock %s on %s: %w", key, p.id, err)
 		}
@@ -462,8 +462,8 @@ func (r *Repo) clearConnectionModelLocks(id, data string) error {
 		q += ", ?, json('null')"
 		args = append(args, "$.\""+f+"\"")
 	}
-	q += ", '$.backoffLevel', 0), updatedAt = datetime('now') WHERE id = ?"
-	args = append(args, id)
+	q += ", '$.backoffLevel', 0), updatedAt = ? WHERE id = ?"
+	args = append(args, id, nowUTC())
 	_, err := r.db.Exec(q, args...)
 	return err
 }

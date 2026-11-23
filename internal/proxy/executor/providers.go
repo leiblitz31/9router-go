@@ -986,10 +986,19 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
 	}
 
-	if req.IsStream {
-		return execSSEStream(w, resp.Body, req)
+	// The gate can answer a refusal inside a 200 frame, and once the response
+	// head is on the wire no failover is possible — so the first frame is read
+	// here, before the stream writer takes over.
+	streamBody, ferr := awaitOpenCodeFirstEvent(ctx, resp, 0)
+	if ferr != nil {
+		return ferr
 	}
-	data, err := readBodyOnceRetry(ctx, resp, func() (*http.Response, error) {
+	defer streamBody.Close()
+
+	if req.IsStream {
+		return execSSEStream(w, streamBody, req)
+	}
+	data, err := readBodyOnceRetry(ctx, &http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: streamBody}, func() (*http.Response, error) {
 		return send(sessionUsed, firstBody)
 	}, 10*1024*1024)
 	if err != nil {
@@ -1244,6 +1253,7 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 		delete(reqMap, "context_management")
 	}
 	SanitizeClaudeThinking(reqMap)
+	applyClaudeThinkingOffAndToolChoice(reqMap, provider, model)
 	enforceClaudeThinkingSampling(reqMap)
 	delete(reqMap, "stream_options")
 	delete(reqMap, "store")
@@ -1269,6 +1279,58 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 // #4727, mirroring decolua/9router's anthropic-compatible- prefix rule).
 func isAnthropicServingProvider(provider string) bool {
 	return provider == "claude" || strings.HasPrefix(provider, "anthropic") || strings.HasPrefix(provider, "anthropic-compatible-")
+}
+
+// applyClaudeThinkingOffAndToolChoice handles the two per-model rejections a
+// dotted Claude 5.5 id carries in its capability row:
+//
+//   - thinkingCanDisable:false — the model must never see thinking.type
+//     "disabled": the block is dropped and the effort carried on
+//     output_config.effort "low" instead.
+//   - thinkingOffType — the model rejects "disabled" but takes this type in its
+//     place (Sonnet 5.5's "between_tools", which accepts effort only up to high).
+//   - forcedToolChoice:false — "any"/"tool" pinning is downgraded to "auto";
+//     "required" is left alone, matching upstream.
+func applyClaudeThinkingOffAndToolChoice(reqMap map[string]any, provider, model string) {
+	caps := providers.GetCapabilitiesForModel(provider, model)
+	thinking, _ := reqMap["thinking"].(map[string]any)
+	disabled := thinking != nil && thinking["type"] == "disabled"
+
+	if disabled && !caps.CanDisableThinking() {
+		delete(reqMap, "thinking")
+		outCfg, _ := reqMap["output_config"].(map[string]any)
+		if outCfg == nil {
+			outCfg = map[string]any{}
+			reqMap["output_config"] = outCfg
+		}
+		if _, set := outCfg["effort"]; !set {
+			outCfg["effort"] = "low"
+		}
+		disabled = false
+	}
+
+	if disabled && caps.ThinkingOffType != "" {
+		reqMap["thinking"] = map[string]any{"type": caps.ThinkingOffType}
+		if oc, _ := reqMap["output_config"].(map[string]any); oc != nil {
+			switch oc["effort"] {
+			case "xhigh", "max":
+				oc["effort"] = "high"
+			}
+		}
+	}
+
+	if !caps.CanForceToolChoice() {
+		if tc, _ := reqMap["tool_choice"].(map[string]any); tc != nil {
+			switch tc["type"] {
+			case "any", "tool":
+				graded := map[string]any{"type": "auto"}
+				if v, ok := tc["disable_parallel_tool_use"]; ok {
+					graded["disable_parallel_tool_use"] = v
+				}
+				reqMap["tool_choice"] = graded
+			}
+		}
+	}
 }
 
 // enforceClaudeThinkingSampling ensures that when Claude thinking is enabled,
@@ -1495,7 +1557,7 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 		}
 		role, _ := msgMap["role"].(string)
 
-		if role == "system" {
+		if role == "system" || role == "developer" {
 			switch c := msgMap["content"].(type) {
 			case string:
 				if strings.TrimSpace(c) != "" {
@@ -1960,7 +2022,7 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 		return forwardOpencodeRequestDirect(ctx, &cfg, "public", body, true)
 	}, rotateOpencodeStableSession(opencodeStableSessionKey(req, true), hint, func(session string) {
 		cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(baseHeaders, session, true)
-	}))
+	}), nil)
 	if err != nil {
 		return fmt.Errorf("ForwardOpencodeGo (free lane): %w", err)
 	}

@@ -313,7 +313,7 @@ func TestDeepSeekToolTurnMalformedDSMLIsDropped(t *testing.T) {
 		"<｜｜DSML｜｜ timeout>30</｜｜DSML｜｜ timeout>\n" +
 		"</｜｜DSML｜｜ calls>"
 
-	if err := deepSeekToolTurnToClient(rec, req, newSignedOffTurn(t, answer), env, newDeepSeekStreamAccumulator(env.Model), ""); err != nil {
+	if _, err := deepSeekToolTurnToClient(rec, req, newSignedOffTurn(t, answer), env, newDeepSeekStreamAccumulator(env.Model), "", nil); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	body := rec.Body.String()

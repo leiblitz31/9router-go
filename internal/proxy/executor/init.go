@@ -12,6 +12,7 @@ func RegisterAll() {
 	Register("agnes", func() Executor { return ForwardOpenAI })
 	Register("deepseek", func() Executor { return ForwardOpenAI })
 	Register("sumopod", func() Executor { return ForwardOpenAI })
+	Register("deeprelay", func() Executor { return ForwardOpenAI })
 	Register("groq", func() Executor { return ForwardOpenAI })
 	Register("nvidia", func() Executor { return ForwardNvidia })
 	Register("openrouter", func() Executor { return ForwardOpenAI })
@@ -104,6 +105,9 @@ func RegisterAll() {
 	Register("bazaarlink", func() Executor { return ForwardOpenAI })
 	Register("bluesminds", func() Executor { return ForwardOpenAI })
 	Register("devin-cli", func() Executor { return ForwardDevinCLI })
+	// agy-acp drives the official agy CLI over Agent Client Protocol (stdio
+	// JSON-RPC). It is distinct from the HTTP antigravity provider.
+	Register("agy-acp", func() Executor { return ForwardAGYACP })
 	// Vertex AI: the registry entries carried no executor, so every request
 	// POSTed an OpenAI body at aiplatform.googleapis.com, which serves neither
 	// lane. Both provider ids share one implementation — the difference is the
@@ -135,5 +139,9 @@ func RegisterAll() {
 	Register("minimax-code-global", func() Executor { return ForwardMinimaxCode })
 	Register("daoxe", func() Executor { return ForwardOpenAI })
 	Register("nan", func() Executor { return ForwardOpenAI })
+	// Open Design Cloud: dual-plane (runtime key at amr-link.open-design.ai/v1,
+	// control key at amr-api.open-design.ai). Its own executor so 401/403/429
+	// reach the client as real statuses instead of being written as 200.
+	Register("opendesign", func() Executor { return ForwardOpenDesign })
 	Register("openadapter", func() Executor { return ForwardOpenAI })
 }

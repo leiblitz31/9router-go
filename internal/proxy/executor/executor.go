@@ -32,9 +32,11 @@ type Request struct {
 	ClaudeClient   bool // /v1/messages client: body is Claude Messages, response must be translated back
 	TranslateResp  bool
 	ConnectionID   string            // for OAuth refresh by fallback
+	AuthType       string            // connection authType column ("oauth", "mcode-lease", ...)
+	APIKeyID       string            // authenticated key id for signature scoping
 	SessionID      string            // client session / conversation id
-	ConnData       map[string]any    // connection providerSpecificData (e.g. fingerprintId for client cloaking)
 	Leases         LeaseStore        // cross-process lease backend (nil = memory only)
+	ConnData       map[string]any    // connection providerSpecificData (e.g. fingerprintId for client cloaking)
 	ModelName      string            // extracted model name
 	Endpoint       string            // custom URL override (azure)
 	ToolNameMap    map[string]string // claude OAuth tool-cloak map (suffixed -> original)
@@ -47,6 +49,10 @@ type Request struct {
 	ResponseBuf          io.Writer // writer to capture response text for token estimation & logging
 	StartTime            time.Time // request start time for TTFT tracking
 	TTFT                 *int64    // pointer to TTFT metric (ms to first chunk)
+	// ACPCredentials resolves the OAuth credential pair for ACP-style
+	// providers (agy-acp). Set by the chat handler so the executor can
+	// refresh/reference an antigravity connection without owning the DB.
+	ACPCredentials func(ctx context.Context, connData map[string]any, connectionID string) (accessToken, refreshToken string, expiresAt time.Time, err error)
 }
 
 // markTTFT stamps the time-to-first-token on the first emitted chunk, once.

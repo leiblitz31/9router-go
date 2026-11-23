@@ -189,11 +189,18 @@ func normalizeNousFreeModels(payload []byte) []LiveModel {
 // fetchNousLiveCatalog reads the Portal catalogue. The endpoint is public, so
 // the credential is only attached when one exists — an anonymous read still
 // returns the same list, and a stale key must not blank the picker.
-func (h *ChatHandler) fetchNousLiveCatalog(ctx context.Context, accessToken string) []LiveModel {
+func (h *ChatHandler) fetchNousLiveCatalog(ctx context.Context, accessToken, baseURL string) []LiveModel {
 	reqCtx, cancel := context.WithTimeout(ctx, nousCatalogHTTP)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, nousModelsURL, nil)
+	// A connection pinned to another host (a compatible node, a private
+	// deployment) publishes its own feed; the public URL is the default.
+	modelsURL := nousModelsURL
+	if baseURL != "" {
+		modelsURL = strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/chat/completions") + "/models"
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, modelsURL, nil)
 	if err != nil {
 		return nil
 	}
@@ -219,6 +226,14 @@ func (h *ChatHandler) fetchNousLiveCatalog(ctx context.Context, accessToken stri
 	models := normalizeNousModels(body)
 	if len(models) == 0 {
 		return nil
+	}
+	// A connection pointed at its own feed publishes bare ids and the windows it
+	// enforces, so those limits are authoritative and the id is left alone.
+	if baseURL != "" {
+		for i := range models {
+			models[i].LimitsAuthoritative = true
+		}
+		return models
 	}
 	// Every Nous model is published under the nous/ prefix, so a caller can
 	// request one without knowing the vendor namespace.

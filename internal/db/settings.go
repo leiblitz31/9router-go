@@ -57,6 +57,15 @@ type ComboStrategy struct {
 	// BudgetWindowMs is the window a BudgetCalls ceiling spans. Zero means
 	// DefaultBudgetWindowMs.
 	BudgetWindowMs int `json:"budgetWindowMs,omitempty"`
+	// ContextWindowMode selects how the combo advertises its context window
+	// in /v1/models: "min" narrows to the smallest seat window, "max"
+	// advertises the largest seat window, and "custom" advertises the
+	// explicit ContextWindow regardless of what the seats can serve. Absent
+	// defaults to min so a combo only promises what every seat agrees on.
+	ContextWindowMode string `json:"contextWindowMode,omitempty"`
+	// ContextWindow is the explicit window advertised when ContextWindowMode
+	// is "custom". Zero means "not set" and the combo falls back to min.
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 // BudgetCallsMax is the largest per-window ceiling the settings parser
@@ -68,8 +77,23 @@ type ComboStrategy struct {
 // what a stored budget means rather than the server silently normalizing it.
 const BudgetCallsMax = 1000000
 
-// DefaultFirstTokenGraceMs is the grace period applied after a model response
-// timeout when the combo does not set its own: five minutes.
+const (
+	// ComboWindowModeMin advertises the narrowest seat window: the combo can
+	// only promise what every seat can serve. The zero value (unset mode)
+	// resolves to this mode, so existing combos keep their current behaviour.
+	ComboWindowModeMin = "min"
+
+	// ComboWindowModeMax advertises the widest seat window: a fallback chain
+	// that fails past a small-window seat can still serve a long-prompt turn
+	// on a large-window seat, so advertising only the minimum undersells the
+	// chain.
+	ComboWindowModeMax = "max"
+
+	// ComboWindowModeCustom advertises the operator-declared ContextWindow
+	// regardless of what the seats report.
+	ComboWindowModeCustom = "custom"
+)
+
 const DefaultFirstTokenGraceMs = 5 * 60 * 1000
 
 // FirstTokenGrace resolves the effective grace period in milliseconds.
@@ -197,6 +221,18 @@ type SettingsData struct {
 	UptimeKumaEnabled  bool   `json:"uptimeKumaEnabled,omitempty"`
 	UptimeKumaPushURL  string `json:"uptimeKumaPushUrl,omitempty"`
 	UptimeKumaInterval int    `json:"uptimeKumaInterval,omitempty"`
+	// White-label branding (Settings > White-label branding card). Empty means
+	// the project default: the sidebar and login screen fall back to the
+	// built-in name and favicon. LoginLogo and TrayIcon stay separate from
+	// AppLogoUrl because the login tile and the tray render at different sizes
+	// and may be a different mark entirely.
+	AppName        string `json:"appName,omitempty"`
+	AppLogoURL     string `json:"appLogoUrl,omitempty"`
+	AppDescription string `json:"appDescription,omitempty"`
+	AppTagline     string `json:"appTagline,omitempty"`
+	LoginLogoURL   string `json:"loginLogo,omitempty"`
+	TrayAppName    string `json:"trayAppName,omitempty"`
+	TrayIconURL    string `json:"trayIcon,omitempty"`
 }
 
 // ProviderThinking is one provider's operator reasoning override, mirroring

@@ -94,6 +94,9 @@ type utlsDialer struct {
 	// copy, but the spec's extension objects are otherwise shared with the
 	// handshake. Nil keeps the historical behaviour.
 	specFactory ClientHelloSpecFactory
+	// strictPrivate refuses a private/reserved target even when the
+	// environment permits private networking (NewStrictSafeTransport).
+	strictPrivate bool
 	// doh, when non-nil, resolves the target host over DNS-over-HTTPS and
 	// dials the resolved public IP instead of letting the system resolver
 	// answer (see doh_resolve.go). Only the TCP destination changes: the
@@ -175,7 +178,7 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 	}
 
 	if proxyURL == "" {
-		dialer := NewSafeDialer()
+		dialer := newSafeDialerForProxyOpt(ambientProxyAllowlist(), d.strictPrivate)
 		var lastErr error
 		for _, target := range targets {
 			conn, err := dialer.DialContext(ctx, network, target)
@@ -198,7 +201,7 @@ func (d *utlsDialer) dialTunnel(ctx context.Context, network, addr, host string)
 	// surface — the tunneled request target is judged separately. Without
 	// this, a pool that lives on loopback or a tailnet address (the shape
 	// every self-hosted egress relay has) can never be dialed.
-	dialer := newSafeDialerForProxy(newProxyAllowlist(proxyAllowlistHosts(pu)...))
+	dialer := newSafeDialerForProxyOpt(newProxyAllowlist(proxyAllowlistHosts(pu)...), d.strictPrivate)
 	var lastErr error
 	for _, target := range targets {
 		// One dead record must not consume the caller's whole budget: with a

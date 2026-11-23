@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"sync"
 
 	"9router/proxy/internal/log"
@@ -32,6 +33,10 @@ type UpstreamError struct {
 	// valid and callers branch on the status, so a read failure must not erase
 	// it — See doRequestOnce.
 	ReadErr error
+	// Local marks a rejection this gateway produced itself (the Antigravity
+	// per-connection limiter), not one the upstream returned. Combo rotation
+	// must not treat it as the account's verdict.
+	Local bool
 }
 
 func (e *UpstreamError) Error() string {
@@ -193,12 +198,62 @@ func newJSONRequest(ctx context.Context, method, url string, headers map[string]
 	return req, nil
 }
 
+// idleConnClosedError is the wording net/http reports when the peer closed a
+// pooled connection under a request that was already being written — Go replays
+// that itself only for idempotent methods, and this router sends POSTs. The
+// sentinel is unexported, so its text is the only handle on it.
+const idleConnClosedError = "http: server closed idle connection"
+
+// isDeadKeepAliveSocket reports whether err is a pooled connection the upstream
+// edge had already closed, with no response byte in hand. The nil resp is
+// load-bearing: once a status arrived the request reached the provider, and
+// replaying it would run the request twice. ECONNRESET/EPIPE are matched with
+// errors.Is rather than substring text.
+func isDeadKeepAliveSocket(err error, resp *http.Response) bool {
+	if err == nil || resp != nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), idleConnClosedError)
+}
+
 // send performs one attempt through client, defaulting to the shared client.
+// A request whose body can be rebuilt is replayed exactly once when the first
+// attempt landed on an idle keep-alive socket the upstream edge had reaped
+// (upstream decolua/9router@963787f73).
+//
+// shortcut: an origin that closes every keep-alive socket it accepts makes each
+// request pay one extra dial; track the retry in metrics before adding a
+// circuit breaker.
 func send(client *http.Client, req *http.Request) (*http.Response, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if !isDeadKeepAliveSocket(err, resp) {
+		return resp, err
+	}
+	if req.GetBody == nil || req.Context().Err() != nil {
+		return resp, err
+	}
+	body, bodyErr := req.GetBody()
+	if bodyErr != nil {
+		return nil, fmt.Errorf("rewind body for dead keep-alive retry: %w", bodyErr)
+	}
+	client.CloseIdleConnections()
+	log.Warn("proxy", "keep-alive connection closed before the response, retrying on a fresh socket", "url", req.URL.String(), "error", err)
+	retryReq := req.Clone(req.Context())
+	retryReq.Body = body
+	resp, err = client.Do(retryReq)
+	if err != nil {
+		return nil, fmt.Errorf("upstream request after dead keep-alive retry: %w", err)
+	}
+	return resp, nil
 }
 
 // replayDirect retries the request once through directProxyClient.
@@ -283,6 +338,36 @@ func proxyURLForTransport(tr *http.Transport) string {
 		return ""
 	}
 	return u.String()
+}
+
+// unwrapHTTPTransport strips router transport wrappers (ForbidDirectReplay and
+// FallbackTransport) to recover the underlying *http.Transport, so a strict-proxy
+// client still reports the proxy it dials.
+func unwrapHTTPTransport(rt http.RoundTripper) *http.Transport {
+	for rt != nil {
+		switch t := rt.(type) {
+		case *http.Transport:
+			return t
+		case forbidDirectReplayTransport:
+			rt = t.base
+		case *FallbackTransport:
+			rt = t.Base
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// ProxyURLForTarget reports the proxy URL a client dials to reach target, or ""
+// when it dials directly. It unwraps router transport wrappers and then reads
+// the transport registry, because the fork's uTLS transports keep t.Proxy nil
+// by design.
+func ProxyURLForTarget(client *http.Client, target *url.URL) string {
+	if client == nil || target == nil {
+		return ""
+	}
+	return proxyURLForTransport(unwrapHTTPTransport(client.Transport))
 }
 
 // TransportProxyURL is proxyURLFor for a caller that already holds the

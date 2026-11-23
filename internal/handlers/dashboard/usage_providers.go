@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
 	"io"
@@ -70,8 +71,13 @@ func (r usageResult) toResponse() map[string]any {
 func fetchProviderUsage(ctx context.Context, provider string, data map[string]any) (usageResult, bool) {
 	accessToken, apiKey, psd := usageCreds(data)
 	switch provider {
+	case "cloudflare-ai":
+		// Workers AI has no quota API: read today's neurons from GraphQL Analytics.
+		return fetchCloudflareAiUsage(ctx, apiKey, psd), true
 	case "deepseek":
 		return fetchDeepseekUsage(ctx, apiKey), true
+	case "deeprelay":
+		return fetchDeepRelayUsage(ctx, apiKey), true
 	case "groq":
 		return fetchGroqUsage(ctx, apiKey), true
 	case "commandcode", "commandcode-goat", "cmc-goat":
@@ -105,14 +111,22 @@ func fetchProviderUsage(ctx context.Context, provider string, data map[string]an
 		return fetchFreePiUsage(ctx, firstNonEmptyStr(accessToken, apiKey), connectionBaseURL(data)), true
 	case "freebuff":
 		return fetchFreebuffUsage(ctx, firstNonEmptyStr(accessToken, apiKey, psdStr(psd, "authToken")), connectionBaseURL(data)), true
+	case "opendesign":
+		return fetchOpenDesignUsage(ctx, data), true
 	case "minimax-code", "minimax-code-global":
 		return fetchMiniMaxCodeUsage(ctx, provider, accessToken, psdStr(psd, "realUserID")), true
 	case "zcode":
 		return fetchZcodeUsage(ctx, firstNonEmptyStr(accessToken, apiKey), psdStr(psd, "deviceId")), true
 	case "glm", "glm-cn":
 		return fetchGLMUsage(ctx, provider, firstNonEmptyStr(apiKey, accessToken)), true
+	case "clinepass", "cline-pass", "cp":
+		// The same usage-limits route answers for a ClinePass API key (plain
+		// Bearer) and a Cline OAuth WorkOS JWT (workos: + identity headers).
+		return fetchClinePassUsage(ctx, accessToken, apiKey), true
 	case "synthetic":
 		return fetchSyntheticUsage(ctx, apiKey), true
+	case "zed":
+		return fetchZedUsage(ctx, firstNonEmptyStr(accessToken, apiKey), psd), true
 	default:
 		return usageResult{}, false
 	}
@@ -127,6 +141,163 @@ func usageCreds(data map[string]any) (accessToken, apiKey string, psd map[string
 		return accessToken, apiKey, psd
 	}
 	return accessToken, apiKey, map[string]any{}
+}
+
+// fetchZedUsage ports open-sse/services/usage/zed.js: GET /client/users/me
+// with the layer-1 "{user_id} {access_token}" auth header. Zed's plan data is
+// nested under `plan`, its quota buckets under `plan.usage`, and a
+// model_requests limit of 0 means token billing (not a zero request quota).
+func fetchZedUsage(ctx context.Context, accessToken string, psd map[string]any) usageResult {
+	userID := psdStr(psd, "userId")
+	if accessToken == "" {
+		return usageResult{message: "Zed access token not available. Re-connect Zed to view quota."}
+	}
+	if userID == "" {
+		return usageResult{message: "Zed credential is missing user id. Re-connect Zed to view quota."}
+	}
+
+	url := providers.ZedCloudBaseURL() + "/client/users/me"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return usageResult{message: "Zed error: " + err.Error()}
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", providers.ZedAuthHeader(providers.ZedCredentials{AccessToken: accessToken, UserID: userID}))
+	if systemID := psdStr(psd, "systemId"); systemID != "" {
+		req.Header.Set(providers.ZedSystemIDHeader, systemID)
+	}
+	client := &http.Client{Timeout: usageHTTPTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return usageResult{message: "Zed error: " + err.Error()}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return usageResult{message: "Zed error: " + err.Error()}
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return usageResult{message: "Zed authentication failed. Sign in again from the dashboard or Zed editor."}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return usageResult{message: fmt.Sprintf("Zed error: upstream returned %d", resp.StatusCode)}
+	}
+	return parseZedUsage(raw)
+}
+
+func parseZedUsage(raw []byte) usageResult {
+	var doc struct {
+		Plan struct {
+			PlanV3             string `json:"plan_v3"`
+			PlanV2             string `json:"plan_v2"`
+			Plan               string `json:"plan"`
+			HasOverdueInvoices bool   `json:"has_overdue_invoices"`
+			TrialStartedAt     string `json:"trial_started_at"`
+			SubscriptionPeriod struct {
+				EndedAt string `json:"ended_at"`
+			} `json:"subscription_period"`
+			Usage map[string]jsontext.Value `json:"usage"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return usageResult{message: "Zed error: " + err.Error()}
+	}
+	planID := firstNonEmptyStr(doc.Plan.PlanV3, doc.Plan.PlanV2, doc.Plan.Plan)
+	label := formatZedPlanLabel(planID)
+	if doc.Plan.TrialStartedAt != "" && !strings.Contains(strings.ToLower(label), "trial") {
+		label += " (Trial active)"
+	}
+	resetAt := usageResetTime(doc.Plan.SubscriptionPeriod.EndedAt)
+
+	quotas := make(map[string]any)
+	var message string
+	for _, spec := range []struct {
+		key     string
+		aliases []string
+		label   string
+	}{
+		{"edit_predictions", []string{"edit_predictions", "editPredictions"}, "Edit Predictions"},
+		{"model_requests", []string{"model_requests", "modelRequests"}, "Hosted Model Requests"},
+	} {
+		var bucket map[string]any
+		for _, key := range spec.aliases {
+			if val, ok := doc.Plan.Usage[key]; ok {
+				_ = json.Unmarshal(val, &bucket)
+				break
+			}
+		}
+		if bucket == nil {
+			continue
+		}
+		used := zedUsageNumber(bucket["used"])
+		limit, unlimited := zedUsageLimit(bucket["limit"])
+		if spec.key == "model_requests" && !unlimited && limit <= 0 {
+			message = "Hosted AI models are billed per token (not request count). Edit Predictions are tracked below. Token spend is on dashboard.zed.dev."
+			continue
+		}
+		quota := usageQuota(used, limit, resetAt)
+		quota["unlimited"] = unlimited
+		if unlimited {
+			quota["remainingPercentage"] = 100.0
+		}
+		quotas[spec.label] = quota
+	}
+	if doc.Plan.HasOverdueInvoices {
+		message = "This Zed account has overdue invoices. Usage may be blocked until billing is resolved."
+	}
+	return usageResult{plan: label, quotas: quotas, message: message}
+}
+
+func formatZedPlanLabel(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return "Zed"
+	case "zed_free":
+		return "Zed Free"
+	case "zed_pro":
+		return "Zed Pro"
+	case "zed_pro_trial":
+		return "Zed Pro Trial"
+	case "zed_student":
+		return "Zed Student"
+	case "zed_business":
+		return "Zed Business"
+	}
+	words := strings.Fields(strings.ReplaceAll(raw, "_", " "))
+	for i, w := range words {
+		if w == "" {
+			continue
+		}
+		words[i] = strings.ToUpper(w[:1]) + strings.ToLower(w[1:])
+	}
+	return strings.Join(words, " ")
+}
+
+func zedUsageNumber(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case string:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		return f
+	}
+	return 0
+}
+
+func zedUsageLimit(v any) (float64, bool) {
+	switch n := v.(type) {
+	case string:
+		if strings.EqualFold(strings.TrimSpace(n), "unlimited") {
+			return 0, true
+		}
+		return zedUsageNumber(n), false
+	case map[string]any:
+		if n["unlimited"] == true {
+			return 0, true
+		}
+		return zedUsageNumber(n["limited"]), false
+	}
+	return zedUsageNumber(v), false
 }
 
 // kiroUsageToken mirrors resolveProviderAuthToken in internal/handlers/chat, which
@@ -417,6 +588,55 @@ func fetchDeepseekUsage(ctx context.Context, apiKey string) usageResult {
 		plan = "DeepSeek (Insufficient Balance)"
 	}
 	return usageResult{plan: plan, quotas: quotas}
+}
+
+// ---------- deeprelay: GET /v1/billing/balance ----------
+
+// deeprelayBalanceURL is the wallet endpoint. It reports the organization's
+// remaining credit in both cents and dollars; the dashboard renders it as a
+// credit balance, not a percentage, because there is no spend cap to divide by.
+var deeprelayBalanceURL = "https://api.deeprelay.ai/v1/billing/balance"
+
+func fetchDeepRelayUsage(ctx context.Context, apiKey string) usageResult {
+	const plan = "DeepRelay"
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return usageResult{plan: plan, message: "DeepRelay API key not available. Add a key to view usage."}
+	}
+	status, _, out, err := usageGet(ctx, deeprelayBalanceURL, map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"Accept":        "application/json",
+	})
+	if err != nil {
+		return usageResult{plan: plan, message: fmt.Sprintf("DeepRelay error: %v", err)}
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return usageResult{plan: plan, message: "DeepRelay rejected the API key. A key needs the billing:read scope to read the wallet."}
+	}
+	if status < 200 || status >= 300 {
+		return usageResult{plan: plan, message: fmt.Sprintf("DeepRelay balance API error (%d).", status)}
+	}
+	data := usageJSON(out)
+	if data == nil {
+		return usageResult{plan: plan, message: "DeepRelay balance response was not JSON."}
+	}
+
+	// balance_dollars is the documented figure; balance_cents is the same value
+	// in the smallest unit and is used when the dollars field is absent.
+	balance, ok := usageFiniteNum(data["balance_dollars"])
+	if !ok {
+		if cents, centsOK := usageFiniteNum(data["balance_cents"]); centsOK {
+			balance, ok = cents/100, true
+		}
+	}
+	if !ok {
+		return usageResult{plan: plan, message: "DeepRelay balance response did not contain a balance."}
+	}
+
+	quota := usageQuota(0, math.Max(0, balance), "")
+	quota["isCreditBalance"] = true
+	quota["currency"] = "$"
+	return usageResult{plan: plan, quotas: map[string]any{"Wallet Balance": quota}}
 }
 
 func firstNonEmptyAny(vals ...any) any {
@@ -1297,11 +1517,29 @@ func parseKiroQuotaData(data map[string]any) usageResult {
 		if rt == "" {
 			rt = "unknown"
 		}
+		// A pooling seat answers two CREDIT rows: the NON_POOLED one carries
+		// usage but no limit, the POOLED one carries the shared pool. Keying
+		// both by resourceType made the later row overwrite the earlier, so the
+		// dashboard showed whichever came last — and when AWS sent the
+		// limit-less row last it read as "0 total, -0.59 remaining". The
+		// dimension is what tells them apart, so it always joins the key rather
+		// than only on collision: which row lands first must not decide the
+		// name a quota is shown under.
+		if dim, _ := b["dimensionType"].(string); strings.TrimSpace(dim) != "" {
+			rt += "_" + strings.ToLower(strings.TrimSpace(dim))
+		}
 		used := usageNum(b["currentUsageWithPrecision"], 0)
-		total := usageNum(b["usageLimitWithPrecision"], 0)
+		limit, hasLimit := b["usageLimitWithPrecision"]
+		unlimited := !hasLimit || limit == nil
+		total, remaining := 0.0, 0.0
+		if !unlimited {
+			total = usageNum(limit, 0)
+			remaining = total - used
+		}
 		quotas[rt] = map[string]any{
-			"used": used, "total": total, "remaining": total - used,
-			"resetAt": usageResetTimeToNil(resetAtStr(resetAt)), "unlimited": false,
+			"used": used, "total": total, "remaining": remaining,
+			"resetAt":   usageResetTimeToNil(resetAtStr(resetAt)),
+			"unlimited": unlimited,
 		}
 		if ft, ok := b["freeTrialInfo"].(map[string]any); ok {
 			fu := usageNum(ft["currentUsageWithPrecision"], 0)

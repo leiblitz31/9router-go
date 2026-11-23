@@ -43,6 +43,11 @@ func transportProxyIsAssigned(rt http.RoundTripper) bool {
 		// ambient proxy through its own Direct leg. Base is the path the caller
 		// chose, so that is the one to inspect.
 		return transportProxyIsAssigned(t.Base)
+	case forbidDirectReplayTransport:
+		// The strict wrapper hides the pooled transport underneath; without
+		// unwrapping, a strict pool reports "no assignment" and the stealth
+		// stack falls back to a direct dial.
+		return transportProxyIsAssigned(t.base)
 	default:
 		return false
 	}

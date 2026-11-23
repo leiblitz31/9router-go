@@ -177,6 +177,20 @@ func deepSeekParseDSMLInvoke(invoke string, tools []deepSeekToolSpec, nonce stri
 	}
 
 	params := deepSeekDSMLParameters(body)
+	if len(params) == 0 {
+		// Models also write the arguments as one JSON object in the invoke body.
+		// Without this a call with no parameter elements degrades to {} and the
+		// client rejects it for missing required properties (live DSH bash call,
+		// 2026-11-08). An invoke with neither form is still a real call: the
+		// validator names the missing properties so a corrective retry can fix
+		// exactly them.
+		if jsonBody := deepSeekDSMLJSONBody(body); jsonBody != "" {
+			return deepSeekToolRequest{Name: name, Arguments: jsonBody, Raw: invoke}, true
+		}
+		// Neither form: still a call, with empty arguments. Validation names the
+		// missing required properties so the corrective retry repairs them.
+		return deepSeekToolRequest{Name: name, Arguments: "{}", Raw: invoke}, true
+	}
 	args, ok := deepSeekDSMLBoundArguments(params, name, tools, nonce)
 	if !ok {
 		return deepSeekToolRequest{}, false
@@ -284,8 +298,16 @@ func isDSMLAttrBreak(c byte) bool {
 // That keeps the result byte-identical across identical turns, which matters
 // because the arguments string is compared when deciding whether a call repeats.
 func deepSeekDSMLArguments(body string) string {
-	return deepSeekDSMLArgumentsFrom(deepSeekDSMLParameters(body))
-
+	params := deepSeekDSMLParameters(body)
+	if len(params) == 0 {
+		// Models also write the arguments as one JSON object in the invoke body.
+		// Without this fallback such a call degrades to {} and the client
+		// rejects it for missing required properties.
+		if jsonBody := deepSeekDSMLJSONBody(body); jsonBody != "" {
+			return jsonBody
+		}
+	}
+	return deepSeekDSMLArgumentsFrom(params)
 }
 
 // deepSeekDSMLJSONBody interprets an invoke body as a single JSON object and

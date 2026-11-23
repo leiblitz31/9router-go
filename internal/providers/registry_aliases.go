@@ -8,6 +8,7 @@ package providers
 // This is the display/routing prefix used by /v1/models; ProviderAliasMap below
 // stays the alias -> canonical id table used when resolving incoming model ids.
 var RegistryAliases = map[string]string{
+	"agy-acp":           "agcpy",
 	"antigravity":       "ag",
 	"api-airforce":      "af",
 	"assemblyai":        "aai",
@@ -70,6 +71,7 @@ var RegistryAliases = map[string]string{
 	"opencode":            "oc",
 	"opencode-go":         "ocg",
 	"opencode-zen":        "ocz",
+	"opendesign":          "od",
 	"perplexity":          "pplx",
 	"perplexity-agent":    "pa",
 	"perplexity-web":      "pw",

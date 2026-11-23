@@ -118,7 +118,7 @@ func deepSeekToolTurnToClient(
 		preamble := deepSeekSurroundingText(text, raws...)
 
 		if !req.IsStream {
-			return accumulator, deepSeekWriteToolCalls(w, req, envelope.Model, calls, preamble)
+			return accumulator, deepSeekWriteToolCalls(w, req, envelope.Model, calls, preamble, deepSeekEnvelopePromptText(envelope))
 		}
 		return accumulator, deepSeekWriteStreamedToolCalls(w, req, envelope.Model, calls, preamble)
 	}
@@ -126,13 +126,13 @@ func deepSeekToolTurnToClient(
 	// at all, is markup rather than an answer. Leaving it in shows the user a wall
 	// of `parameter>` tags for something that was meant to be a tool call.
 	if deepSeekHasDSML(text) {
-		if stripped := deepSeekStripDSML(text); stripped != "" {
-			text = stripped
-		}
+		// Assign unconditionally: a markup-only answer strips to "", and keeping
+		// the original in that case is exactly the leak this guard exists for.
+		text = deepSeekStripDSML(text)
 	}
 
 	if !req.IsStream {
-		return accumulator, deepSeekWritePlainAnswer(w, req, envelope.Model, accumulator, text)
+		return accumulator, deepSeekWritePlainAnswer(w, req, envelope.Model, accumulator, text, deepSeekEnvelopePromptText(envelope))
 	}
 	return accumulator, deepSeekWriteStreamedAnswer(w, req, envelope.Model, accumulator, text)
 }
@@ -179,28 +179,43 @@ func deepSeekToolPlainText(accumulator *deepSeekStreamAccumulator) string {
 
 // deepSeekWriteToolCall answers with an OpenAI tool_calls message, keeping any
 // text the model wrote around the calls.
-func deepSeekWriteToolCall(w http.ResponseWriter, req *Request, model string, call deepSeekToolRequest, preamble string) error {
-	return deepSeekWriteToolCalls(w, req, model, []deepSeekToolRequest{call}, preamble)
+func deepSeekWriteToolCall(w http.ResponseWriter, req *Request, model string, call deepSeekToolRequest, preamble, prompt string) error {
+	return deepSeekWriteToolCalls(w, req, model, []deepSeekToolRequest{call}, preamble, prompt)
 }
 
 // deepSeekWriteToolCalls answers with an OpenAI tool_calls message.
-func deepSeekWriteToolCalls(w http.ResponseWriter, req *Request, model string, calls []deepSeekToolRequest, preamble string) error {
-	return deepSeekWriteJSON(w, req, model, deepSeekToolCallMessage(calls, preamble))
+func deepSeekWriteToolCalls(w http.ResponseWriter, req *Request, model string, calls []deepSeekToolRequest, preamble, prompt string) error {
+	return deepSeekWriteJSON(w, req, model, deepSeekToolCallMessage(calls, preamble), prompt)
 }
 
 // deepSeekWritePlainAnswer answers with the model's text when no declared tool
 // was called.
-func deepSeekWritePlainAnswer(w http.ResponseWriter, req *Request, model string, accumulator *deepSeekStreamAccumulator, text string) error {
+func deepSeekWritePlainAnswer(w http.ResponseWriter, req *Request, model string, accumulator *deepSeekStreamAccumulator, text, prompt string) error {
 	message := map[string]any{"role": "assistant", "content": text}
 	if thinking := accumulator.thinkingText(); thinking != "" {
 		message["reasoning_content"] = thinking
 	}
-	return deepSeekWriteJSON(w, req, model, message)
+	return deepSeekWriteJSON(w, req, model, message, prompt)
+}
+
+// deepSeekEnvelopePromptText is the turn's prompt as plain text, for the token
+// estimate: the site reports no counts, so the prompt half is estimated from
+// what was sent.
+func deepSeekEnvelopePromptText(envelope deepSeekRequestEnvelope) string {
+	var b strings.Builder
+	for _, m := range envelope.Messages {
+		b.WriteString(m.Role)
+		b.WriteString(" ")
+		b.Write([]byte(m.Content))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // deepSeekWriteJSON writes one chat.completion.
-func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, message map[string]any) error {
+func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, message map[string]any, prompt string) error {
 	content, _ := message["content"].(string)
+	reasoning, _ := message["reasoning_content"].(string)
 	if content != "" && req.ResponseBuf != nil {
 		req.ResponseBuf.Write([]byte(content))
 	}
@@ -215,7 +230,7 @@ func deepSeekWriteJSON(w http.ResponseWriter, req *Request, model string, messag
 			"message":       message,
 			"finish_reason": deepSeekFinishReason(message),
 		}},
-		"usage": map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+		"usage": deepSeekBuildUsage(prompt, content, reasoning),
 	}
 
 	encoded, err := json.Marshal(payload)

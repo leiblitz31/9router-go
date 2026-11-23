@@ -199,6 +199,8 @@ func SetupRoutes(r interface {
 	r.Get("/api/usage/request-details", HandleRequestDetails(repo))
 	r.Get("/api/usage/export", HandleUsageExport(repo))
 	r.Get("/api/usage/request-details/{id}", HandleRequestDetail(repo))
+	// Qoder daily-credit check-in state (read-only).
+	r.Get("/api/qoder/checkins", dashH.HandleGetQoderCheckins)
 	r.Get("/api/usage/providers", dashH.HandleGetUsageProviders)
 	// Usage per client API key. Registered before the {connectionId} route:
 	// chi matches in order, so a route added after it would be read as a
@@ -285,6 +287,12 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Get("/api/usage/request-details", HandleRequestDetails(repo))
 	r.Get("/api/usage/export", HandleUsageExport(repo))
 	r.Get("/api/usage/request-details/{id}", HandleRequestDetail(repo))
+	// MiniMax Code daily check-in state and the manual "Check in now" action.
+	// Registered here (the real server's dashboard group, under
+	// RequireDashboardAuth) as well as in dashboard.RegisterRoutes (tests-only):
+	// a route added to that table alone 404s on a production boot.
+	r.Get("/api/minimax/checkins", dashH.HandleGetMiniMaxCheckins)
+	r.Post("/api/minimax/checkins/{connectionId}", dashH.HandleMiniMaxCheckinNow)
 	r.Get("/api/usage/providers", dashH.HandleGetUsageProviders)
 	// Usage per client API key. Registered before the {connectionId} route:
 	// chi matches in order, so a route added after it would be read as a
@@ -316,6 +324,7 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Delete("/api/cache", dashH.HandleDeleteCache)
 	r.Get("/api/cache/entries", dashH.HandleGetCacheEntries)
 	r.Delete("/api/cache/entries", dashH.HandleDeleteCacheEntry)
+	r.Post("/api/cache/semantic/invalidate", dashH.HandleInvalidateSemanticCache)
 
 	// Compression Analytics
 	r.Get("/api/analytics/compression", dashH.HandleGetCompressionAnalytics)
@@ -332,6 +341,8 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Get("/api/jailbreak/models", dashH.HandleListJailbreakModels)
 	r.Get("/api/jailbreak/models/catalog", dashH.HandleJailbreakModelCatalog)
 	r.Put("/api/jailbreak/models", dashH.HandleSetJailbreakModel)
+	r.Put("/api/jailbreak/keys/model", dashH.HandleSetJailbreakKeyModel)
+	r.Get("/api/jailbreak/keys/bindings", dashH.HandleListJailbreakKeyBindings)
 	r.Delete("/api/jailbreak/models", dashH.HandleDeleteJailbreakModel)
 	r.Get("/api/jailbreak/excludes", dashH.HandleGetJailbreakExcludes)
 	r.Put("/api/jailbreak/excludes", dashH.HandlePutJailbreakExcludes)
@@ -343,6 +354,8 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Post("/api/jailbreak/presets/upload", dashH.HandleUploadJailbreakPreset)
 
 	r.Get("/api/provider-nodes", dashH.HandleGetProviderNodes)
+	// Provider Nodes (Custom Endpoints) — see dashboard/routes.go for the twin registration.
+	r.Post("/api"+dashboard.AvailabilityRoutePath, dashH.HandleCheckProviderNodeAvailability)
 	r.Post("/api/provider-nodes", dashH.HandleCreateProviderNode)
 	r.Put("/api/provider-nodes/{id}", dashH.HandleUpdateProviderNode)
 	r.Delete("/api/provider-nodes/{id}", dashH.HandleDeleteProviderNode)
@@ -552,6 +565,9 @@ func mountOAuthRoutes(r interface {
 	r.Post("/api/oauth/free-pi/session/reset", oauthH.HandleFreePiSessionReset)
 	r.Get("/api/oauth/antigravity/authorize", oauthH.HandleAntigravityAuthorize)
 	r.Post("/api/oauth/antigravity/exchange", oauthH.HandleAntigravityExchange)
+	// agy-acp: same Google consumer OAuth client, its own connection rows.
+	r.Get("/api/oauth/agy-acp/authorize", oauthH.HandleAGYACPAuthorize)
+	r.Post("/api/oauth/agy-acp/exchange", oauthH.HandleAGYACPExchange)
 	r.Get("/api/oauth/cline/authorize", oauthH.HandleClineAuthorize)
 	r.Post("/api/oauth/cline/exchange", oauthH.HandleClineExchange)
 	r.Get("/api/oauth/pkce/authorize", oauthH.HandlePKCEAuthorize)

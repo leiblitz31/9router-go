@@ -53,6 +53,12 @@ type Repo struct {
 	// boot path — so it runs once, like settingsCache.
 	budgetColsOnce sync.Once
 	budgetCols     bool
+	// extraBody caches every custom model's extraBody so the request path
+	// merges it without a query. Every customModels write bumps extraBodyGen,
+	// which retires the snapshot built under the older generation.
+	extraBody      atomic.Pointer[extraBodySnapshot]
+	extraBodyGen   atomic.Uint64
+	extraBodyBuild sync.Mutex
 }
 
 // cachedSettings is one parsed settings row and the row content it was
@@ -73,4 +79,20 @@ func NewRepo(db *sql.DB) *Repo {
 // RawDB returns the underlying *sql.DB connection for direct queries.
 func (r *Repo) RawDB() *sql.DB {
 	return r.db
+}
+
+// engineOf reports the engine of a database handle. The process-wide handle
+// opened by InitGlobalDatabase records its engine in CurrentEngine; handles
+// opened directly (dbmigrate CLI, tests) fall back to sniffing the driver via
+// engineOfHandle in schema.go.
+func engineOf(db *sql.DB) Engine {
+	if global, err := GetConnection(); err == nil && global == db {
+		return CurrentEngine()
+	}
+	return engineOfHandle(db)
+}
+
+// Engine reports the engine of this Repo's handle.
+func (r *Repo) Engine() Engine {
+	return engineOf(r.db)
 }

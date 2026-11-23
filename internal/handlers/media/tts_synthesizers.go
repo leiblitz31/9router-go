@@ -37,7 +37,8 @@ var directHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy: nil, // direct connection to bypass proxy allowlist
 	},
-	Timeout: 15 * time.Second,
+	Timeout:       15 * time.Second,
+	CheckRedirect: checkRedirectPublic,
 }
 
 // The Bing endpoints speak to www.bing.com in production. They are vars, not

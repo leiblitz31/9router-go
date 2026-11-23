@@ -211,7 +211,7 @@ func buildQoderCosyHeaders(body []byte, requestURL string, creds QoderCosyCreds)
 		"Cosy-Organization-Id":   "",
 		"Cosy-Organization-Tags": "",
 		"Login-Version":          "v2",
-		"X-Request-Id":           uuid.New().String(),
+		"X-Request-Id":           reqID,
 	}
 
 	return headers, nil
@@ -511,7 +511,7 @@ func qoderResolveCredential(ctx context.Context, do QoderDoer, creds QoderCosyCr
 	if !IsQoderPAT(creds.AuthToken) {
 		return creds, nil
 	}
-	endpoints := QoderEndpointsFor(string(region))
+	endpoints := QoderEndpointsFor(qoderProviderIDForRegion(region))
 	token, err := ExchangeQoderJobToken(ctx, do, endpoints.JobTokenExchangeURL, creds.AuthToken)
 	if err != nil {
 		return creds, &proxy.UpstreamError{
@@ -584,6 +584,7 @@ func qoderApplyChatHeaders(headers map[string]string, built qoderBuiltChat) {
 	headers["Content-Type"] = "application/json"
 	headers["Accept"] = "text/event-stream"
 	headers["Cache-Control"] = "no-cache"
+	headers["User-Agent"] = "qodercli/1.0.0"
 	headers["X-Model-Key"] = built.QoderKey
 	headers["X-Model-Source"] = qoderModelSource(built)
 	headers["Accept-Encoding"] = "identity"

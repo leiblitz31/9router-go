@@ -28,6 +28,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "alitp-intl": "alitp-intl",
   "anthropic": "anthropic",
   "antigravity": "ag",
+  "agy-acp": "agcpy",
   "api-airforce": "af",
   "assemblyai": "aai",
   "aws-polly": "aws-polly",
@@ -106,6 +107,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "ollama": "ollama",
   "ollama-local": "ollama-local",
   "openai": "openai",
+  "opendesign": "od",
   "opencode": "oc",
   "opencode-go": "ocg",
   "opencode-zen": "ocz",
@@ -192,6 +194,87 @@ const FREEBUFF_MODELS: ProviderModel[] = [
 
 export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
   "fb": FREEBUFF_MODELS,
+  // agy-acp: full Antigravity roster served by the local agy CLI, kept in
+  // sync with internal/providers/registry_models.go. Models an account cannot
+  // select still list here and fail clearly at session/new.
+  "agy-acp": [
+    { "id": "gemini-4-carbon-high", "name": "Gemini 4 Carbon High" },
+    { "id": "gemini-4-carbon-medium", "name": "Gemini 4 Carbon Medium" },
+    { "id": "gemini-4-carbon-low", "name": "Gemini 4 Carbon Low" },
+    { "id": "gemini-4-carbon", "name": "Gemini 4 Carbon" },
+    { "id": "gemini-4-argon-high", "name": "Gemini 4 Argon High" },
+    { "id": "gemini-4-argon-medium", "name": "Gemini 4 Argon Medium" },
+    { "id": "gemini-4-argon-low", "name": "Gemini 4 Argon Low" },
+    { "id": "gemini-4-argon", "name": "Gemini 4 Argon" },
+    { "id": "gemini-4-hydrogen-xhigh", "name": "Gemini 4 Hydrogen Xhigh" },
+    { "id": "gemini-4-hydrogen-high", "name": "Gemini 4 Hydrogen High" },
+    { "id": "gemini-4-hydrogen-medium", "name": "Gemini 4 Hydrogen Medium" },
+    { "id": "gemini-4-hydrogen-low", "name": "Gemini 4 Hydrogen Low" },
+    { "id": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen" },
+    { "id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash High" },
+    { "id": "gemini-3.8-flash-medium", "name": "Gemini 3.8 Flash Medium" },
+    { "id": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash Low" },
+    { "id": "gemini-3.8-flash", "name": "Gemini 3.8 Flash" },
+    { "id": "gemini-3.7-flash-high", "name": "Gemini 3.7 Flash High" },
+    { "id": "gemini-3.7-flash-medium", "name": "Gemini 3.7 Flash Medium" },
+    { "id": "gemini-3.7-flash-low", "name": "Gemini 3.7 Flash Low" },
+    { "id": "gemini-3.1-pro-high", "name": "Gemini 3.1 Pro High" },
+    { "id": "gemini-pro-agent", "name": "Gemini Pro Agent" },
+    { "id": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro Low" },
+    { "id": "claude-sonnet-5-5-high", "name": "Claude Sonnet 5 5 High" },
+    { "id": "claude-sonnet-5-5-medium", "name": "Claude Sonnet 5 5 Medium" },
+    { "id": "claude-sonnet-5-5-low", "name": "Claude Sonnet 5 5 Low" },
+    { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5 5" },
+    { "id": "claude-opus-5-5-high", "name": "Claude Opus 5 5 High" },
+    { "id": "claude-opus-5-5-medium", "name": "Claude Opus 5 5 Medium" },
+    { "id": "claude-opus-5-5-low", "name": "Claude Opus 5 5 Low" },
+    { "id": "claude-opus-5-5", "name": "Claude Opus 5 5" },
+    { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4 6" },
+    { "id": "claude-opus-4-6-thinking", "name": "Claude Opus 4 6 Thinking" },
+    { "id": "gpt-oss-120b-medium", "name": "GPT-OSS 120B Medium" },
+    { "id": "gpt-oss-120b", "name": "GPT-OSS 120B" },
+    { "id": "claude-sonnet", "name": "Claude Sonnet" },
+    { "id": "claude-opus", "name": "Claude Opus" },
+  ],
+  "agcpy": [
+    { "id": "gemini-4-carbon-high", "name": "Gemini 4 Carbon High" },
+    { "id": "gemini-4-carbon-medium", "name": "Gemini 4 Carbon Medium" },
+    { "id": "gemini-4-carbon-low", "name": "Gemini 4 Carbon Low" },
+    { "id": "gemini-4-carbon", "name": "Gemini 4 Carbon" },
+    { "id": "gemini-4-argon-high", "name": "Gemini 4 Argon High" },
+    { "id": "gemini-4-argon-medium", "name": "Gemini 4 Argon Medium" },
+    { "id": "gemini-4-argon-low", "name": "Gemini 4 Argon Low" },
+    { "id": "gemini-4-argon", "name": "Gemini 4 Argon" },
+    { "id": "gemini-4-hydrogen-xhigh", "name": "Gemini 4 Hydrogen Xhigh" },
+    { "id": "gemini-4-hydrogen-high", "name": "Gemini 4 Hydrogen High" },
+    { "id": "gemini-4-hydrogen-medium", "name": "Gemini 4 Hydrogen Medium" },
+    { "id": "gemini-4-hydrogen-low", "name": "Gemini 4 Hydrogen Low" },
+    { "id": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen" },
+    { "id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash High" },
+    { "id": "gemini-3.8-flash-medium", "name": "Gemini 3.8 Flash Medium" },
+    { "id": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash Low" },
+    { "id": "gemini-3.8-flash", "name": "Gemini 3.8 Flash" },
+    { "id": "gemini-3.7-flash-high", "name": "Gemini 3.7 Flash High" },
+    { "id": "gemini-3.7-flash-medium", "name": "Gemini 3.7 Flash Medium" },
+    { "id": "gemini-3.7-flash-low", "name": "Gemini 3.7 Flash Low" },
+    { "id": "gemini-3.1-pro-high", "name": "Gemini 3.1 Pro High" },
+    { "id": "gemini-pro-agent", "name": "Gemini Pro Agent" },
+    { "id": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro Low" },
+    { "id": "claude-sonnet-5-5-high", "name": "Claude Sonnet 5 5 High" },
+    { "id": "claude-sonnet-5-5-medium", "name": "Claude Sonnet 5 5 Medium" },
+    { "id": "claude-sonnet-5-5-low", "name": "Claude Sonnet 5 5 Low" },
+    { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5 5" },
+    { "id": "claude-opus-5-5-high", "name": "Claude Opus 5 5 High" },
+    { "id": "claude-opus-5-5-medium", "name": "Claude Opus 5 5 Medium" },
+    { "id": "claude-opus-5-5-low", "name": "Claude Opus 5 5 Low" },
+    { "id": "claude-opus-5-5", "name": "Claude Opus 5 5" },
+    { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4 6" },
+    { "id": "claude-opus-4-6-thinking", "name": "Claude Opus 4 6 Thinking" },
+    { "id": "gpt-oss-120b-medium", "name": "GPT-OSS 120B Medium" },
+    { "id": "gpt-oss-120b", "name": "GPT-OSS 120B" },
+    { "id": "claude-sonnet", "name": "Claude Sonnet" },
+    { "id": "claude-opus", "name": "Claude Opus" },
+  ],
   "br": [
     {
       "id": "us.anthropic.claude-opus-5",
@@ -404,6 +487,31 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "id": "gemini-4-argon",
       "name": "Gemini 4 Argon",
       "upstreamModelId": "gemini-4-argon-medium(medium)"
+    },
+    {
+      "id": "gemini-4-hydrogen-xhigh",
+      "name": "Gemini 4 Hydrogen (XHigh)",
+      "upstreamModelId": "gemini-4-hydrogen-xhigh(xhigh)"
+    },
+    {
+      "id": "gemini-4-hydrogen-high",
+      "name": "Gemini 4 Hydrogen (High)",
+      "upstreamModelId": "gemini-4-hydrogen-high(high)"
+    },
+    {
+      "id": "gemini-4-hydrogen-medium",
+      "name": "Gemini 4 Hydrogen (Medium)",
+      "upstreamModelId": "gemini-4-hydrogen-medium(medium)"
+    },
+    {
+      "id": "gemini-4-hydrogen-low",
+      "name": "Gemini 4 Hydrogen (Low)",
+      "upstreamModelId": "gemini-4-hydrogen-low(low)"
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "name": "Gemini 4 Hydrogen",
+      "upstreamModelId": "gemini-4-hydrogen-medium(medium)"
     },
     {
       "id": "gemini-3.8-flash-high",
@@ -2605,6 +2713,22 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Gemini 4 Argon"
     },
     {
+      "id": "gemini-4-hydrogen",
+      "name": "Gemini 4 Hydrogen"
+    },
+    {
+      "id": "gemini-4-hydrogen-high",
+      "name": "Gemini 4 Hydrogen (High)"
+    },
+    {
+      "id": "gemini-4-hydrogen-medium",
+      "name": "Gemini 4 Hydrogen (Medium)"
+    },
+    {
+      "id": "gemini-4-hydrogen-low",
+      "name": "Gemini 4 Hydrogen (Low)"
+    },
+    {
       "id": "gemini-3.1-pro-preview",
       "name": "Gemini 3.1 Pro Preview"
     },
@@ -2637,6 +2761,22 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-4-argon",
       "name": "Gemini 4 Argon"
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "name": "Gemini 4 Hydrogen"
+    },
+    {
+      "id": "gemini-4-hydrogen-high",
+      "name": "Gemini 4 Hydrogen (High)"
+    },
+    {
+      "id": "gemini-4-hydrogen-medium",
+      "name": "Gemini 4 Hydrogen (Medium)"
+    },
+    {
+      "id": "gemini-4-hydrogen-low",
+      "name": "Gemini 4 Hydrogen (Low)"
     },
     {
       "id": "gemini-3.8-flash",
@@ -2836,7 +2976,7 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-4-argon",
       "name": "Gemini 4 Argon"
-    }
+    },
   ],
   "qw-web": [
     {
@@ -2972,6 +3112,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-4-argon",
       "name": "Gemini 4 Argon"
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "name": "Gemini 4 Hydrogen"
     },
     {
       "id": "kimi-k3",
@@ -5218,6 +5362,70 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "kind": "systemone"
     }
   ],
+  "od": [
+    {
+      "id": "claude-haiku-5.5",
+      "name": "Claude Haiku 5.5",
+      "targetFormat": "openai-responses",
+      "supportedFormats": ["openai-responses"]
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash",
+      "supportedFormats": ["openai"]
+    },
+    {
+      "id": "deepseek-v4-flash-vision-exp",
+      "name": "DeepSeek V4 Flash Vision Exp",
+      "supportedFormats": ["openai"]
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro",
+      "targetFormat": "openai-responses",
+      "supportedFormats": ["openai-responses"]
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "name": "DeepSeek V4.1 Flash",
+      "supportedFormats": ["openai"]
+    },
+    {
+      "id": "deepseek-v4.1-flash-eco",
+      "name": "DeepSeek V4.1 Flash Eco",
+      "supportedFormats": ["openai"]
+    },
+    {
+      "id": "glm-5.3-flash",
+      "name": "GLM 5.3 Flash",
+      "supportedFormats": ["claude"]
+    },
+    {
+      "id": "glm-5.3-flashx",
+      "name": "GLM 5.3 FlashX",
+      "supportedFormats": ["openai"]
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT 6 Luna",
+      "supportedFormats": ["openai"]
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "name": "Kimi K2.7 Code",
+      "supportedFormats": ["openai"]
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "name": "MiMo V2.6 Flash",
+      "supportedFormats": ["openai"]
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "name": "MiMo V2.6 Pro",
+      "supportedFormats": ["openai"]
+    }
+  ],
   "openrouter": [
     {
       "id": "openai/text-embedding-3-large",
@@ -6044,6 +6252,22 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-4-argon",
       "name": "Gemini 4 Argon"
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "name": "Gemini 4 Hydrogen"
+    },
+    {
+      "id": "gemini-4-hydrogen-high",
+      "name": "Gemini 4 Hydrogen (High)"
+    },
+    {
+      "id": "gemini-4-hydrogen-medium",
+      "name": "Gemini 4 Hydrogen (Medium)"
+    },
+    {
+      "id": "gemini-4-hydrogen-low",
+      "name": "Gemini 4 Hydrogen (Low)"
     },
     {
       "id": "gemini-3.1-pro-preview",
