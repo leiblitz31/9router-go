@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	jsonv1 "encoding/json"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -220,6 +222,21 @@ func (h *MediaHandler) tryJSONMediaLaneConn(
 	}
 
 	targetURL := buildURL(providerCfg.BaseURL)
+	// Cloudflare System One embeds the account and the (full) model id in the
+	// path, and forwards a short selector in the body (see finalBody above).
+	if strings.Contains(targetURL, "{accountId}") {
+		accountID := ""
+		if connData != nil {
+			if aid, ok := connData.ProviderSpecificData["accountId"].(string); ok && aid != "" {
+				accountID = aid
+			}
+		}
+		if accountID == "" {
+			accountID = strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCOUNT_ID"))
+		}
+		targetURL = strings.Replace(targetURL, "{accountId}", accountID, 1)
+	}
+	targetURL = strings.ReplaceAll(targetURL, "{model}", modelInfo.Model)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(finalBody))
 	if err != nil {
 		return &jsonMediaAttemptErr{status: http.StatusInternalServerError, jsonMsg: fmt.Sprintf("create request: %v", err), retryable: false}
@@ -351,6 +368,12 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 	if isGitHubCopilotProvider(modelInfo.Provider) {
 		finalBody = wrapCopilotEmbeddingInput(finalBody)
 	}
+	// NVIDIA asymmetric embedding models require an input_type hint; symmetric
+	// ones (nvclip) and non-embedding models (parakeet-ctc-1.1b-asr) must not
+	// receive it. Gate on the exact registry set, not a suffix.
+	if providers.ResolveAlias(modelInfo.Provider) == "nvidia" && nvidiaAsymmetricEmbeddingModels[modelInfo.Model] {
+		finalBody = forwardNvidiaEmbeddingInputType(finalBody)
+	}
 
 	h.forwardJSONMediaLane(w, r, body, finalBody, modelInfo, "/embeddings", true, buildEmbeddingsURL)
 }
@@ -451,13 +474,42 @@ func (h *MediaHandler) HandleSystemone(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var reqBody struct {
-		Model string `json:"model"`
+		Model     string         `json:"model"`
+		State     any            `json:"state"`
+		Questions map[string]any `json:"questions"`
+		Fields    map[string]any `json:"fields"`
 	}
 	if err := json.Unmarshal(body, &reqBody); err != nil || reqBody.Model == "" {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing model")
 		return
 	}
-	if !h.ChatH.EnforceModelAccess(w, r, reqBody.Model) {
+	provider := ""
+	modelID := reqBody.Model
+	if idx := strings.Index(reqBody.Model, "/"); idx >= 0 {
+		provider = reqBody.Model[:idx]
+		modelID = reqBody.Model[idx+1:]
+	}
+	shape := providers.GetProviderModelPayloadShape(provider, modelID)
+	switch shape {
+	case "fields":
+		if reqBody.Fields == nil {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, "Missing required field: fields")
+			return
+		}
+	case "questions":
+		if reqBody.Questions == nil {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, "Missing required field: questions")
+			return
+		}
+	default:
+		if reqBody.Questions == nil {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, "Missing required field: questions")
+			return
+		}
+	}
+	model := reqBody.Model
+	// fields-only payloads (extraction models) do not require questions.
+	if !h.ChatH.EnforceModelAccess(w, r, model) {
 		return
 	}
 	// SystemOne forwards on its own path rather than through
@@ -468,50 +520,121 @@ func (h *MediaHandler) HandleSystemone(w http.ResponseWriter, r *http.Request) {
 	if _, refused := guardMediaInput(w, r.Header.Get("Content-Type"), body); refused {
 		return
 	}
-	h.forwardSystemoneRequest(w, r, body, reqBody.Model)
+	h.forwardSystemoneRequest(w, r, body, model)
 }
 
-// forwardSystemoneRequest resolves model, connection, config and forwards
-// the raw body to the provider systemone endpoint with auth + static headers.
+// forwardSystemoneRequest resolves model, rotates across candidate connections on
+// retryable failures, and forwards the body to the provider systemone endpoint.
 func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Request, body []byte, model string) {
 	modelInfo, err := h.ChatH.ResolveModel(model)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	conn, connData, err := h.ChatH.GetBestConnectionWithContext(r.Context(), modelInfo.Provider, modelInfo.ConnectionID, nil, modelInfo.Model)
-	if err != nil || connData == nil {
-		if cfg, ok := providers.KnownProviders[modelInfo.Provider]; ok && (cfg.NoAuth || cfg.DefaultAPIKey != "") {
-			apiKey := cfg.DefaultAPIKey
-			if apiKey == "" {
-				apiKey = "public"
+
+	preferredConnID := preferredMediaConnID(r, modelInfo)
+	usePinned := preferredConnID != ""
+	finalModel := ""
+	if h.Repo != nil {
+		if customs, err := h.Repo.GetCustomModels(); err == nil {
+			for _, cm := range customs {
+				if cm != nil && (cm.ProviderAlias == modelInfo.Provider || providers.ResolveAlias(cm.ProviderAlias) == providers.ResolveAlias(modelInfo.Provider)) && cm.ID == modelInfo.Model && cm.UpstreamModelID != "" {
+					finalModel = cm.UpstreamModelID
+					break
+				}
 			}
-			connData = &chat.ConnectionData{
-				APIKey:      apiKey,
-				ProxyPoolID: h.ChatH.ResolveProviderProxyPoolID(modelInfo.Provider),
-			}
-		} else {
-			// The selector's own error says whether the provider is simply
-			// parked in cooldown and when it frees up. Substituting a generic
-			// "no active connections" here throws that away, and the
-			// dashboard's model sweep then cannot tell a cooldown from a
-			// broken account.
-			handlerutil.WriteJSONError(w, http.StatusNotFound, mediaConnectionError(err, modelInfo.Provider))
-			return
 		}
 	}
+	if finalModel == "" {
+		finalModel = providers.GetProviderModelUpstreamID(modelInfo.Provider, modelInfo.Model)
+	}
+	finalBody := handlerutil.UpdateModelInBody(body, finalModel)
+
+	excludeIDs := []string{}
+	tried := make(map[string]struct{})
+	var lastErr *mediaForwardAttemptErr
+
+	for {
+		if r.Context().Err() != nil {
+			if lastErr != nil {
+				lastErr.write(w)
+				return
+			}
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, r.Context().Err().Error())
+			return
+		}
+		conn, connData, err := h.ChatH.GetBestConnectionWithContext(r.Context(), modelInfo.Provider, preferredConnID, excludeIDs, modelInfo.Model)
+		if err != nil || connData == nil {
+			if len(excludeIDs) == 0 {
+				if cfg, ok := providers.KnownProviders[modelInfo.Provider]; ok && (cfg.NoAuth || cfg.DefaultAPIKey != "") {
+					apiKey := cfg.DefaultAPIKey
+					if apiKey == "" {
+						apiKey = "public"
+					}
+					conn = nil
+					connData = &chat.ConnectionData{
+						APIKey:      apiKey,
+						ProxyPoolID: h.ChatH.ResolveProviderProxyPoolID(modelInfo.Provider),
+					}
+				}
+			}
+			if connData == nil {
+				if lastErr != nil {
+					lastErr.write(w)
+					return
+				}
+				// The selector's own error says whether the provider is simply
+				// parked in cooldown and when it frees up. Substituting a generic
+				// "no active connections" here throws that away, and the
+				// dashboard's model sweep then cannot tell a cooldown from a
+				// broken account.
+				handlerutil.WriteJSONError(w, http.StatusNotFound, mediaConnectionError(err, modelInfo.Provider))
+				return
+			}
+		}
+		if conn != nil {
+			if _, seen := tried[conn.ID]; seen {
+				if lastErr != nil {
+					lastErr.write(w)
+					return
+				}
+				handlerutil.WriteJSONError(w, http.StatusNotFound, mediaConnectionError(nil, modelInfo.Provider))
+				return
+			}
+			tried[conn.ID] = struct{}{}
+		}
+
+		attemptErr := h.trySystemoneConn(w, r, finalBody, modelInfo, conn, connData)
+		if attemptErr == nil {
+			return
+		}
+		lastErr = attemptErr
+		if conn == nil || usePinned || !attemptErr.retryable || r.Context().Err() != nil {
+			lastErr.write(w)
+			return
+		}
+		excludeIDs = append(excludeIDs, conn.ID)
+	}
+}
+
+func (h *MediaHandler) trySystemoneConn(
+	w http.ResponseWriter,
+	r *http.Request,
+	finalBody []byte,
+	modelInfo *chat.ModelInfo,
+	conn *models.ProviderConnection,
+	connData *chat.ConnectionData,
+) *mediaForwardAttemptErr {
 	providerCfg, err := h.ChatH.GetProviderConfig(modelInfo.Provider, connData)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
-		return
+		return &mediaForwardAttemptErr{status: http.StatusInternalServerError, jsonMsg: err.Error(), retryable: false}
 	}
 	apiKey := chat.ExtractAPIKey(connData)
 	if apiKey == "" {
 		if providerCfg != nil && providerCfg.DefaultAPIKey != "" {
 			apiKey = providerCfg.DefaultAPIKey
 		} else {
-			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no API key found")
-			return
+			return &mediaForwardAttemptErr{status: http.StatusUnauthorized, jsonMsg: "no API key found", retryable: conn != nil}
 		}
 	}
 	override := ""
@@ -534,11 +657,24 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 			targetURL = baseURL + "/systemone"
 		}
 	}
-	finalBody := handlerutil.UpdateModelInBody(body, modelInfo.Model)
+	// Cloudflare System One embeds the account and the (full) model id in the
+	// path, and forwards a short selector in the body (see finalBody above).
+	if strings.Contains(targetURL, "{accountId}") {
+		accountID := ""
+		if connData != nil {
+			if aid, ok := connData.ProviderSpecificData["accountId"].(string); ok && aid != "" {
+				accountID = aid
+			}
+		}
+		if accountID == "" {
+			accountID = strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCOUNT_ID"))
+		}
+		targetURL = strings.Replace(targetURL, "{accountId}", accountID, 1)
+	}
+	targetURL = strings.ReplaceAll(targetURL, "{model}", modelInfo.Model)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(finalBody))
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to create request")
-		return
+		return &mediaForwardAttemptErr{status: http.StatusInternalServerError, jsonMsg: "failed to create request", retryable: false}
 	}
 	req.Header.Set(constants.HeaderContentType, constants.ContentTypeJSON)
 	handlerutil.SetAuthHeader(req, apiKey, providerCfg.AuthHeader, providerCfg.AuthScheme)
@@ -556,13 +692,14 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 		mediaSessionKey := "media:" + modelInfo.Provider
 		if modelInfo.ConnectionID != "" {
 			mediaSessionKey += ":conn:" + modelInfo.ConnectionID
+		} else if conn != nil {
+			mediaSessionKey += ":conn:" + conn.ID
 		}
 		req.Header.Set("x-opencode-session", proxy.StableOpenCodeSessionID(mediaSessionKey))
 	}
 	client, clientErr := h.ChatH.GetClientForConnection(connData)
 	if clientErr != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, clientErr.Error())
-		return
+		return &mediaForwardAttemptErr{status: http.StatusBadGateway, jsonMsg: clientErr.Error(), retryable: true}
 	}
 	resp, err := client.Do(req)
 	if err != nil && r.Context().Err() == nil && mayRetryDirect(client) {
@@ -577,7 +714,7 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 			resp2, err3 := directHTTPClient.Do(directReq)
 			if err3 == nil {
 				if resp != nil {
-					resp.Body.Close()
+					_ = resp.Body.Close()
 				}
 				resp = resp2
 				err = nil
@@ -585,16 +722,76 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, "upstream request failed: "+err.Error())
-		return
+		return &mediaForwardAttemptErr{
+			status:    http.StatusBadGateway,
+			jsonMsg:   "upstream request failed: " + err.Error(),
+			retryable: r.Context().Err() == nil,
+		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if errBody == nil {
+			errBody = []byte{}
+		}
+		backoff := 0
+		if conn != nil && h.Repo != nil {
+			backoff = h.Repo.GetConnectionBackoffLevel(conn.ID)
+		}
+		snippet := string(errBody[:min(500, len(errBody))])
+		classification := providers.ClassifyErrorForProvider(resp.StatusCode, snippet, backoff, modelInfo.Provider, errBody)
+		if classification.ShouldFallback && conn != nil && h.Repo != nil && !handlerutil.IsProbeContext(r.Context()) {
+			cooldownSec := max(classification.CooldownMs/1000, 1)
+			_ = h.Repo.LockConnectionModel(conn.ID, modelInfo.Model, cooldownSec, classification.NewBackoffLevel)
+		}
+		return &mediaForwardAttemptErr{
+			status:    resp.StatusCode,
+			headers:   resp.Header.Clone(),
+			rawBody:   errBody,
+			retryable: classification.ShouldFallback,
+		}
+	}
+
 	copyUpstreamHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
-	if resp.StatusCode == http.StatusOK && conn != nil {
-		h.Repo.UpdateConnectionLastUsed(conn.ID)
+	const maxSystemoneBody = 16 << 20
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxSystemoneBody))
+	if err != nil {
+		return &mediaForwardAttemptErr{status: http.StatusBadGateway, jsonMsg: err.Error(), retryable: r.Context().Err() == nil}
 	}
+	outBody := respBody
+	// Only attempt Cloudflare envelope unwrap when the body fit within the cap;
+	// an oversized/truncated body falls back to passthrough without unwrapping.
+	if len(respBody) < maxSystemoneBody && resp.StatusCode == http.StatusOK {
+		var env struct {
+			Result  jsonv1.RawMessage `json:"result"`
+			Answers jsonv1.RawMessage `json:"answers"`
+		}
+		if err := json.Unmarshal(respBody, &env); err == nil && len(env.Result) > 0 {
+			topHasAnswers := len(bytes.TrimSpace(env.Answers)) > 0 && string(bytes.TrimSpace(env.Answers)) != "null"
+			if !topHasAnswers {
+				var result struct {
+					Answers jsonv1.RawMessage `json:"answers"`
+				}
+				if err := json.Unmarshal(env.Result, &result); err == nil {
+					resHasAnswers := len(bytes.TrimSpace(result.Answers)) > 0 && string(bytes.TrimSpace(result.Answers)) != "null"
+					if resHasAnswers {
+						outBody = env.Result
+						w.Header().Set("Content-Length", strconv.Itoa(len(outBody)))
+					}
+				}
+			}
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(outBody)
+	if resp.StatusCode == http.StatusOK && conn != nil && h.Repo != nil {
+		_ = h.Repo.UpdateConnectionLastUsed(conn.ID)
+		if !handlerutil.IsProbeContext(r.Context()) {
+			_ = h.Repo.UnlockConnectionModel(conn.ID, modelInfo.Model)
+		}
+	}
+	return nil
 }
 
 // isMiMoSpeech reports whether body.model resolves to the xiaomi-mimo provider.
@@ -658,21 +855,6 @@ func (h *MediaHandler) forwardMiMoSpeech(w http.ResponseWriter, r *http.Request,
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, connData, err := h.ChatH.GetBestConnectionWithContext(r.Context(), modelInfo.Provider, modelInfo.ConnectionID, nil, modelInfo.Model)
-	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	providerCfg, err := h.ChatH.GetProviderConfig(modelInfo.Provider, connData)
-	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	apiKey := chat.ExtractAPIKey(connData)
-	if apiKey == "" {
-		handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no API key found")
-		return
-	}
 
 	modelID, voiceID := parseMiMoModelVoice(modelInfo.Model)
 
@@ -701,24 +883,100 @@ func (h *MediaHandler) forwardMiMoSpeech(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	preferredConnID := preferredMediaConnID(r, modelInfo)
+	usePinned := preferredConnID != ""
+	excludeIDs := []string{}
+	tried := make(map[string]struct{})
+	var lastErr *mediaForwardAttemptErr
+
+	for {
+		if r.Context().Err() != nil {
+			if lastErr != nil {
+				lastErr.write(w)
+				return
+			}
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, r.Context().Err().Error())
+			return
+		}
+		conn, connData, err := h.ChatH.GetBestConnectionWithContext(r.Context(), modelInfo.Provider, preferredConnID, excludeIDs, modelInfo.Model)
+		if err != nil || connData == nil {
+			if lastErr != nil {
+				lastErr.write(w)
+				return
+			}
+			handlerutil.WriteJSONError(w, http.StatusNotFound, mediaConnectionError(err, modelInfo.Provider))
+			return
+		}
+		if conn != nil {
+			if _, seen := tried[conn.ID]; seen {
+				if lastErr != nil {
+					lastErr.write(w)
+					return
+				}
+				handlerutil.WriteJSONError(w, http.StatusNotFound, mediaConnectionError(nil, modelInfo.Provider))
+				return
+			}
+			tried[conn.ID] = struct{}{}
+		}
+
+		attemptErr := h.tryMiMoSpeechConn(w, r, payload, req.ResponseFmt, modelInfo, conn, connData)
+		if attemptErr == nil {
+			return
+		}
+		lastErr = attemptErr
+		if conn == nil || usePinned || !attemptErr.retryable || r.Context().Err() != nil {
+			lastErr.write(w)
+			return
+		}
+		excludeIDs = append(excludeIDs, conn.ID)
+	}
+}
+
+func (h *MediaHandler) tryMiMoSpeechConn(
+	w http.ResponseWriter,
+	r *http.Request,
+	payload []byte,
+	responseFmt string,
+	modelInfo *chat.ModelInfo,
+	conn *models.ProviderConnection,
+	connData *chat.ConnectionData,
+) *mediaForwardAttemptErr {
+	providerCfg, err := h.ChatH.GetProviderConfig(modelInfo.Provider, connData)
+	if err != nil {
+		return &mediaForwardAttemptErr{status: http.StatusInternalServerError, jsonMsg: err.Error(), retryable: false}
+	}
+	apiKey := chat.ExtractAPIKey(connData)
+	if apiKey == "" {
+		return &mediaForwardAttemptErr{status: http.StatusUnauthorized, jsonMsg: "no API key found", retryable: conn != nil}
+	}
+
+	client, clientErr := h.ChatH.GetClientForConnection(connData)
+	if clientErr != nil {
+		return &mediaForwardAttemptErr{status: http.StatusBadGateway, jsonMsg: clientErr.Error(), retryable: true}
+	}
+	if client == nil {
+		client = h.Client
+	}
+
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, providerCfg.BaseURL, bytes.NewReader(payload))
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("create request: %v", err))
-		return
+		return &mediaForwardAttemptErr{status: http.StatusInternalServerError, jsonMsg: fmt.Sprintf("create request: %v", err), retryable: false}
 	}
 	upstreamReq.Header.Set(constants.HeaderContentType, constants.ContentTypeJSON)
 	upstreamReq.Header.Set(constants.HeaderAuthorization, "Bearer "+apiKey)
 
-	resp, err := h.Client.Do(upstreamReq)
+	resp, err := client.Do(upstreamReq)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("upstream error: %v", err))
-		return
+		return &mediaForwardAttemptErr{
+			status:    http.StatusBadGateway,
+			jsonMsg:   fmt.Sprintf("upstream error: %v", err),
+			retryable: r.Context().Err() == nil,
+		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
-		return
+		return &mediaForwardAttemptErr{status: http.StatusBadGateway, jsonMsg: err.Error(), retryable: r.Context().Err() == nil}
 	}
 
 	var data struct {
@@ -745,8 +1003,17 @@ func (h *MediaHandler) forwardMiMoSpeech(w http.ResponseWriter, r *http.Request,
 		case len(bytes.TrimSpace(respBody)) > 0:
 			msg = string(bytes.TrimSpace(respBody))
 		}
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, msg)
-		return
+		backoff := 0
+		if conn != nil && h.Repo != nil {
+			backoff = h.Repo.GetConnectionBackoffLevel(conn.ID)
+		}
+		snippet := string(respBody[:min(500, len(respBody))])
+		classification := providers.ClassifyErrorForProvider(resp.StatusCode, snippet, backoff, modelInfo.Provider, respBody)
+		if classification.ShouldFallback && conn != nil && h.Repo != nil && !handlerutil.IsProbeContext(r.Context()) {
+			cooldownSec := max(classification.CooldownMs/1000, 1)
+			_ = h.Repo.LockConnectionModel(conn.ID, modelInfo.Model, cooldownSec, classification.NewBackoffLevel)
+		}
+		return &mediaForwardAttemptErr{status: http.StatusBadGateway, jsonMsg: msg, retryable: classification.ShouldFallback}
 	}
 
 	audio, format := "", "wav"
@@ -761,24 +1028,35 @@ func (h *MediaHandler) forwardMiMoSpeech(w http.ResponseWriter, r *http.Request,
 		if data.Error != nil && data.Error.Message != "" {
 			msg = data.Error.Message
 		}
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, msg)
-		return
+		return &mediaForwardAttemptErr{status: http.StatusBadGateway, jsonMsg: msg, retryable: false}
 	}
 
 	// response_format=json returns {audio, format}; default returns raw audio bytes.
-	if req.ResponseFmt == "json" {
+	if responseFmt == "json" {
+		if conn != nil && h.Repo != nil {
+			_ = h.Repo.UpdateConnectionLastUsed(conn.ID)
+			if !handlerutil.IsProbeContext(r.Context()) {
+				_ = h.Repo.UnlockConnectionModel(conn.ID, modelInfo.Model)
+			}
+		}
 		handlerutil.WriteJSON(w, http.StatusOK, map[string]string{"audio": audio, "format": format})
-		return
+		return nil
 	}
 	raw, err := base64.StdEncoding.DecodeString(audio)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, "MiMo TTS returned invalid audio")
-		return
+		return &mediaForwardAttemptErr{status: http.StatusBadGateway, jsonMsg: "MiMo TTS returned invalid audio", retryable: false}
+	}
+	if conn != nil && h.Repo != nil {
+		_ = h.Repo.UpdateConnectionLastUsed(conn.ID)
+		if !handlerutil.IsProbeContext(r.Context()) {
+			_ = h.Repo.UnlockConnectionModel(conn.ID, modelInfo.Model)
+		}
 	}
 	w.Header().Set("Content-Type", "audio/"+format)
 	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
+	return nil
 }
 
 // HandleAudioTranscriptions handles /v1/audio/transcriptions.
@@ -1504,13 +1782,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	preferredConnID := r.Header.Get("x-connection-id")
-	if preferredConnID == "" {
-		preferredConnID = r.Header.Get("x-provider-connection-id")
-	}
-	if preferredConnID == "" {
-		preferredConnID = modelInfo.ConnectionID
-	}
+	preferredConnID := preferredMediaConnID(r, modelInfo)
 
 	baseFinalBody := body
 	if !isMultipartRequest(r) {
@@ -1591,6 +1863,16 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		}
 		excludeIDs = append(excludeIDs, conn.ID)
 	}
+}
+
+func preferredMediaConnID(r *http.Request, modelInfo *chat.ModelInfo) string {
+	if id := r.Header.Get("x-connection-id"); id != "" {
+		return id
+	}
+	if id := r.Header.Get("x-provider-connection-id"); id != "" {
+		return id
+	}
+	return modelInfo.ConnectionID
 }
 
 type mediaForwardAttemptErr struct {
@@ -2063,6 +2345,47 @@ func wrapCopilotEmbeddingInput(body []byte) []byte {
 		return body
 	}
 	payload["input"] = []any{input}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// nvidiaAsymmetricEmbeddingModels lists NVIDIA embedding models that require an
+// input_type hint (asymmetric query/passage). Symmetric models (nvclip) and
+// non-embedding models (parakeet-ctc-1.1b-asr) are intentionally excluded.
+var nvidiaAsymmetricEmbeddingModels = map[string]bool{
+	"nvidia/nemotron-3.5-embed-8b":                   true,
+	"nemotron-3.5-embed-8b":                          true,
+	"nvidia/nemotron-3.5-embed-1b":                   true,
+	"nemotron-3.5-embed-1b":                          true,
+	"nvidia/nemotron-3-embed-1b":                     true,
+	"nemotron-3-embed-1b":                            true,
+	"nvidia/nv-embedqa-mistral-7b-v2":                true,
+	"nv-embedqa-mistral-7b-v2":                       true,
+	"nvidia/embed-qa-4":                              true,
+	"embed-qa-4":                                     true,
+	"nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1": true,
+	"llama-3.2-nemoretriever-1b-vlm-embed-v1":        true,
+	"nvidia/llama-3.2-nv-embedqa-1b-v1":              true,
+	"llama-3.2-nv-embedqa-1b-v1":                     true,
+}
+
+// forwardNvidiaEmbeddingInputType injects input_type for NVIDIA's asymmetric
+// embedding models: preserve a client-supplied "query"/"passage", otherwise
+// default to "query" (upstream decolua/9router@a851a89c4).
+func forwardNvidiaEmbeddingInputType(body []byte) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		return body
+	}
+	raw, _ := payload["input_type"].(string)
+	val := strings.TrimSpace(strings.ToLower(raw))
+	if val != "query" && val != "passage" {
+		val = "query"
+	}
+	payload["input_type"] = val
 	out, err := json.Marshal(payload)
 	if err != nil {
 		return body

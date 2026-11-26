@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
@@ -478,13 +479,15 @@ func validateProviderKey(ctx context.Context, provider string, cfg providers.Pro
 		// probe with the rejected "opencode/1.18.31" fingerprint, not from
 		// probing as such. The stealth probe also reports the quota state,
 		// so Test can tell the user the free lane is exhausted.
-		if provider == "opencode" {
-			return validateOpencode(ctx, cfg, psd)
+		if provider == "opencode" || provider == "opencode-go" {
+			return validateOpencode(ctx, cfg, psd, apiKey)
 		}
 		return validateOutcome{valid: true, supported: true}
 	}
 
 	switch provider {
+	case "opencode", "opencode-go":
+		return validateOpencode(ctx, cfg, psd, apiKey)
 	case "cloudflare-ai":
 		return validateCloudflareAI(ctx, cfg, apiKey, psd)
 	case "azure":
@@ -804,7 +807,7 @@ func validateAzure(ctx context.Context, apiKey string, psd map[string]any) valid
 // validateOpencode probes the free lane with one stealth chat completion
 // (x-opencode-client: cli, opencode/latest UA). It must never go back to
 // the GET /models probe with the rejected fingerprint (upstream #5193).
-func validateOpencode(ctx context.Context, cfg providers.ProviderConfig, psd map[string]any) validateOutcome {
+func validateOpencode(ctx context.Context, cfg providers.ProviderConfig, psd map[string]any, apiKey string) validateOutcome {
 	model := "deepseek-v4.1-flash-free"
 	if psd != nil {
 		if m, ok := psd["defaultModel"].(string); ok && strings.TrimSpace(m) != "" {
@@ -822,11 +825,18 @@ func validateOpencode(ctx context.Context, cfg providers.ProviderConfig, psd map
 		"stream":     true,
 		"max_tokens": 1,
 	})
+	authKey := apiKey
+	if strings.TrimSpace(authKey) == "" {
+		authKey = "public"
+	}
+	sum := sha256.Sum256([]byte(apiKey))
+	sessionID := "validate-" + hex.EncodeToString(sum[:])[:16]
 	headers := map[string]string{
-		"Authorization":     "Bearer public",
-		"x-opencode-client": "cli",
-		"User-Agent":        "opencode/latest/2.1.4/cli",
-		"Content-Type":      "application/json",
+		"Authorization":      "Bearer " + authKey,
+		"x-opencode-client":  "cli",
+		"x-opencode-session": sessionID,
+		"User-Agent":         "opencode/latest/2.1.4/cli",
+		"Content-Type":       "application/json",
 	}
 	url := strings.TrimSpace(cfg.BaseURL)
 	if url == "" {

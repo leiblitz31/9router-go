@@ -104,6 +104,7 @@
   let isPruning = $state(false)
   let isPruningUsage = $state(false)
   let isVacuuming = $state(false)
+  let isRestarting = $state(false)
   // Global System Prompt State
   let enableSystemPrompt = $state(false)
   let systemPromptPrefix = $state('')
@@ -281,6 +282,9 @@
   let passwordSuccessMessage = $state<string | null>(null)
   let passwordErrorMessage = $state<string | null>(null)
   let showPasswordFields = $state(false)
+  let showCurrPwd = $state(false)
+  let showNewPwd = $state(false)
+  let showConfirmPwd = $state(false)
 
   // SSO State
   let authMode = $state<'password' | 'oidc' | 'saml'>('password')
@@ -791,6 +795,35 @@
     }
   }
 
+  async function handleRestartGateway() {
+    if (!confirm('Restart the gateway process? Every in-flight request is dropped.')) return
+    const answer = window.prompt('Type "RESTART" to confirm:')
+    if (answer !== 'RESTART') return
+    isRestarting = true
+    try {
+      await api.restartGateway()
+    } catch (err) {
+      isRestarting = false
+      alert(`Failed to restart: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+    // The listener closes, then a replacement process takes the port. Give the
+    // drain a moment, then poll an authenticated endpoint: a 200 means the new
+    // process is serving, so reload instead of leaving a dead page.
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    for (let attempt = 0; attempt < 30; attempt++) {
+      try {
+        await api.getDatabaseStats()
+        window.location.reload()
+        return
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+      }
+    }
+    isRestarting = false
+    alert('The gateway did not answer after a restart. Check the process log.')
+  }
+
   function formatBytes(bytes?: number): string {
     if (!bytes || bytes <= 0) return '0 B'
     const units = ['B', 'KB', 'MB', 'GB']
@@ -915,20 +948,25 @@
           <Shield class="w-4 h-4 text-brand-500" />
           <h2 class="text-sm font-bold text-text-main">Security & Password</h2>
         </div>
-        <Toggle
-          checked={requireLogin}
-          size="sm"
-          label="Require login"
-          onChange={(val) => (requireLogin = val)}
-        />
       </div>
 
       <div class="space-y-3 text-xs">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="font-semibold text-text-main">Require Password on Localhost</p>
-            <p class="text-[11px] text-text-subtle">Default password is <code class="font-mono text-brand-500">123456</code></p>
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="font-semibold text-text-main">Require a password</p>
+            <p class="text-[11px] text-text-subtle">
+              Off means the dashboard opens without a login for anyone who can reach
+              this port — a deliberate choice for a box behind a firewall, never for an
+              exposed one. Unset password falls back to
+              <code class="font-mono text-brand-500">123456</code>.
+            </p>
           </div>
+          <Toggle
+            checked={requireLogin}
+            size="sm"
+            label="Require a password for the dashboard"
+            onChange={(val) => (requireLogin = val)}
+          />
         </div>
 
         <div class="space-y-1 pt-1">
@@ -971,38 +1009,77 @@
 
               <div class="space-y-1">
                 <label for="curr-pwd" class="block text-[11px] font-semibold text-text-muted">Current Password</label>
+                <div class="relative">
                 <input
                   id="curr-pwd"
-                  type="password"
+                  type={showCurrPwd ? "text" : "password"}
+
                   bind:value={currentPassword}
                   placeholder="123456"
                   class="w-full px-3 py-1.5 rounded-lg bg-bg border border-border text-xs font-mono text-text-main focus:outline-none focus:border-brand-500"
                   required
                 />
+                <button
+                  type="button"
+                  onclick={() => (showCurrPwd = !showCurrPwd)}
+                  class="absolute inset-y-0 right-0 flex items-center pr-3 text-text-muted hover:text-text-main transition-colors cursor-pointer"
+                  aria-label={showCurrPwd ? "Hide password" : "Show password"}
+                >
+                  <span class="material-symbols-outlined text-[18px]">
+                    {showCurrPwd ? "visibility_off" : "visibility"}
+                  </span>
+                </button>
+              </div>
               </div>
 
               <div class="space-y-1">
                 <label for="new-pwd" class="block text-[11px] font-semibold text-text-muted">New Password</label>
+                <div class="relative">
                 <input
                   id="new-pwd"
-                  type="password"
+                  type={showNewPwd ? "text" : "password"}
+
                   bind:value={newPassword}
                   placeholder="At least 6 characters"
                   class="w-full px-3 py-1.5 rounded-lg bg-bg border border-border text-xs font-mono text-text-main focus:outline-none focus:border-brand-500"
                   required
                 />
+                <button
+                  type="button"
+                  onclick={() => (showNewPwd = !showNewPwd)}
+                  class="absolute inset-y-0 right-0 flex items-center pr-3 text-text-muted hover:text-text-main transition-colors cursor-pointer"
+                  aria-label={showNewPwd ? "Hide password" : "Show password"}
+                >
+                  <span class="material-symbols-outlined text-[18px]">
+                    {showNewPwd ? "visibility_off" : "visibility"}
+                  </span>
+                </button>
+              </div>
               </div>
 
               <div class="space-y-1">
                 <label for="confirm-pwd" class="block text-[11px] font-semibold text-text-muted">Confirm New Password</label>
+                <div class="relative">
                 <input
                   id="confirm-pwd"
-                  type="password"
+                  type={showConfirmPwd ? "text" : "password"}
+
                   bind:value={confirmNewPassword}
                   placeholder="Re-enter new password"
                   class="w-full px-3 py-1.5 rounded-lg bg-bg border border-border text-xs font-mono text-text-main focus:outline-none focus:border-brand-500"
                   required
                 />
+                <button
+                  type="button"
+                  onclick={() => (showConfirmPwd = !showConfirmPwd)}
+                  class="absolute inset-y-0 right-0 flex items-center pr-3 text-text-muted hover:text-text-main transition-colors cursor-pointer"
+                  aria-label={showConfirmPwd ? "Hide password" : "Show password"}
+                >
+                  <span class="material-symbols-outlined text-[18px]">
+                    {showConfirmPwd ? "visibility_off" : "visibility"}
+                  </span>
+                </button>
+              </div>
               </div>
 
               <button
@@ -1128,6 +1205,9 @@
           >
             <option value="failover">Failover (Try next on error/rate-limit)</option>
             <option value="round-robin">Round Robin (Distribute requests across all connections)</option>
+            <option value="least-busy">
+              Least Busy (Send each request to the least-loaded connection)
+            </option>
             <option value="sticky-round-robin">Sticky Round-Robin (Keep active connection up to limit)</option>
           </select>
         </div>
@@ -1355,6 +1435,27 @@
           </div>
         </div>
       </div>
+    </Card>
+
+    <!-- Gateway process -->
+    <Card id="gateway-process" padding="md" class="space-y-3">
+      <div class="flex items-center gap-2 pb-2 border-b border-border">
+        <RefreshCw class="w-4 h-4 text-brand-500" />
+        <h2 class="text-sm font-bold text-text-main">Gateway Process</h2>
+      </div>
+      <p class="text-xs text-text-muted leading-relaxed">
+        Restart the gateway binary in place. In-flight requests are dropped and the dashboard reconnects once the
+        replacement is listening. Docker containers exit and come back only when their restart policy allows it.
+      </p>
+      <button
+        type="button"
+        onclick={handleRestartGateway}
+        disabled={isRestarting}
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 border border-brand-500/30 text-xs text-brand-500 font-semibold transition cursor-pointer disabled:opacity-50"
+      >
+        <RefreshCw class="w-3.5 h-3.5 {isRestarting ? 'animate-spin' : ''}" />
+        <span>{isRestarting ? 'Restarting...' : 'Restart Gateway'}</span>
+      </button>
     </Card>
 
     <!-- SECTION 6: Global System Prompt & Anti-Poisoning -->

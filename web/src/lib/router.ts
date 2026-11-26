@@ -21,6 +21,7 @@ export type ActiveTab =
   | 'media-web'
   | 'proxy-pools'
   | 'doh-resolvers'
+  | 'model-breakers'
   | 'skills'
   | 'console-log'
   | 'terminal'
@@ -50,6 +51,7 @@ export const TAB_ROUTES: Record<ActiveTab, string> = {
   'media-web': '/dashboard/media-providers/web',
   'proxy-pools': '/dashboard/proxy-pools',
   'doh-resolvers': '/dashboard/doh',
+  'model-breakers': '/dashboard/model-breakers',
   skills: '/dashboard/skills',
   'console-log': '/dashboard/console-log',
   terminal: '/dashboard/console-log',
@@ -153,6 +155,11 @@ const ROUTE_TO_TAB: Record<string, ActiveTab> = {
   // doh resolvers
   '/dashboard/doh': 'doh-resolvers',
   '/doh': 'doh-resolvers',
+
+  // per-model circuit breakers (distinct from the provider breaker)
+  '/dashboard/model-breakers': 'model-breakers',
+  '/model-breakers': 'model-breakers',
+
   // skills
   '/dashboard/skills': 'skills',
   '/skills': 'skills',

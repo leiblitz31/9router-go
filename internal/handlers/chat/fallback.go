@@ -265,11 +265,16 @@ func (h *ChatHandler) handleAccountFallback(
 			ConnData: connData, Body: body, Attempts: attemptCount(ctx),
 			IsStream: isStream, TranslateResponse: translateResponse, Endpoint: endpoint,
 		}
+		// Count the attempt as load while it runs, including a long streaming
+		// reply: least-busy reads these counts. The release below reports the
+		// outcome, so a key that refused is deprioritized for a while.
+		leastBusy.notePick(connObj.ID)
 		forwardErr := func() error {
 			// Released when the attempt ends, which for a stream is when the
 			// upstream body is fully copied to the client.
 			defer releaseSlot()
 			err := h.tryForwardWithConnection(params)
+			leastBusy.noteRelease(connObj.ID, err != nil)
 			// A pool is many egresses behind ONE connection, but this loop advances
 			// over connections. Without this walk a provider with one connection and
 			// a hundred proxies got exactly one attempt per request, and the turn
@@ -811,7 +816,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	// such an upstream loses them — buildResponsesBody keeps only blocks carrying
 	// a "text" key — so the model never saw the output of its own tool call and
 	// re-issued the same command forever.
-	pipedBody = claudeBodyForNonClaudeUpstream(pipedBody, claudeNative)
+	pipedBody = claudeBodyForNonClaudeUpstream(pipedBody, claudeNative, provider, model)
 	var claudeToolMap map[string]string
 	if upstreamClaude {
 		if !claudeNative || bodySpeaksOpenAIChat(pipedBody) {
@@ -1008,7 +1013,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		pipedBody = thinking.ApplyJSON(pipedBody, target, provider, wireModel, thinkingIntent)
 		if target == "openai" && !providerCfg.IsGeminiNative() {
 			filtered, filterErr := translator.FilterToOpenAIFormatJSON(pipedBody, translator.FilterOptions{
-				PreserveCacheControl:    providers.PreservesCacheControl(provider),
+				PreserveCacheControl:    providers.PreservesCacheControl(provider) || translator.PreservesOpenRouterAnthropicCacheControl(provider, wireModel),
 				StrictReasoningRemoving: providers.StrictReasoningRemoving(provider),
 				FlattenContent:          provider == "cloudflare-ai",
 			})
@@ -1210,6 +1215,31 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		})
 	}
 
+	// Per-model admission control. The provider breaker above answers "is this
+	// provider healthy at all?", which is the wrong question when one model in
+	// a healthy provider starts failing deterministically: opening the provider
+	// parks every sibling with it. This gate is scoped to the pair, so a bad
+	// model sits out its cooldown while the rest of the provider keeps serving.
+	//
+	// Placed here, after the connection and the body are resolved and before
+	// the dispatch writes a single byte: a model that is out of rotation must
+	// not queue behind the concurrency slot above, and must not leave a partial
+	// response behind for the caller to retry. The refusal is an upstream error
+	// the same shape a failing model would have produced, so the caller's
+	// fallover, locking and usage-accounting paths all handle it unchanged.
+	//
+	// A probe (POST /api/models/test) is exempt: it exists to report what the
+	// model actually does right now, and answering "cooling down" would tell the
+	// operator about the breaker instead of the model they asked to test.
+	if !handlerutil.IsProbeContext(ctx) && !modelBreakerAllowed(provider, model) {
+		retryAfter, _ := modelBreakerRetryAfter(provider, model)
+		fwdErr = modelBreakerUnavailable(retryAfter)
+		log.Warn("fallback", "model breaker refused", append([]any{
+			"provider", provider, "model", model, "conn", connectionID, "retryAfter", retryAfter.String(),
+		}, h.connIdentityKVOr(f, connectionID)...)...)
+		return fwdErr
+	}
+
 	// Inject served route response headers (x-9router-provider, x-9router-model, etc.)
 	// before any executor or forwarding function writes headers to w.
 	injectRouteHeaders(w, provider, model, f.ComboName, f.Attempts)
@@ -1268,7 +1298,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		fwdErr = exec(w, execReq)
 		execReq.Release()
 	} else if providerCfg.IsGeminiNative() {
-		fwdErr = h.forwardGeminiNativeRequest(ctx, w, provider, providerCfg, apiKey, connectionID, pipedBody, isStream, translateResponse, metrics, httpClient)
+		fwdErr = h.forwardGeminiNativeRequest(ctx, w, provider, providerCfg, apiKey, connectionID, pipedBody, isStream, translateResponse, metrics, httpClient, start)
 	} else {
 		fwdErr = h.forwardRequest(ctx, w, providerCfg, apiKey, pipedBody, isStream, translateResponse, metrics, httpClient, provider, upstreamClaude, claudeNative)
 	}
@@ -1341,7 +1371,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 				fwdErr = exec(w, retryReq)
 				retryReq.Release()
 			} else if providerCfg.IsGeminiNative() {
-				fwdErr = h.forwardGeminiNativeRequest(ctx, w, provider, providerCfg, apiKey, connectionID, pipedBody, isStream, translateResponse, metrics, httpClient)
+				fwdErr = h.forwardGeminiNativeRequest(ctx, w, provider, providerCfg, apiKey, connectionID, pipedBody, isStream, translateResponse, metrics, httpClient, start)
 			} else {
 				fwdErr = h.forwardRequest(ctx, w, providerCfg, apiKey, pipedBody, isStream, translateResponse, metrics, httpClient, provider, upstreamClaude, claudeNative)
 			}
@@ -1443,6 +1473,11 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		// A served request proves the model is alive, so a badge recorded by
 		// an earlier 410 must not outlive it (#179).
 		h.clearModelDeprecation(provider, model)
+		// The same verdict for the per-model breaker: the model answered, so
+		// its failure count and any cooldown escalation start over. Without
+		// this a model that recovered on its own would still pay for the
+		// outage it already served through.
+		modelBreakerSuccess(provider, model)
 		if usage == nil {
 			usage = &translator.OpenAIUsage{}
 		}
@@ -1566,6 +1601,19 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 
 	if !errors.As(fwdErr, &zc) {
 		observ.IncUpstreamError(provider, model, statusCode)
+	}
+	// The per-model verdict on the same failure. Only a model-scoped class is
+	// charged (modelBreakerFailure drops the rest), so a provider-scoped 5xx or
+	// a transport error stays with the provider breaker above and a 429 stays
+	// with the account-rotation layer — charging any of them here would park
+	// every model of a briefly-down provider, which is the failure this layer
+	// exists to prevent.
+	//
+	// A transport failure carries no status; it is charged as 503, which is the
+	// same verdict the provider breaker in forward.go gives it, and its scope
+	// is provider, so the classification drops it before anything is counted.
+	if errors.As(fwdErr, &ue) && !ue.Local && !isClientCanceled(ctx, fwdErr) {
+		modelBreakerFailure(provider, model, ue.StatusCode, ue.Body)
 	}
 	// A client that hung up is not an upstream failure. Returning the raw error
 	// here made every abort surface as a bare 502 at the write sites in chat.go:
@@ -2397,7 +2445,7 @@ func bodySpeaksOpenAIChat(body []byte) bool {
 // tryForwardWithConnection): a provider that serves the Messages endpoint —
 // minimax-code, opencode-zen's Claude lane — must keep receiving Messages, so
 // only the providers that do not are converted here.
-func claudeBodyForNonClaudeUpstream(body []byte, upstreamSpeaksClaude bool) []byte {
+func claudeBodyForNonClaudeUpstream(body []byte, upstreamSpeaksClaude bool, provider, model string) []byte {
 	// A body that already speaks Chat is never converted, whatever blocks its
 	// user content happens to carry: converting it again would rebuild the
 	// conversation from fields Chat does not use and drop the system turn it
@@ -2409,7 +2457,7 @@ func claudeBodyForNonClaudeUpstream(body []byte, upstreamSpeaksClaude bool) []by
 	if err := json.Unmarshal(body, &src); err != nil {
 		return body
 	}
-	converted, err := translator.TranslateClaudeToOpenAI(body)
+	converted, err := translator.TranslateClaudeToOpenAI(body, provider, model)
 	if err != nil || len(converted) == 0 {
 		return body
 	}

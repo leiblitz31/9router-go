@@ -9,6 +9,7 @@ import (
 // ProviderConfig describes how to reach an upstream provider.
 type ProviderConfig struct {
 	BaseURL       string
+	ValidateURL   string            // endpoint used to validate credentials/models
 	AuthHeader    string            // "Authorization" or "x-api-key"
 	AuthScheme    string            // "bearer" or "raw"
 	NoAuth        bool              // true = no API key required
@@ -61,6 +62,13 @@ type ProviderConfig struct {
 	// LocalByDesign marks a provider whose upstream endpoint is intended to run on the
 	// local host or loopback network (e.g. ollama-local on localhost:11434).
 	LocalByDesign bool
+
+	// BindsConversations marks a provider that ties a conversation to the
+	// ACCOUNT that opened it and refuses a later turn arriving from a different
+	// one. The gateway must then keep a conversation on one connection: a
+	// mid-conversation account switch is rejected upstream no matter which
+	// session id is presented, because the verdict is about the account.
+	BindsConversations bool
 
 	// Hidden keeps a provider out of the lists a person scans — the provider
 	// pickers, the quota page — while leaving it fully reachable: connections
@@ -738,6 +746,7 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader:     "Authorization",
 		AuthScheme:     "bearer",
 		ThinkingFormat: "openai",
+		SystemoneURL:   "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/run/{model}",
 	},
 	"mimo-free": {
 		BaseURL:       "https://api.xiaomimimimo.com/api/free-ai/openai/chat",
@@ -932,6 +941,14 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:              "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
 		AuthHeader:           "Authorization",
 		AuthScheme:           "bearer",
+		PreserveCacheControl: true,
+	},
+	"qwencloud": {
+		BaseURL:              "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1/chat/completions",
+		ValidateURL:          "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1/models",
+		AuthHeader:           "Authorization",
+		AuthScheme:           "bearer",
+		Format:               "openai",
 		PreserveCacheControl: true,
 	},
 	"fish-audio": {
@@ -1613,6 +1630,11 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://api.freepi.ai/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+		// free-pi binds a conversation to the account that opened it: a later
+		// turn from another account is refused with "This conversation belongs
+		// to another free-pi account." Rotating the session id cannot help —
+		// the account itself is what is different.
+		BindsConversations: true,
 	},
 	"atmorouter": {
 		BaseURL:    "https://atmorouter.dev/v1/chat/completions",
@@ -1677,6 +1699,16 @@ func StrictReasoningRemoving(provider string) bool {
 	switch provider {
 	case "groq", "mistral", "cerebras":
 		return true
+	}
+	return false
+}
+
+// BindsConversations reports whether a provider ties a conversation to the
+// account that opened it, so routing must not move a live conversation to a
+// different connection.
+func BindsConversations(provider string) bool {
+	if cfg, ok := KnownProviders[provider]; ok {
+		return cfg.BindsConversations
 	}
 	return false
 }

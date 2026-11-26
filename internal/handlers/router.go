@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"9router/proxy/internal/auth"
 	"9router/proxy/internal/clientconfig"
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
@@ -236,6 +237,9 @@ func SetupRoutes(r interface {
 // browser session, a valid API key or the local CLI token through when login is
 // enabled (upstream dashboardGuard).
 func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) {
+	// Install the session revocation epoch before any token is issued: a token
+	// minted against a stale epoch would be refused on its very next request.
+	auth.LoadSessionEpoch(repo)
 	var ts *TokenSaverConfig
 	if chatH != nil {
 		ts = chatH.TokenSaver
@@ -329,6 +333,15 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	// Compression Analytics
 	r.Get("/api/analytics/compression", dashH.HandleGetCompressionAnalytics)
 
+	// Per-model circuit breaker (one provider/model pair, distinct from the
+	// provider breaker). Registered here and in dashboard.RegisterRoutes (a
+	// tests-only table); a route added there alone 404s on the real server.
+	// The bulk reset comes first: chi matches in order, so a route registered
+	// after the parameterised one is read as a model named "reset".
+	r.Get("/api/model-breakers", dashH.HandleGetModelBreakers)
+	r.Post("/api/model-breakers/reset", dashH.HandleResetAllModelBreakers)
+	r.Post("/api/model-breakers/{provider}/{model}/reset", dashH.HandleResetModelBreaker)
+
 	// Jailbreak: agent prompt presets + per-model binding. Registered here and in
 	// dashboard.RegisterRoutes (a tests-only table); a route added there alone
 	// 404s on the real server — the same trap as the per-node limits pair.
@@ -342,6 +355,7 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Get("/api/jailbreak/models/catalog", dashH.HandleJailbreakModelCatalog)
 	r.Put("/api/jailbreak/models", dashH.HandleSetJailbreakModel)
 	r.Put("/api/jailbreak/keys/model", dashH.HandleSetJailbreakKeyModel)
+	r.Delete("/api/jailbreak/keys/model", dashH.HandleDeleteJailbreakKeyModel)
 	r.Get("/api/jailbreak/keys/bindings", dashH.HandleListJailbreakKeyBindings)
 	r.Delete("/api/jailbreak/models", dashH.HandleDeleteJailbreakModel)
 	r.Get("/api/jailbreak/excludes", dashH.HandleGetJailbreakExcludes)
@@ -352,6 +366,18 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Post("/api/jailbreak/preview", dashH.HandlePreviewJailbreak)
 	r.Put("/api/jailbreak/presets/order", dashH.HandleReorderJailbreakPresets)
 	r.Post("/api/jailbreak/presets/upload", dashH.HandleUploadJailbreakPreset)
+	// Preset auto-sync: the standing-subscription version of the GitHub import
+	// above, so a collection whose prompts change updates without the operator
+	// re-importing it by hand.
+	r.Get("/api/jailbreak/sync/sources", dashH.HandleListJailbreakSyncSources)
+	r.Put("/api/jailbreak/sync/sources", dashH.HandleSaveJailbreakSyncSources)
+	r.Post("/api/jailbreak/sync/run", dashH.HandleRunJailbreakSync)
+	// GitHub credential and mirror: the api.github.com quota is 60 anonymous
+	// requests an hour, which a library following several collections exhausts
+	// inside one pass. A token raises it to 5,000, and an operator whose network
+	// cannot reach GitHub directly can point both endpoints at a mirror.
+	r.Get("/api/jailbreak/github", dashH.HandleGetJailbreakGithub)
+	r.Put("/api/jailbreak/github/token", dashH.HandleSaveJailbreakGithubToken)
 
 	r.Get("/api/provider-nodes", dashH.HandleGetProviderNodes)
 	// Provider Nodes (Custom Endpoints) — see dashboard/routes.go for the twin registration.
@@ -474,6 +500,9 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Post("/api/settings/database/prune", dashH.HandlePruneDatabase)
 	r.Post("/api/settings/database/prune-usage", dashH.HandlePruneUsageHistory)
 	r.Post("/api/settings/database/vacuum", dashH.HandleVacuumDatabase)
+	// Process control. The mirror of dashboard.RegisterRoutes, which is mounted
+	// by tests only; a route added there alone 404s here on the real server.
+	r.Post("/api/system/restart", dashH.HandleRestartGateway)
 	r.Post("/api/settings/proxy-test", dashH.HandleProxyTest)
 	// White-label logo upload: the file lands under DATA_DIR/uploads and
 	// appLogoUrl is rewritten to the path this gateway serves it from.
@@ -578,6 +607,7 @@ func mountOAuthRoutes(r interface {
 	r.Get("/api/oauth/codex/start-proxy", oauthH.HandleCodexStartProxy)
 	r.Get("/api/oauth/codex/poll-status", oauthH.HandleCodexPollStatus)
 	r.Get("/api/oauth/codex/stop-proxy", oauthH.HandleCodexStopProxy)
+	r.Get("/api/oauth/callback-result", oauthH.HandleCallbackResult)
 	r.Get("/api/oauth/authcode/authorize", oauthH.HandleAuthCodeAuthorize)
 	r.Post("/api/oauth/authcode/exchange", oauthH.HandleAuthCodeExchange)
 	r.Get("/api/oauth/trae/authorize", oauthH.HandleTraeAuthorize)
@@ -719,6 +749,12 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) *chat.
 	r.Get("/api/auth/status", dashH.HandleAuthStatus)
 	r.Post("/api/auth/login", dashH.HandleAuthLogin)
 	r.Post("/api/auth/logout", dashH.HandleAuthLogout)
+	// First-run setup: an anonymous GET/POST pair that lets a fresh install set
+	// the dashboard password from the browser. The handler itself refuses a
+	// completed setup and a non-loopback peer, so the anonymity is only usable
+	// before the gateway is configured.
+	r.Get("/api/setup", dashH.HandleGetSetup)
+	r.Post("/api/setup", dashH.HandlePostSetup)
 	// Deliberately outside the admin group: this is the recovery path for an
 	// operator who cannot log in, so it cannot require the session it is meant
 	// to restore. The handler refuses anything but a loopback peer on the TCP

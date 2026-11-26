@@ -119,6 +119,11 @@ func ProvideServer(p ServerParams) *http.Server {
 
 			catalogPath := filepath.Join(filepath.Dir(p.Config.DatabasePath), "model-catalog.json")
 			providers.StartBackgroundCatalogSync(shutdown.Context(), nil, catalogPath)
+			// The preset library's auto-sync: one pass shortly after boot, then
+			// hourly, over the GitHub collections the operator follows. It is
+			// one worker per process, shared by the endpoints and this loop, so
+			// a "Sync now" press and the periodic pass cannot overlap.
+			dashboard.StartJailbreakSync(p.Repo, shutdown.Context())
 			oauth.StartBackgroundRefresh(shutdown.Context(), p.Repo)
 			// Claim Qoder daily credits on boot and every 30 minutes.
 			startQoderCheckin(shutdown.Context(), p.Repo, config.ResolveDataDir())
@@ -134,6 +139,11 @@ func ProvideServer(p ServerParams) *http.Server {
 			startModelHealthScheduler(shutdown.Context(), p.Repo, p.ChatHandler)
 			startUptimeHeartbeat(shutdown.Context(), p.Repo)
 			startHeadroomOnBoot(p.Repo, config.ResolveDataDir())
+			// free-pi's ad creatives are fetched in the background so the
+			// banner is already there when a connection page is opened. This
+			// warms the cache only — the impression is still fired by the
+			// render event, never by this loop.
+			dashboard.StartFreePiAdPrefetch(shutdown.Context(), p.Repo)
 			// The tamper-evident audit trail: one writer goroutine, a bounded
 			// queue, and the retention sweeper when a window is configured.
 			// It is started here rather than in a provider because it must run

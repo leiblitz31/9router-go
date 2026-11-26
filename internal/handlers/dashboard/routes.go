@@ -3,6 +3,7 @@ package dashboard
 import (
 	"net/http"
 
+	"9router/proxy/internal/auth"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/middleware"
@@ -40,6 +41,13 @@ type DashboardHandler struct {
 	// library. Nil means the production importer; a test points it at an
 	// httptest server.
 	jailbreakImport *jailbreakImporter
+	// jailbreakSync is the preset auto-sync worker: the standing subscription
+	// version of the GitHub import. Optional for the same reason Limiter and
+	// ModelHealth are — a handler built outside a boot has none, and the sync
+	// endpoints answer "not configured" rather than panicking. It is read per
+	// request because the router is built before the app's OnStart hook starts
+	// the worker.
+	jailbreakSync *jailbreakSync
 	// ModelHealth is the automatic model-health loop. It is optional for the
 	// same reason Limiter is: a handler built outside a boot has none, and the
 	// operator-action recording the disabled-models write performs is skipped
@@ -54,7 +62,6 @@ type DashboardHandler struct {
 	ModelHealth *modelhealth.Loop
 }
 
-// NewDashboardHandler initializes a DashboardHandler with the provided Repo.
 func NewDashboardHandler(repo *db.Repo, ts ...*shared.TokenSaverConfig) *DashboardHandler {
 	h := &DashboardHandler{
 		Repo:              repo,
@@ -64,7 +71,31 @@ func NewDashboardHandler(repo *db.Repo, ts ...*shared.TokenSaverConfig) *Dashboa
 	if len(ts) > 0 && ts[0] != nil {
 		h.TokenSaver = ts[0]
 	}
+	// The preset auto-sync worker is resolved per request rather than stored
+	// (see syncStore): the loop is started once for the process by
+	// StartJailbreakSync, and a handler built outside a boot still answers the
+	// source endpoints by opening a store over the same repository.
 	return h
+}
+
+// refreshSessionEpoch reinstalls the in-memory revocation state from the stored
+// settings, the way boot does. Every handler that writes a password outside
+// `changeDashboardPassword` — the reset that clears the hash, the setup wizard
+// that writes the first one — must call this, or a token captured before the
+// write keeps verifying against the stale fingerprint until a restart.
+func (h *DashboardHandler) refreshSessionEpoch() {
+	auth.LoadSessionEpoch(h.Repo)
+}
+
+// SetJailbreakSync installs the running worker behind the sync endpoints. The
+// app calls it from OnStart, after the database is up and before the server
+// accepts traffic, so a "Sync now" press on a freshly booted gateway reaches a
+// live worker rather than a handler with no loop behind it.
+func (h *DashboardHandler) SetJailbreakSync(s *jailbreakSync) {
+	if h == nil || s == nil {
+		return
+	}
+	h.jailbreakSync = s
 }
 
 // importer returns the configured GitHub importer, or the production one.
@@ -196,6 +227,7 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Get("/jailbreak/models/catalog", h.HandleJailbreakModelCatalog)
 		r.Put("/jailbreak/models", h.HandleSetJailbreakModel)
 		r.Put("/jailbreak/keys/model", h.HandleSetJailbreakKeyModel)
+		r.Delete("/jailbreak/keys/model", h.HandleDeleteJailbreakKeyModel)
 		r.Get("/jailbreak/keys/bindings", h.HandleListJailbreakKeyBindings)
 		r.Delete("/jailbreak/models", h.HandleDeleteJailbreakModel)
 		r.Get("/jailbreak/excludes", h.HandleGetJailbreakExcludes)
@@ -206,6 +238,11 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/jailbreak/preview", h.HandlePreviewJailbreak)
 		r.Put("/jailbreak/presets/order", h.HandleReorderJailbreakPresets)
 		r.Post("/jailbreak/presets/upload", h.HandleUploadJailbreakPreset)
+		r.Get("/jailbreak/sync/sources", h.HandleListJailbreakSyncSources)
+		r.Put("/jailbreak/sync/sources", h.HandleSaveJailbreakSyncSources)
+		r.Post("/jailbreak/sync/run", h.HandleRunJailbreakSync)
+		r.Get("/jailbreak/github", h.HandleGetJailbreakGithub)
+		r.Put("/jailbreak/github/token", h.HandleSaveJailbreakGithubToken)
 
 		// Models
 		r.Get("/models/custom", h.HandleGetCustomModels)
@@ -228,6 +265,10 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/settings/database/prune", h.HandlePruneDatabase)
 		r.Post("/settings/database/prune-usage", h.HandlePruneUsageHistory)
 		r.Post("/settings/database/vacuum", h.HandleVacuumDatabase)
+		// Process control. Registered here and in SetupDashboardRoutes: this
+		// table is mounted by tests only, so a route added here alone 404s on
+		// the real server.
+		r.Post("/system/restart", h.HandleRestartGateway)
 		r.Post("/settings/proxy-test", h.HandleProxyTest)
 		// White-label logo upload: the file lands under DATA_DIR/uploads and
 		// appLogoUrl is rewritten to the path this gateway serves it from.
@@ -277,6 +318,14 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		// Cache Analytics & Management
 		r.Get("/resilience", h.HandleGetResilience)
 		r.Post("/resilience/reset", h.HandleResetResilience)
+
+		// Per-model circuit breaker (one provider/model pair, distinct from the
+		// provider breaker above). Static before the parameterised reset so a
+		// request to reset everything is not read as a reset of the model named
+		// "reset".
+		r.Get("/model-breakers", h.HandleGetModelBreakers)
+		r.Post("/model-breakers/reset", h.HandleResetAllModelBreakers)
+		r.Post("/model-breakers/{provider}/{model}/reset", h.HandleResetModelBreaker)
 		r.Get("/cache", h.HandleGetCache)
 		r.Delete("/cache", h.HandleDeleteCache)
 		r.Get("/cache/entries", h.HandleGetCacheEntries)

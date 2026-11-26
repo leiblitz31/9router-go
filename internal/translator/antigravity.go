@@ -33,6 +33,10 @@ const thinkingHeadroomTokens = 8192
 // antigravityDecoyUnavailable is the placeholder description for injected decoy tools.
 const antigravityDecoyUnavailable = "This tool is currently unavailable."
 
+// AntigravityDefaultSystem is the official Antigravity 2.33.0 identity sent ahead of generation requests.
+// Parity with upstream decolua/9router#4221 (commit e37cb78e1).
+const AntigravityDefaultSystem = "You are Antigravity Agent, a powerful agentic AI coding assistant designed by the Google engineering team.\nYou are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.\nThe USER will send you requests, which you must always prioritize addressing. User requests are enclosed within <USER_REQUEST> tags."
+
 // antigravityRequestBlacklist are fields Google generateContent rejects when
 // present at the request root (thinking/reasoning fields set by upstream clients).
 var antigravityRequestBlacklist = []string{
@@ -422,11 +426,11 @@ func rewriteBrandingText(text string, isSystemInstruction bool) string {
 	text = strings.ReplaceAll(text, claudeCodeIdentitySentence, antigravityIdentitySentence)
 	text = strings.ReplaceAll(text, claudeCodeIdentityPhrase, "You are Antigravity")
 	text = claudeBillingHeaderRegex.ReplaceAllString(text, "")
-	text = hermesIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
 	if isSystemInstruction {
 		// Hermes/OpenClaw sentences, headers, and identifiers are the
 		// fingerprints the backend answers with a false 429; tool
 		// descriptions carry the same text and are sanitized separately.
+		// Whole-line Hermes markers + identity run inside rewriteAntigravityFingerprints.
 		text = rewriteAntigravityFingerprints(text)
 		text = normalizeHarnessMarkers(text)
 		// Upstream applies this row to the system instruction only: the
@@ -437,6 +441,9 @@ func rewriteBrandingText(text string, isSystemInstruction bool) string {
 		// OpenClaw rewrite row: competing-client
 		// branding in the system instruction.
 		text = rewriteOpenClawBrand(text)
+	} else {
+		text = rewriteAntigravityHermesWholeLines(text)
+		text = hermesIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
 	}
 	return strings.TrimSpace(text)
 }
@@ -513,6 +520,18 @@ var AntigravityModelSynonyms = map[string]string{
 	"gemini-4-argon-high":   "gemini-4-argon-high",
 	"gemini-4-argon-medium": "gemini-4-argon-medium",
 	"gemini-4-argon-low":    "gemini-4-argon-low",
+	// Gemini 4 Hydrogen serves one backend id per tier.
+	"gemini-4-hydrogen":        "gemini-4-hydrogen-high",
+	"gemini-4-hydrogen-xhigh":  "gemini-4-hydrogen-xhigh",
+	"gemini-4-hydrogen-high":   "gemini-4-hydrogen-high",
+	"gemini-4-hydrogen-medium": "gemini-4-hydrogen-medium",
+	"gemini-4-hydrogen-low":    "gemini-4-hydrogen-low",
+	// Gemini 4 Neon serves one backend id per tier; the bare catalog id is high tier.
+	"gemini-4-neon":        "gemini-4-neon-high",
+	"gemini-4-neon-xhigh":  "gemini-4-neon-xhigh",
+	"gemini-4-neon-high":   "gemini-4-neon-high",
+	"gemini-4-neon-medium": "gemini-4-neon-medium",
+	"gemini-4-neon-low":    "gemini-4-neon-low",
 	// Upstream decolua/9router#24034f69 retired the gemini-3.5 family and
 	// gemini-3-flash; the default moved to the 3.8 medium tier.
 	"gemini-default":             "gemini-3.8-flash-medium",
@@ -549,10 +568,12 @@ var AntigravityModelSynonyms = map[string]string{
 	"gemini-3.6-flash-medium": "gemini-3.6-flash-tiered",
 	"gemini-3.6-flash-low":    "gemini-3.6-flash-tiered",
 	// Claude 5.5: bare model maps to high tier in synonyms for quota/lock lookups.
-	"claude-sonnet-5-5": "claude-sonnet-5-5-high",
-	"claude-opus-5-5":   "claude-opus-5-5-high",
-	"claude-sonnet-5.5": "claude-sonnet-5-5-high",
-	"claude-opus-5.5":   "claude-opus-5-5-high",
+	"claude-sonnet-5-5":     "claude-sonnet-5-5-high",
+	"claude-opus-5-5":       "claude-opus-5-5-high",
+	"claude-sonnet-5-5-max": "claude-sonnet-5-5-max",
+	"claude-opus-5-5-max":   "claude-opus-5-5-max",
+	"claude-sonnet-5.5":     "claude-sonnet-5-5-high",
+	"claude-opus-5.5":       "claude-opus-5-5-high",
 }
 
 // NormalizeAntigravityModel maps known aliases/synonyms to Antigravity internal backend model names.
@@ -585,15 +606,27 @@ func NormalizeAntigravityModel(model string) string {
 // live against daily-cloudcode-pa.googleapis.com on 2026-10-09.
 var antigravityUpstreamModelIDs = map[string]string{
 	// Gemini 4 Carbon serves one backend id per tier; the bare catalog id is medium tier.
-	"gemini-4-carbon":        "gemini-4-carbon-medium",
+	"gemini-4-carbon":        "gemini-4-carbon-high",
 	"gemini-4-carbon-high":   "gemini-4-carbon-high",
 	"gemini-4-carbon-medium": "gemini-4-carbon-medium",
 	"gemini-4-carbon-low":    "gemini-4-carbon-low",
 	// Gemini 4 Argon serves one backend id per tier; the bare catalog id is medium tier.
-	"gemini-4-argon":        "gemini-4-argon-medium",
+	"gemini-4-argon":        "gemini-4-argon-high",
 	"gemini-4-argon-high":   "gemini-4-argon-high",
 	"gemini-4-argon-medium": "gemini-4-argon-medium",
 	"gemini-4-argon-low":    "gemini-4-argon-low",
+	// Gemini 4 Hydrogen serves one backend id per tier; the bare catalog id is high tier.
+	"gemini-4-hydrogen":        "gemini-4-hydrogen-high",
+	"gemini-4-hydrogen-xhigh":  "gemini-4-hydrogen-xhigh",
+	"gemini-4-hydrogen-high":   "gemini-4-hydrogen-high",
+	"gemini-4-hydrogen-medium": "gemini-4-hydrogen-medium",
+	"gemini-4-hydrogen-low":    "gemini-4-hydrogen-low",
+	// Gemini 4 Neon serves one backend id per tier; the bare catalog id is high tier.
+	"gemini-4-neon":        "gemini-4-neon-high",
+	"gemini-4-neon-xhigh":  "gemini-4-neon-xhigh",
+	"gemini-4-neon-high":   "gemini-4-neon-high",
+	"gemini-4-neon-medium": "gemini-4-neon-medium",
+	"gemini-4-neon-low":    "gemini-4-neon-low",
 	// The 3.8 family serves one backend id per tier. The bare catalog id is
 	// the medium tier.
 	"gemini-3.8-flash":        "gemini-3.8-flash-medium",
@@ -614,8 +647,10 @@ var antigravityUpstreamModelIDs = map[string]string{
 	"gemini-3.1-pro-low":  "gemini-3.1-pro-low",
 	// Claude 5.5: the bare catalog id is the thinking tier, so it maps to
 	// high. The other Claude 5.5 ids are not yet served by Cloud Code.
-	"claude-sonnet-5-5":        "claude-sonnet-5-5-high",
-	"claude-opus-5-5":          "claude-opus-5-5-high",
+	"claude-sonnet-5-5":        "claude-sonnet-5-5-medium",
+	"claude-opus-5-5":          "claude-opus-5-5-medium",
+	"claude-sonnet-5-5-max":    "claude-sonnet-5-5-max",
+	"claude-opus-5-5-max":      "claude-opus-5-5-max",
 	"claude-sonnet-5-5-high":   "claude-sonnet-5-5-high",
 	"claude-sonnet-5-5-low":    "claude-sonnet-5-5-low",
 	"claude-sonnet-5-5-medium": "claude-sonnet-5-5-medium",
@@ -1036,6 +1071,32 @@ func fixAntigravityContents(req *GeminiRequest, model string) bool {
 	return false
 }
 
+// ensureAntigravityIdentity prepends the official Antigravity 2.33.0 identity to
+// systemInstruction.parts unless it is already present.
+func ensureAntigravityIdentity(req *GeminiRequest) {
+	if req == nil {
+		return
+	}
+	hasAgIdentity := false
+	if req.SystemInstruction != nil {
+		for _, part := range req.SystemInstruction.Parts {
+			if strings.Contains(part.Text, "You are Antigravity") {
+				hasAgIdentity = true
+				break
+			}
+		}
+	}
+	if !hasAgIdentity {
+		if req.SystemInstruction == nil {
+			req.SystemInstruction = &GeminiContent{
+				Role: "user",
+			}
+		}
+		identityPart := GeminiPart{Text: AntigravityDefaultSystem}
+		req.SystemInstruction.Parts = append([]GeminiPart{identityPart}, req.SystemInstruction.Parts...)
+	}
+}
+
 // WrapForAntigravity wraps a standard Gemini request in Antigravity API envelope.
 // sessionID scopes conversation and trajectory UUIDs per connection or client session.
 func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionID ...string) ([]byte, error) {
@@ -1063,6 +1124,7 @@ func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionI
 			geminiReq.SessionID = numeric
 		}
 		fixAntigravityContents(&geminiReq, modelName)
+		ensureAntigravityIdentity(&geminiReq)
 		cleanedReq := StripCompetitivePrompts(&geminiReq)
 		if len(cleanedReq.Tools) > 0 {
 			cloaked, _ := CloakAntigravityRequest(cleanedReq, "")

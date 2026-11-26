@@ -127,6 +127,10 @@
 </script>
 
 <div class="space-y-3 {classes}">
+  <div class="space-y-1">
+    <h2 class="text-sm font-bold text-text-main">Resolver check</h2>
+    <p class="text-[11px] text-text-subtle">Runs the gateway's resolver for one model id, per scope.</p>
+  </div>
   <p class="text-xs text-text-subtle">
     A key-scoped binding is invisible on the request path unless it resolves. This panel runs the
     gateway's own resolver twice for one model id — once as <span class="text-text-main">global</span>,
@@ -142,7 +146,7 @@
         aria-label="API key to resolve as"
         class="min-w-[220px] px-3 py-1.5 rounded-[10px] bg-surface-2 border border-border-subtle text-text-main text-xs outline-none focus:border-brand-500"
       >
-        <option value="">Global only (no key scope)</option>
+        <option value="">Global scope only — no key</option>
         {#each keys as k (k.id)}
           <option value={k.id}>{k.name || k.keyDisplay || k.id}</option>
         {/each}

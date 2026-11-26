@@ -26,6 +26,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "alicode-intl": "alicode-intl",
   "alims-intl": "alims-intl",
   "alitp-intl": "alitp-intl",
+  "qwencloud": "qwencloud",
   "anthropic": "anthropic",
   "antigravity": "ag",
   "agy-acp": "agcpy",
@@ -211,6 +212,11 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     { "id": "gemini-4-hydrogen-medium", "name": "Gemini 4 Hydrogen Medium" },
     { "id": "gemini-4-hydrogen-low", "name": "Gemini 4 Hydrogen Low" },
     { "id": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen" },
+    { "id": "gemini-4-neon-xhigh", "name": "Gemini 4 Neon Xhigh" },
+    { "id": "gemini-4-neon-high", "name": "Gemini 4 Neon High" },
+    { "id": "gemini-4-neon-medium", "name": "Gemini 4 Neon Medium" },
+    { "id": "gemini-4-neon-low", "name": "Gemini 4 Neon Low" },
+    { "id": "gemini-4-neon", "name": "Gemini 4 Neon" },
     { "id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash High" },
     { "id": "gemini-3.8-flash-medium", "name": "Gemini 3.8 Flash Medium" },
     { "id": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash Low" },
@@ -229,6 +235,8 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     { "id": "claude-opus-5-5-medium", "name": "Claude Opus 5 5 Medium" },
     { "id": "claude-opus-5-5-low", "name": "Claude Opus 5 5 Low" },
     { "id": "claude-opus-5-5", "name": "Claude Opus 5 5" },
+    { "id": "claude-sonnet-5-5-max", "name": "Claude Sonnet 5 5 Max" },
+    { "id": "claude-opus-5-5-max", "name": "Claude Opus 5 5 Max" },
     { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4 6" },
     { "id": "claude-opus-4-6-thinking", "name": "Claude Opus 4 6 Thinking" },
     { "id": "gpt-oss-120b-medium", "name": "GPT-OSS 120B Medium" },
@@ -466,7 +474,7 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-4-carbon",
       "name": "Gemini 4 Carbon",
-      "upstreamModelId": "gemini-4-carbon-medium(medium)"
+      "upstreamModelId": "gemini-4-carbon-high(high)"
     },
     {
       "id": "gemini-4-argon-high",
@@ -486,7 +494,7 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-4-argon",
       "name": "Gemini 4 Argon",
-      "upstreamModelId": "gemini-4-argon-medium(medium)"
+      "upstreamModelId": "gemini-4-argon-high(high)"
     },
     {
       "id": "gemini-4-hydrogen-xhigh",
@@ -511,7 +519,32 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-4-hydrogen",
       "name": "Gemini 4 Hydrogen",
-      "upstreamModelId": "gemini-4-hydrogen-medium(medium)"
+      "upstreamModelId": "gemini-4-hydrogen-high(high)"
+    },
+    {
+      "id": "gemini-4-neon-xhigh",
+      "name": "Gemini 4 Neon (XHigh)",
+      "upstreamModelId": "gemini-4-neon-xhigh(xhigh)"
+    },
+    {
+      "id": "gemini-4-neon-high",
+      "name": "Gemini 4 Neon (High)",
+      "upstreamModelId": "gemini-4-neon-high(high)"
+    },
+    {
+      "id": "gemini-4-neon-medium",
+      "name": "Gemini 4 Neon (Medium)",
+      "upstreamModelId": "gemini-4-neon-medium(medium)"
+    },
+    {
+      "id": "gemini-4-neon-low",
+      "name": "Gemini 4 Neon (Low)",
+      "upstreamModelId": "gemini-4-neon-low(low)"
+    },
+    {
+      "id": "gemini-4-neon",
+      "name": "Gemini 4 Neon",
+      "upstreamModelId": "gemini-4-neon-high(high)"
     },
     {
       "id": "gemini-3.8-flash-high",
@@ -593,7 +626,7 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "claude-sonnet-5-5",
       "name": "Claude Sonnet 5.5 (Thinking)",
-      "upstreamModelId": "claude-sonnet-5-5-high(high)"
+      "upstreamModelId": "claude-sonnet-5-5-medium(medium)"
     },
     {
       "id": "claude-opus-5-5-high",
@@ -613,7 +646,17 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "claude-opus-5-5",
       "name": "Claude Opus 5.5 (Thinking)",
-      "upstreamModelId": "claude-opus-5-5-high(high)"
+      "upstreamModelId": "claude-opus-5-5-medium(medium)"
+    },
+    {
+      "id": "claude-sonnet-5-5-max",
+      "name": "Claude Sonnet 5.5 (Max)",
+      "upstreamModelId": "claude-sonnet-5-5-max(max)"
+    },
+    {
+      "id": "claude-opus-5-5-max",
+      "name": "Claude Opus 5.5 (Max)",
+      "upstreamModelId": "claude-opus-5-5-max(max)"
     },
     {
       "id": "claude-sonnet-4-6",
@@ -976,11 +1019,27 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Qwen3.7 Plus (ClinePass)"
     }
   ],
-  "cloudflare-ai": [
+  "cloudflare-ai":   [
+    {
+      "id": "@cf/cloudflare/clef",
+      "name": "Clef",
+      "kind": "systemone"
+    },
+    {
+      "id": "@cf/cloudflare/clef-omni",
+      "name": "Clef Omni",
+      "kind": "systemone"
+    },
     {
       "id": "@cf/cloudflare/clef-flash",
       "name": "Clef Flash",
       "kind": "systemone"
+    },
+    {
+      "id": "@cf/cloudflare/clairic",
+      "name": "Clairic",
+      "kind": "systemone",
+      "payloadShape": "fields"
     },
     {
       "id": "@cf/cloudflare/clef",
@@ -1013,32 +1072,16 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Mistral Small 3.1 24B Instruct"
     },
     {
-      "id": "@cf/meta/llama-3.1-70b-instruct-fp8-fast",
-      "name": "Llama 3.1 70B Instruct FP8 Fast"
-    },
-    {
       "id": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
       "name": "Llama 3.3 70B Instruct FP8 Fast"
-    },
-    {
-      "id": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
-      "name": "DeepSeek R1 Distill Qwen 32B"
     },
     {
       "id": "@cf/moonshotai/kimi-k2.5",
       "name": "Kimi K2.5"
     },
     {
-      "id": "@cf/moonshotai/kimi-k2.6",
-      "name": "Kimi K2.6"
-    },
-    {
       "id": "@cf/zai-org/glm-4.7-flash",
       "name": "GLM 4.7 Flash"
-    },
-    {
-      "id": "@cf/qwen/qwq-32b",
-      "name": "QwQ 32B"
     },
     {
       "id": "@cf/qwen/qwen2.5-coder-32b-instruct",
@@ -1147,51 +1190,32 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "kind": "image"
     },
     {
-      "id": "@cf/bytedance/stable-diffusion-xl-lightning",
-      "name": "SDXL Lightning",
-      "params": [
-        "size"
-      ],
-      "kind": "image"
+      "id": "@cf/meta/llama-4-scout-17b-16e-instruct",
+      "name": "Llama 4 Scout 17B 16E Instruct"
     },
     {
-      "id": "@cf/lykon/dreamshaper-8-lcm",
-      "name": "DreamShaper 8 LCM",
-      "params": [
-        "size"
-      ],
-      "kind": "image"
+      "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+      "name": "DeepSeek V4.1 Flash"
     },
     {
-      "id": "@cf/runwayml/stable-diffusion-v1-5-img2img",
-      "name": "Stable Diffusion v1.5 Img2Img",
-      "params": [
-        "size"
-      ],
-      "capabilities": [
-        "edit"
-      ],
-      "kind": "image"
+      "id": "@cf/google/gemma-4-26b-a4b-it",
+      "name": "Gemma 4 26B A4B IT"
     },
     {
-      "id": "@cf/runwayml/stable-diffusion-v1-5-inpainting",
-      "name": "Stable Diffusion v1.5 Inpainting",
-      "params": [
-        "size"
-      ],
-      "capabilities": [
-        "edit",
-        "mask"
-      ],
-      "kind": "image"
+      "id": "@cf/zai-org/glm-5.3",
+      "name": "GLM 5.3"
     },
     {
-      "id": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
-      "name": "SDXL Base 1.0",
-      "params": [
-        "size"
-      ],
-      "kind": "image"
+      "id": "@cf/openai/gpt-oss-120b",
+      "name": "GPT OSS 120B"
+    },
+    {
+      "id": "@cf/openai/gpt-oss-20b",
+      "name": "GPT OSS 20B"
+    },
+    {
+      "id": "@cf/qwen/qwen3.8-27b",
+      "name": "Qwen 3.8 27B"
     }
   ],
   "cbcn": [
@@ -1256,6 +1280,25 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "transcribe",
       "name": "Codex Transcription"
+    },
+    {
+      "id": "gpt-6.2-sol",
+      "name": "GPT 6.2 Sol",
+      "upstreamModelId": "gpt-6.2-sol"
+    },
+    {
+      "id": "gpt-6.2-sol[1m]",
+      "name": "GPT 6.2 Sol (extended context)",
+      "upstreamModelId": "gpt-6.2-sol"
+    },
+    {
+      "id": "gpt-6.2-astra",
+      "name": "GPT 6.2 Astra"
+    },
+    {
+      "id": "gpt-6.2-astra[1m]",
+      "name": "GPT 6.2 Astra (extended context)",
+      "upstreamModelId": "gpt-6.2-astra"
     },
     {
       "id": "gpt-6.1-sol",
@@ -3720,6 +3763,18 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Kimi K3 (Code)"
     },
     {
+      "id": "k3.1-pro",
+      "name": "Kimi K3.1 Pro (Code)"
+    },
+    {
+      "id": "k3.1-pro-highspeed",
+      "name": "Kimi K3.1 Pro Highspeed (Code)"
+    },
+    {
+      "id": "kimi-k3.1-pro",
+      "name": "Kimi K3.1 Pro"
+    },
+    {
       "id": "kimi-for-coding",
       "name": "Kimi for Coding"
     },
@@ -4413,8 +4468,64 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Nemotron 3 Ultra"
     },
     {
-      "id": "nvidia/nv-embedqa-e5-v5",
-      "name": "NV EmbedQA E5 v5",
+      "id": "nvidia/nemotron-3.5-embed-8b",
+      "name": "Nemotron 3.5 Embed 8B",
+      "params": [
+        "input_type"
+      ],
+      "kind": "embedding"
+    },
+    {
+      "id": "nvidia/nemotron-3.5-embed-1b",
+      "name": "Nemotron 3.5 Embed 1B",
+      "params": [
+        "input_type"
+      ],
+      "kind": "embedding"
+    },
+    {
+      "id": "nvidia/nemotron-3-embed-1b",
+      "name": "Nemotron 3 Embed 1B",
+      "params": [
+        "input_type"
+      ],
+      "kind": "embedding"
+    },
+    {
+      "id": "nvidia/nv-embedqa-mistral-7b-v2",
+      "name": "NV EmbedQA Mistral 7B v2",
+      "params": [
+        "input_type"
+      ],
+      "kind": "embedding"
+    },
+    {
+      "id": "nvidia/embed-qa-4",
+      "name": "Embed QA 4",
+      "params": [
+        "input_type"
+      ],
+      "kind": "embedding"
+    },
+    {
+      "id": "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1",
+      "name": "Llama 3.2 Nemoretriever 1B VLM Embed v1",
+      "params": [
+        "input_type"
+      ],
+      "kind": "embedding"
+    },
+    {
+      "id": "nvidia/llama-3.2-nv-embedqa-1b-v1",
+      "name": "Llama 3.2 NV EmbedQA 1B v1",
+      "params": [
+        "input_type"
+      ],
+      "kind": "embedding"
+    },
+    {
+      "id": "nvidia/nvclip",
+      "name": "NVCLIP",
       "kind": "embedding"
     },
     {
@@ -4961,7 +5072,54 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Jev 1.13 Free",
       "kind": "systemone"
     },
-  ],
+    {
+      "id": "longcat-2.5-free",
+      "name": "longcat-2.5-free",
+      "supportedFormats": ["openai"],
+      "capabilities": ["reasoning"]
+    },
+    {
+      "id": "iceman-free",
+      "name": "iceman-free",
+      "supportedFormats": ["openai"],
+      "capabilities": ["reasoning"]
+    },
+    {
+      "id": "inkling-2-small-free",
+      "name": "inkling-2-small-free",
+      "supportedFormats": ["openai"],
+      "capabilities": ["reasoning"]
+    },
+    {
+      "id": "beam-free",
+      "name": "beam-free",
+      "supportedFormats": ["openai"],
+      "capabilities": ["reasoning"]
+    },
+    {
+      "id": "flint-40b-free",
+      "name": "flint-40b-free",
+      "supportedFormats": ["openai"],
+      "capabilities": ["reasoning"]
+    },
+    {
+      "id": "nemotron-3.5-super-vl-free",
+      "name": "nemotron-3.5-super-vl-free",
+      "supportedFormats": ["openai"],
+      "capabilities": ["reasoning"]
+    },
+    {
+      "id": "hy4-flash-free",
+      "name": "hy4-flash-free",
+      "supportedFormats": ["openai"],
+      "capabilities": ["reasoning"]
+    },
+    {
+      "id": "tidepool-alpha-free",
+      "name": "tidepool-alpha-free",
+      "supportedFormats": ["openai"],
+      "capabilities": ["reasoning"]
+    }],
   "ocz": [
     {
       "id": "claude-fable-5",
@@ -7487,30 +7645,39 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     }
   ],
   "alitp-intl": [
-    {
-      "id": "qwen3.8-max-preview",
-      "name": "Qwen3.8 Max Preview"
-    },
-    {
-      "id": "qwen3.7-max",
-      "name": "Qwen3.7 Max"
-    },
-    {
-      "id": "qwen3.7-plus",
-      "name": "Qwen3.7 Plus"
-    },
-    {
-      "id": "qwen3.6-flash",
-      "name": "Qwen3.6 Flash"
-    },
-    {
-      "id": "glm-5.2",
-      "name": "GLM 5.2"
-    },
-    {
-      "id": "deepseek-v4-pro",
-      "name": "DeepSeek V4 Pro"
-    }
+    {"id": "auto", "name": "Auto"},
+    {"id": "qwen4-max", "name": "Qwen4 Max"},
+    {"id": "qwen4-max-preview", "name": "Qwen4 Max Preview"},
+    {"id": "qwen3.8-max", "name": "Qwen3.8 Max"},
+    {"id": "qwen3.8-max-preview", "name": "Qwen3.8 Max Preview"},
+    {"id": "qwen3.8-flash", "name": "Qwen3.8 Flash"},
+    {"id": "qwen3.7-max", "name": "Qwen3.7 Max"},
+    {"id": "qwen3.7-plus", "name": "Qwen3.7 Plus"},
+    {"id": "qwen3.6-flash", "name": "Qwen3.6 Flash"},
+    {"id": "glm-5.3", "name": "GLM 5.3"},
+    {"id": "glm-5.2", "name": "GLM 5.2"},
+    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
+    {"id": "deepseek-v4-pro-0813", "name": "DeepSeek V4 Pro 0813"},
+    {"id": "deepseek-v4-flash-0731", "name": "DeepSeek V4 Flash 0731"},
+    {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash"},
+    {"id": "deepseek-v4.1-flash-1017", "name": "DeepSeek V4.1 Flash 1017"}
+  ],
+  "qwencloud": [
+    {"id": "auto", "name": "Auto"},
+    {"id": "qwen4-max", "name": "Qwen4 Max"},
+    {"id": "qwen4-max-preview", "name": "Qwen4 Max Preview"},
+    {"id": "qwen3.8-max", "name": "Qwen3.8 Max"},
+    {"id": "qwen3.8-flash", "name": "Qwen3.8 Flash"},
+    {"id": "qwen3.7-max", "name": "Qwen3.7 Max"},
+    {"id": "qwen3.7-plus", "name": "Qwen3.7 Plus"},
+    {"id": "qwen3.6-flash", "name": "Qwen3.6 Flash"},
+    {"id": "glm-5.3", "name": "GLM 5.3"},
+    {"id": "glm-5.2", "name": "GLM 5.2"},
+    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
+    {"id": "deepseek-v4-pro-0813", "name": "DeepSeek V4 Pro 0813"},
+    {"id": "deepseek-v4-flash-0731", "name": "DeepSeek V4 Flash 0731"},
+    {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash"},
+    {"id": "deepseek-v4.1-flash-1017", "name": "DeepSeek V4.1 Flash 1017"}
   ],
   "openai-tts-models": [
     {
@@ -7682,13 +7849,33 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
   ],
   "elevenlabs": [
     {
+      "id": "eleven_v4",
+      "name": "Eleven v4",
+      "kind": "tts"
+    },
+    {
+      "id": "eleven_v4_turbo",
+      "name": "Eleven v4 Turbo",
+      "kind": "tts"
+    },
+    {
+      "id": "eleven_flash_v2_5",
+      "name": "Eleven Flash v2.5",
+      "kind": "tts"
+    },
+    {
+      "id": "eleven_flash_v2",
+      "name": "Eleven Flash v2",
+      "kind": "tts"
+    },
+    {
       "id": "eleven_multilingual_v2",
       "name": "Eleven Multilingual v2",
       "kind": "tts"
     },
     {
-      "id": "eleven_turbo_v2_5",
-      "name": "Eleven Turbo v2.5",
+      "id": "eleven_v3",
+      "name": "Eleven v3",
       "kind": "tts"
     },
     {
@@ -7716,27 +7903,50 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
         "num_speakers"
       ],
       "kind": "stt"
+    },
+    {
+      "id": "scribe_v3",
+      "name": "Scribe v3",
+      "params": [
+        "language",
+        "response_format",
+        "timestamps_granularity",
+        "tag_audio_events",
+        "diarize",
+        "num_speakers"
+      ],
+      "kind": "stt"
     }
   ],
   "elevenlabs-tts-models": [
     {
-      "id": "eleven_flash_v2_5",
-      "name": "Flash v2.5 (Fastest)",
+      "id": "eleven_v4",
+      "name": "Eleven v4 (Best quality)",
       "type": "tts"
     },
     {
-      "id": "eleven_turbo_v2_5",
-      "name": "Turbo v2.5 (Fast)",
+      "id": "eleven_v4_turbo",
+      "name": "Eleven v4 Turbo (Realtime)",
+      "type": "tts"
+    },
+    {
+      "id": "eleven_flash_v2_5",
+      "name": "Flash v2.5 (Fastest, cheap)",
+      "type": "tts"
+    },
+    {
+      "id": "eleven_flash_v2",
+      "name": "Flash v2 (English)",
       "type": "tts"
     },
     {
       "id": "eleven_multilingual_v2",
-      "name": "Multilingual v2 (Quality)",
+      "name": "Multilingual v2 (Stable)",
       "type": "tts"
     },
     {
-      "id": "eleven_monolingual_v1",
-      "name": "Monolingual v1 (English)",
+      "id": "eleven_v3",
+      "name": "Eleven v3 (Previous gen)",
       "type": "tts"
     }
   ],
