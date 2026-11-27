@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"9router/proxy/internal/providers"
 )
 
 func init() {
@@ -93,9 +95,11 @@ func refreshNous(ctx context.Context, p *Params) (*TokenResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nous: token refresh: %w", err)
 	}
-	defer tok.Body.Close()
-	if tok.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("nous: token refresh returned %s", tok.Status)
+	defer func() { _ = tok.Body.Close() }()
+
+	if tok.StatusCode < 200 || tok.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(tok.Body, maxRefreshBodyBytes))
+		return nil, fmt.Errorf("nous: %w", &providers.OAuthRefreshError{Status: tok.StatusCode, Body: truncateBody(body)})
 	}
 	var parsed nousTokenPayload
 	if err := json.NewDecoder(tok.Body).Decode(&parsed); err != nil {

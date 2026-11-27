@@ -328,7 +328,7 @@ func qwenWebRefreshToken(ctx context.Context, client *http.Client, req *Request,
 	if err != nil {
 		return nil
 	}
-	if err := repo.UpdateConnectionData(req.ConnectionID, string(encoded)); err != nil {
+	if err := repo.UpdateConnectionData(ctx, req.ConnectionID, string(encoded)); err != nil {
 		log.Debug("qw-web", "minted a fresh token but storing it failed", "error", err)
 	}
 	return nil

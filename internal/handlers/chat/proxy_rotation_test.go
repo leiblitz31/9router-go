@@ -207,11 +207,11 @@ func TestResolveProviderProxyPoolID_AllPoolsExcludedFallsThrough(t *testing.T) {
 	if got := h.ResolveProviderProxyPoolID("opencode", excluded); got != "" {
 		t.Fatalf("pool = %q, want empty (direct attempt instead of a hard failure)", got)
 	}
-	if _, err := h.resolveProviderProxyPoolID("opencode", excluded); !errors.Is(err, errNoUsablePool) {
+	if _, err := h.resolveProviderProxyPoolID(context.Background(), "opencode", excluded); !errors.Is(err, errNoUsablePool) {
 		t.Fatalf("err = %v, want errNoUsablePool", err)
 	}
 	connData := &ConnectionData{}
-	h.applyProviderProxyPool(connData, "opencode", excluded)
+	h.applyProviderProxyPool(context.Background(), connData, "opencode", excluded)
 	if connData.ProxyPoolID != "" {
 		t.Fatalf("bound pool = %q, want empty once every pool is excluded", connData.ProxyPoolID)
 	}
@@ -265,7 +265,7 @@ func TestComboLockRetryable_OpencodeFreeUsageLimitDoesNotLock(t *testing.T) {
 		Body:       []byte(`{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go"}}`),
 	})
 
-	if locked, _ := repo.IsConnectionModelLocked("conn-open", "deepseek-v4.1-flash-free"); locked {
+	if locked, _ := repo.IsConnectionModelLocked(context.Background(), "conn-open", "deepseek-v4.1-flash-free"); locked {
 		t.Error("expected the free-tier 429 to NOT lock the model")
 	}
 	var rawData string
